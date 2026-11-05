@@ -12,11 +12,15 @@ struct AgentDefinition: Identifiable, Hashable {
     var path: String? = nil
 
     /// The command line inside the login shell. Never adds permission-bypass flags.
+    /// Claude Code gets `--settings` with hantuu's status hooks, and Codex gets `-c` overrides
+    /// for notify and its OSC 9 notifications (see Status/AgentHooks.swift).
     func launchArguments(sessionID: String?) -> [String] {
         switch id {
         case "claude":
-            if let sessionID { return ["claude", "--session-id", sessionID] }
-            return ["claude"]
+            if let sessionID { return ["claude", "--session-id", sessionID] + AgentHooks.claudeArguments }
+            return ["claude"] + AgentHooks.claudeArguments
+        case "codex":
+            return ["codex"] + AgentHooks.codexArguments()
         default:
             return [id]
         }
@@ -24,8 +28,8 @@ struct AgentDefinition: Identifiable, Hashable {
 
     func resumeArguments(sessionID: String) -> [String]? {
         switch id {
-        case "claude": return ["claude", "--resume", sessionID]
-        case "codex": return ["codex", "resume", sessionID]
+        case "claude": return ["claude", "--resume", sessionID] + AgentHooks.claudeArguments
+        case "codex": return ["codex", "resume"] + AgentHooks.codexArguments() + [sessionID]
         default: return nil
         }
     }
