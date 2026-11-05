@@ -100,8 +100,11 @@ enum LoginShell {
     /// interactive shell: the same environment you get in a Ghostty window.
     /// It clears the screen first, so a chat opens on the agent rather than on login(1)'s
     /// "Last login" line.
-    static func surfaceCommand(_ argv: [String]) -> String {
-        let inner = "printf '\\033[H\\033[2J'; exec " + argv.map(ShellEscape.quote).joined(separator: " ")
+    /// With a `session`, the agent runs inside hantuu-session, which keeps it alive after the
+    /// app quits. The helper inherits the login shell's environment and hands it to the agent.
+    static func surfaceCommand(_ argv: [String], session: SessionLaunch? = nil) -> String {
+        let command = session?.arguments(wrapping: argv) ?? argv
+        let inner = "printf '\\033[H\\033[2J'; exec " + command.map(ShellEscape.quote).joined(separator: " ")
         return "\(ShellEscape.quote(path)) -l -i -c \(ShellEscape.quote(inner))"
     }
 

@@ -111,6 +111,7 @@ struct ProjectSection: View {
                 Button(a.name) { model.newChat(agentID: a.id, projectID: project.id) }
             }
         }
+        WorktreeMenuItem(project: project)
         Button("New Terminal") {
             model.selectedProjectID = project.id
             model.newTerminalTab()
@@ -274,6 +275,7 @@ struct AgentPicker: View {
                     model.newChat(agentID: agent.id, projectID: projectID)
                 }
             }
+            WorktreeToggleRow(projectID: projectID)
         }
         .padding(.vertical, 4)
         .padding(.horizontal, 10)

@@ -36,6 +36,9 @@ final class Chat: ObservableObject, Identifiable {
     /// "Needs you" notices raised by the terminal (permission prompts, waiting for input).
     var liveEntries: [ReaderEntry] = []
     var discoveryTimer: Timer?
+    /// Set when the chat runs in its own git worktree (Sessions/Worktrees.swift).
+    @Published var worktree: WorktreeInfo?
+    var worktreePath: String? { worktree?.directory }
 
     init(id: UUID = UUID(), projectID: UUID, agentID: String, createdAt: Date = Date()) {
         self.id = id
@@ -97,6 +100,7 @@ private struct SavedChat: Codable {
     var firstPrompt: String?
     var transcriptPath: String?
     var createdAt: Date
+    var worktree: WorktreeInfo?
 }
 
 private struct SavedState: Codable {
@@ -185,6 +189,7 @@ final class AppModel: ObservableObject, TerminalEvents {
                 c.firstPrompt = sc.firstPrompt
                 c.status = .ended
                 c.transcriptPath = sc.transcriptPath
+                c.worktree = sc.worktree
                 if let p = sc.transcriptPath, FileManager.default.fileExists(atPath: p), let kind = c.agent.transcript {
                     attachFollower(c, url: URL(fileURLWithPath: p), kind: kind, live: false)
                 }
@@ -192,6 +197,8 @@ final class AppModel: ObservableObject, TerminalEvents {
             }
         }
         selectedProjectID = projects.first?.id
+        // Agents that kept running in hantuu-session while the app was closed reattach.
+        restoreSessions()
         keepAwake.refresh()
         detectAgents()
 
@@ -251,7 +258,7 @@ final class AppModel: ObservableObject, TerminalEvents {
         s.chats = chats.map {
             SavedChat(id: $0.id, projectID: $0.projectID, agentID: $0.agentID, sessionID: $0.sessionID,
                       title: $0.terminalTitle, firstPrompt: $0.firstPrompt, transcriptPath: $0.transcriptPath,
-                      createdAt: $0.createdAt)
+                      createdAt: $0.createdAt, worktree: $0.worktree)
         }
         s.defaultAgentID = defaultAgentID
         s.sidebarVisible = sidebarVisible
@@ -320,6 +327,11 @@ final class AppModel: ObservableObject, TerminalEvents {
     // MARK: Chats
 
     func newChat(agentID: String?, projectID: UUID?) {
+        newChat(agentID: agentID, projectID: projectID, worktree: nil)
+    }
+
+    /// `worktree` nil follows the project's "In a new worktree" switch.
+    func newChat(agentID: String?, projectID: UUID?, worktree: Bool?) {
         let project: Project
         if let id = projectID, let p = self.project(id) {
             project = p
@@ -335,6 +347,24 @@ final class AppModel: ObservableObject, TerminalEvents {
         let chat = Chat(projectID: project.id, agentID: def.id)
         // Claude Code gets a known session id so its transcript file is known up front.
         if def.id == "claude" { chat.sessionID = UUID().uuidString.lowercased() }
+        let settings = SessionSettings.shared
+        if worktree == true || (worktree == nil && settings.usesWorktree(project.id) && settings.isGitRepo(project.id)) {
+            // Making the worktree can take a moment in a big repo, so the chat appears once it's ready.
+            Worktrees.createAsync(projectPath: project.path, chatID: chat.id) { [weak self] result in
+                switch result {
+                case .success(let wt):
+                    chat.worktree = wt
+                    self?.start(chat, def: def, in: project)
+                case .failure(let error):
+                    WorktreePrompt.showCreateFailed(error, project: project.name)
+                }
+            }
+            return
+        }
+        start(chat, def: def, in: project)
+    }
+
+    private func start(_ chat: Chat, def: AgentDefinition, in project: Project) {
         launch(chat, argv: def.launchArguments(sessionID: chat.sessionID), in: project)
         if let i = projects.firstIndex(where: { $0.id == project.id }) { projects[i].expanded = true }
         chats.append(chat)
@@ -343,9 +373,11 @@ final class AppModel: ObservableObject, TerminalEvents {
 
     private func launch(_ chat: Chat, argv: [String], in project: Project) {
         guard let g = GhosttyApp.shared else { return }
-        let cmd = LoginShell.surfaceCommand(argv)
-        Log.write("launch chat=\(chat.id) cwd=\(project.path) cmd=\(cmd)")
-        let tv = TerminalView(app: g.app, launch: .init(workingDirectory: project.path, command: cmd,
+        let cwd = workingDirectory(of: chat)
+        // The agent runs inside hantuu-session, so it outlives the app (Sessions/).
+        let cmd = LoginShell.surfaceCommand(argv, session: SessionLaunch(chatID: chat.id, mode: .create(cwd: cwd)))
+        Log.write("launch chat=\(chat.id) cwd=\(cwd) cmd=\(cmd)")
+        let tv = TerminalView(app: g.app, launch: .init(workingDirectory: cwd, command: cmd,
                                                          environment: ["HANTUU_CHAT_ID": chat.id.uuidString]),
                               handlesChildExit: true)
         tv.events = self
@@ -354,11 +386,44 @@ final class AppModel: ObservableObject, TerminalEvents {
         chat.exitCode = nil
         chat.startedAt = Date()
         terminalsChanged.send()
-        beginTranscriptDiscovery(chat, cwd: project.path)
+        beginTranscriptDiscovery(chat, cwd: cwd)
+    }
+
+    /// Reconnects a chat to its agent, which kept running in hantuu-session. The session
+    /// replays recent output and nudges the agent to redraw.
+    func reattach(_ chat: Chat, startedAt: Date? = nil) {
+        guard let g = GhosttyApp.shared else { return }
+        let cwd = workingDirectory(of: chat)
+        let cmd = LoginShell.surfaceCommand([], session: SessionLaunch(chatID: chat.id, mode: .attach))
+        Log.write("reattach chat=\(chat.id) cmd=\(cmd)")
+        let tv = TerminalView(app: g.app, launch: .init(workingDirectory: cwd, command: cmd,
+                                                         environment: ["HANTUU_CHAT_ID": chat.id.uuidString]),
+                              handlesChildExit: true)
+        tv.events = self
+        chat.terminal = tv
+        chat.status = .running
+        chat.exitCode = nil
+        chat.startedAt = startedAt ?? Date()
+        terminalsChanged.send()
+        // Same agent process, so its transcript keeps growing where it was.
+        if let f = chat.follower { f.start() } else { beginTranscriptDiscovery(chat, cwd: cwd) }
     }
 
     func resume(_ chat: Chat) {
         guard let project = project(chat.projectID) else { return }
+        // Only the terminal was lost (the agent is still in its session): reconnect to it.
+        if SessionHelper.isAlive(chat.id) {
+            chat.terminal?.destroy()
+            chat.terminal = nil
+            reattach(chat)
+            readerReload.send(chat.id)
+            select(chat.id)
+            return
+        }
+        if let wt = chat.worktree, !FileManager.default.fileExists(atPath: wt.directory) {
+            WorktreePrompt.showMissing(wt)
+            return
+        }
         let def = chat.agent
         let argv: [String]
         if let sid = chat.sessionID, let r = def.resumeArguments(sessionID: sid) {
@@ -396,7 +461,12 @@ final class AppModel: ObservableObject, TerminalEvents {
     }
 
     func closeChat(_ chat: Chat) {
-        if chat.status != .ended, let t = chat.terminal, !t.processExited {
+        let running = chat.status != .ended && chat.terminal.map { !$0.processExited } == true
+        var choice = WorktreePrompt.CloseChoice.keepWorktree
+        if let wt = chat.worktree {
+            choice = WorktreePrompt.confirmClose(agentName: chat.agent.name, worktree: wt, running: running)
+            if choice == .cancel { return }
+        } else if running {
             let a = NSAlert()
             a.messageText = "Close this chat?"
             a.informativeText = "\(chat.agent.name) is still running. Closing the chat stops it. The transcript stays on disk."
@@ -406,7 +476,12 @@ final class AppModel: ObservableObject, TerminalEvents {
         }
         let ordered = projects.flatMap { p in chats.filter { $0.projectID == p.id } }
         let idx = ordered.firstIndex(where: { $0.id == chat.id })
-        teardown(chat)
+        if case .deleteWorktree(let force) = choice, let wt = chat.worktree {
+            // Once the agent has stopped, so nothing is still writing into the worktree.
+            teardown(chat) { WorktreePrompt.report(Worktrees.remove(wt, force: force), wt) }
+        } else {
+            teardown(chat)
+        }
         chats.removeAll { $0.id == chat.id }
         if selectedChatID == chat.id {
             let rest = projects.flatMap { p in chats.filter { $0.projectID == p.id } }
@@ -415,11 +490,13 @@ final class AppModel: ObservableObject, TerminalEvents {
         terminalsChanged.send()
     }
 
-    private func teardown(_ chat: Chat) {
+    private func teardown(_ chat: Chat, then: (() -> Void)? = nil) {
         chat.discoveryTimer?.invalidate()
         chat.follower?.stop()
         chat.terminal?.destroy()
         chat.terminal = nil
+        // The agent lives in its session rather than in the terminal, so stop it there.
+        SessionHelper.kill(chat.id, then: then)
     }
 
     /// Cmd-W: the focused panel tab if a panel terminal or the code viewer has focus,
@@ -473,7 +550,7 @@ final class AppModel: ObservableObject, TerminalEvents {
     }
 
     private func attachFollower(_ chat: Chat, url: URL, kind: TranscriptKind, live: Bool) {
-        let base = project(chat.projectID)?.path
+        let base = workingDirectory(of: chat)
         let f = TranscriptFollower(url: url, kind: kind, baseDir: base)
         f.onAppend = { [weak self, weak chat] fresh in
             guard let self, let chat else { return }

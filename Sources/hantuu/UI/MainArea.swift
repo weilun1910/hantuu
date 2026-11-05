@@ -152,6 +152,7 @@ struct ChatTitle: View {
             if let p = model.project(chat.projectID) {
                 Text(p.name).font(.system(size: 12)).foregroundStyle(Color.hTertiary).lineLimit(1)
             }
+            WorktreeBranchLabel(chat: chat).font(.system(size: 12)).foregroundStyle(Color.hTertiary)
             Text(chat.agent.name).font(.system(size: 12)).foregroundStyle(Color.hTertiary).lineLimit(1)
         }
         .allowsHitTesting(false)
