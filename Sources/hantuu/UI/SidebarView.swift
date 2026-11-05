@@ -142,7 +142,13 @@ struct ChatRow: View {
                     .lineLimit(1)
                     .truncationMode(.tail)
                 // What the agent is doing: "Wants to run Bash: npm test", "Done 2m ago".
-                ActivityDetailText(chat: chat)
+                // A worktree chat's branch comes first (Sessions/).
+                HStack(spacing: 6) {
+                    WorktreeBranchLabel(chat: chat)
+                        .font(.system(size: 11))
+                        .foregroundStyle(Color.hTertiary)
+                    ActivityDetailText(chat: chat)
+                }
             }
             Spacer(minLength: 0)
             if let index, index < 9, hovering || selected {

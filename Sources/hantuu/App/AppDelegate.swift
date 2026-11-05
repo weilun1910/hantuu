@@ -229,7 +229,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc func showSettings() {
         if settingsWindow == nil {
-            let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 520, height: 420),
+            let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 560, height: 660),
                              styleMask: [.titled, .closable], backing: .buffered, defer: false)
             w.title = "Settings"
             w.isReleasedWhenClosed = false

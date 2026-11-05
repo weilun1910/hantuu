@@ -117,8 +117,8 @@ struct OverviewCards: View {
                     }
                     Spacer(minLength: 6)
                     HStack(spacing: 6) {
-                        StatusDot(status: chat.status)
-                        Text(chat.status.label).font(.system(size: 11.5)).foregroundStyle(Color.hTertiary)
+                        ActivityDot(activity: chat.activity)
+                        Text(chat.activity.label).font(.system(size: 11.5)).foregroundStyle(Color.hTertiary)
                     }
                 }
                 .padding(.bottom, 2)
