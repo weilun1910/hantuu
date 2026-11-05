@@ -37,7 +37,10 @@ extension SelfTest {
         let a = Chat(projectID: p.id, agentID: "claude")
         let b = Chat(projectID: p.id, agentID: "codex")
         let other = Chat(projectID: p.id, agentID: "gemini")
-        check("reader mode: off by default, so chats show their terminal", !s.showChatsAsReader && s.face(for: a) == .terminal && !FileManager.default.fileExists(atPath: file.path))
+        check("reader mode: on by default, so chats show the reader", s.showChatsAsReader && s.face(for: a) == .reader && !FileManager.default.fileExists(atPath: file.path))
+        s.showChatsAsReader = false
+        check("reader mode: turned off, chats show their terminal", s.face(for: a) == .terminal && s.face(for: b) == .terminal)
+        check("reader mode: turning it off survives a relaunch", !ChatSettings(file: file).showChatsAsReader)
 
         s.showChatsAsReader = true
         let stored = (try? JSONSerialization.jsonObject(with: Data(contentsOf: file))) as? [String: Any]
