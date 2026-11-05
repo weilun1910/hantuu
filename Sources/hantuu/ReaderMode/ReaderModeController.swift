@@ -30,6 +30,11 @@ final class ReaderModeController: NSObject {
     private var shownChatID: UUID?
     private var drafts: [UUID: String] = [:]
     private var calmChecks = 0
+    /// When Stop was pressed, per chat. Claude Code doesn't always report a stopped turn (an
+    /// Esc before any output leaves no transcript line and fires no hook), so its status can
+    /// stay Working. Once the screen shows the turn has stopped, reader mode believes the
+    /// screen.
+    private var stoppedAt: [UUID: Date] = [:]
     private var timer: Timer?
     private var chatSubs = Set<AnyCancellable>()
     private var bag = Set<AnyCancellable>()
@@ -229,11 +234,19 @@ final class ReaderModeController: NSObject {
     func refresh() {
         guard let chat = model.selectedChat, chat.id == shownChatID else { return }
         let live = isLive(chat)
-        var menu: ScreenMenu?
+        var screen = TerminalScreen.State()
         if live, let t = chat.terminal, mode.face(of: chat) == .reader {
-            let (ready, m) = TerminalScreen.analyze(t.activeScreenText())
-            if ready { readyChats.insert(chat.id) }
-            menu = m
+            screen = TerminalScreen.analyze(t.activeScreenText())
+            if screen.ready { readyChats.insert(chat.id) }
+        }
+        var activity = chat.activity
+        if let at = stoppedAt[chat.id] {
+            if activity != .working || (screen.busy && Date().timeIntervalSince(at) > 3) {
+                // The status caught up, or the agent carried on after all.
+                stoppedAt[chat.id] = nil
+            } else if !screen.busy && screen.ready {
+                activity = .idle
+            }
         }
         let st = statusProvider(chat)
         if st?.structured == true { readyChats.insert(chat.id) }
@@ -241,9 +254,9 @@ final class ReaderModeController: NSObject {
         let ready = readyChats.contains(chat.id) || chat.agent.transcript == nil
         let input = ComposerMode.Input(
             agentName: chat.agent.name, ended: chat.status == .ended, live: live,
-            activity: chat.activity, detail: chat.activityDetail,
+            activity: activity, detail: chat.activityDetail,
             waiting: st.map { !$0.waits.isEmpty } ?? chat.activity.isNeeds,
-            ready: ready, screenMenu: menu)
+            ready: ready, screenMenu: screen.menu)
         apply(ComposerMode.resolve(input), chat: chat)
 
         // A peek ends once nothing has waited in the terminal for two checks in a row.
@@ -320,6 +333,7 @@ final class ReaderModeController: NSObject {
         t.submit(text)
         composer.textView.text = ""
         drafts[chat.id] = nil
+        stoppedAt[chat.id] = nil
         Log.write("reader mode: sent \(text.count) characters to chat=\(chat.id)")
         // Follow the conversation from here, even if you'd scrolled up to read.
         reader?.page.webView.evaluateJavaScript("window.scrollTo(0, document.scrollingElement.scrollHeight); 0", completionHandler: nil)
@@ -332,6 +346,7 @@ final class ReaderModeController: NSObject {
     func stop() -> Bool {
         guard composerMode.isWorking, let chat = model.selectedChat, let t = chat.terminal else { return false }
         t.pressEscape()
+        stoppedAt[chat.id] = Date()
         Log.write("reader mode: stop (Esc) chat=\(chat.id)")
         return true
     }

@@ -131,8 +131,17 @@
     }
   }
 
+  // A new message fades in. Only while the page is on screen, and the class always comes off
+  // again, so a page that isn't painting (a hidden view, an offscreen window) never leaves a
+  // message stuck half-faded.
+  function fadeIn(el) {
+    if (document.visibilityState !== 'visible') return;
+    el.classList.add('fresh');
+    setTimeout(() => el.classList.remove('fresh'), 450);
+  }
+
   function decorate(el, e, fresh) {
-    if (fresh) el.classList.add('fresh');
+    if (fresh) fadeIn(el);
     if (e.kind === 'tool') {
       el.dataset.tool = kindOf(e);
       const line = el.querySelector('.toolline');
@@ -182,7 +191,8 @@
   function makeGroup(tools, fresh) {
     const key = tools[0].dataset.id;
     const g = document.createElement('div');
-    g.className = 'toolgroup' + (openGroups.has(key) ? ' open' : '') + (fresh ? ' fresh' : '');
+    g.className = 'toolgroup' + (openGroups.has(key) ? ' open' : '');
+    if (fresh) fadeIn(g);
     g.dataset.key = key;
     const s = summary(tools);
     const sum = document.createElement('div');

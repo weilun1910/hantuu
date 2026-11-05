@@ -253,6 +253,13 @@ extension SelfTest {
         check("stop: sends Esc to the terminal", stopped && waitUntil(5) { bytes().count == before + 1 && bytes().last == 0x1B }, bytes().suffix(8).map { String(format: "%02x", $0) }.joined(separator: " "))
         if let e = keyEvent(53, "\u{1b}", window: w) { rm.composer.textView.keyDown(with: e) }
         check("stop: Esc in the message box stops a working agent", waitUntil(5) { bytes().count == before + 2 && bytes().last == 0x1B })
+        // The fake agent's screen shows its prompt and no "esc to interrupt", like Claude Code
+        // after a stop that its status never reported.
+        rm.refresh()
+        check("stop: once the screen shows the turn stopped, the working line goes even if the status lags",
+              rm.composerMode == .ready && chat.activity == .working, "\(rm.composerMode)")
+        check("screen: a running turn is seen on screen", TerminalScreen.analyze("✻ Thinking… (esc to interrupt)\n> \n  ? for shortcuts").busy
+              && !TerminalScreen.analyze("> \n  ? for shortcuts").busy)
 
         // The banner: a permission prompt is waiting.
         chat.activity = .needsPermission
@@ -441,6 +448,12 @@ extension SelfTest {
         let ended = shot("reader-mode-ended.png")
         chat.status = .running
 
+        // A message that arrives live fades in, and is fully shown afterwards even here, where
+        // the offscreen window may not run animations.
+        model.readerAppend.send((chat.id, [ReaderEntry(id: "live-1", kind: .assistant, text: "Arrived while you were reading.")]))
+        let shownLive = waitUntil(5) { (js(rm.reader!.page, "(() => { const e = document.querySelector('section.entry[data-id=\"live-1\"]'); return !!e && !e.classList.contains('fresh') && getComputedStyle(e).opacity === '1'; })()") as? Bool) == true }
+        check("reader page: a message that arrives live ends up fully shown", shownLive)
+
         let form = NSHostingView(rootView: Form { ChatSettingsSection() }.formStyle(.grouped).environment(\.colorScheme, .dark))
         form.appearance = NSAppearance(named: .darkAqua)
         form.frame = NSRect(x: 0, y: 0, width: 520, height: 140)
@@ -556,8 +569,11 @@ extension SelfTest {
         let busy = wait(60) { rm.composerMode.isWorking }
         _ = wait(2) { false }
         let pressed = rm.stop()
-        let halted = wait(30) { chat.activity != .working }
-        check("live reader: Stop interrupts the turn", busy && pressed && halted, "busy=\(busy) pressed=\(pressed) activity=\(chat.activity) detail=\(chat.activityDetail)")
+        // Claude Code's own screen is the evidence: no "esc to interrupt" once it has stopped.
+        let halted = wait(30) { !TerminalScreen.analyze(tv.activeScreenText()).busy }
+        let shown = wait(10) { !rm.composerMode.isWorking }
+        check("live reader: Stop interrupts the turn and the working line goes", busy && pressed && halted && shown,
+              "busy=\(busy) pressed=\(pressed) halted=\(halted) mode=\(rm.composerMode) status=\(chat.activity.rawValue) \(chat.activityDetail)")
         print("      live reader: after Stop: \(chat.activity.rawValue) \(chat.activityDetail)")
         print("      live reader: transcript \(chat.transcriptPath ?? "none")")
     }

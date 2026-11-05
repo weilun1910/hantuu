@@ -90,28 +90,43 @@ enum TerminalScreen {
     static let updateMarks = ["update available", "update now", "skip until"]
     static let menuMarks = ["enter to confirm", "enter to select", "press enter to continue", "to navigate", "(y/n)"]
 
+    /// Claude Code and Codex both show this while a turn runs.
+    static let busyMark = "esc to interrupt"
+
+    struct State: Equatable {
+        /// The agent has drawn its prompt.
+        var ready = false
+        /// A turn is running on screen.
+        var busy = false
+        var menu: ScreenMenu?
+    }
+
     /// Looks at the bottom of the screen only, where agents draw their menus, so a phrase in
     /// earlier output doesn't count.
-    static func analyze(_ screen: String, lines tail: Int = 16) -> (ready: Bool, menu: ScreenMenu?) {
+    static func analyze(_ screen: String, lines tail: Int = 16) -> State {
         let lines = screen.split(whereSeparator: \.isNewline)
             .map { $0.trimmingCharacters(in: .whitespaces) }
             .filter { !$0.isEmpty }
             .suffix(tail)
         let lower = lines.map { $0.lowercased() }
         let ready = lower.contains { l in readyMarks.contains { l.contains($0) } }
+        let busy = lower.contains { $0.contains(busyMark) }
         func find(_ marks: [String]) -> String? {
             for (i, l) in lower.enumerated() where marks.contains(where: { l.contains($0) }) {
                 return clean(lines[lines.startIndex + i])
             }
             return nil
         }
-        if let l = find(trustMarks) { return (ready, ScreenMenu(kind: .trust, line: l)) }
-        if let l = find(updateMarks) { return (ready, ScreenMenu(kind: .update, line: l)) }
-        if find(menuMarks) != nil {
+        var menu: ScreenMenu?
+        if let l = find(trustMarks) {
+            menu = ScreenMenu(kind: .trust, line: l)
+        } else if let l = find(updateMarks) {
+            menu = ScreenMenu(kind: .update, line: l)
+        } else if find(menuMarks) != nil {
             // The footer only says how to pick; the first line of the box says what it's about.
-            return (ready, ScreenMenu(kind: .menu, line: "Answer it in the terminal."))
+            menu = ScreenMenu(kind: .menu, line: "Answer it in the terminal.")
         }
-        return (ready, nil)
+        return State(ready: ready, busy: busy, menu: menu)
     }
 
     /// Box-drawing borders and bullets around a TUI line, stripped.
