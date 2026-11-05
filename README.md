@@ -4,11 +4,11 @@
 
 # hantuu
 
-hantuu is a native Mac app for running coding agents like Claude Code and Codex. Every chat is a real terminal powered by Ghostty, and next to it sits a reader that turns the conversation into something easy to read, with images, PDFs and LaTeX rendered properly.
+hantuu is a native Mac app for running coding agents like Claude Code and Codex. Every agent runs in a real terminal powered by Ghostty, but you talk to it in a chat that's easy to read, with images, PDFs and LaTeX rendered properly. The terminal is one shortcut away whenever you want it.
 
 The name comes from "hantu", the Malay word for ghost, made a little cuter the same way Ghostty did with "ghost".
 
-![A Claude Code chat on the left and the reader on the right, showing an inline image and a rendered formula](docs/screenshots/chat-and-reader.jpg)
+![A Claude Code chat in hantuu, with rendered formulas, a code block and file links, and a message box at the bottom](docs/screenshots/reader-mode.jpg)
 
 ## Why I built this
 
@@ -77,20 +77,22 @@ Files is the project tree with a filter, and files with changes get a small dot.
 
 ![The Changes tab with a diff and a comment box open on a line](docs/screenshots/changes-comment.jpg)
 
-### A reader for the chat
+### Chats you can actually read
 
-Open the Reader tab and it follows the conversation as it happens. Your prompts and the agent's answers read like a normal document. Tool calls fold down to one line each and the agent's thinking is hidden, but permission requests, errors and questions to you always stay visible.
+Chats open as a conversation instead of the agent's terminal. Your messages sit on the right and the agent's answers read like a normal document. A run of tool calls folds into one line, like "Ran a command, read a file and 1 more", and you can open it to see each step. The agent's thinking is hidden, but permission requests, errors and questions to you always stay visible.
 
-Images and PDFs that come up in the chat appear inline instead of as paths. LaTeX is rendered with KaTeX and code blocks are highlighted, which is what makes it usable for studying.
+Images and PDFs that come up in the chat appear inline instead of as paths. LaTeX is rendered with KaTeX, and code blocks are highlighted with a Copy button. That's what makes it usable for studying.
 
-### Read chats instead of the terminal
-
-If you'd rather not read the terminal at all, turn on "Show chats as the reader" in Settings > Chat. A chat then opens as the reader with a message box underneath. The agent still runs in its own terminal behind it, so logging in, slash commands and the status dots all work the same.
+You type in a message box underneath. The agent still runs in its own terminal behind the conversation, so logging in, slash commands and the status dots all work the same.
 
 - Return sends and Shift-Return adds a line. Dropping files on the box types their paths.
-- While the agent works, a line above the box says what it's doing, and Esc stops it.
-- When it wants your permission or asks you something with options, a banner says so, and Show Terminal brings up the terminal so you can answer there. The reader comes back once the agent carries on.
-- Option-Cmd-R switches one chat between the reader and its terminal.
+- While the agent works, a line above the box says what it's doing. Esc or the Stop button stops it.
+- When it wants your permission or asks a question with options, a banner says so. Show Terminal brings up the terminal so you can answer there, and the conversation comes back once the agent carries on.
+- Option-Cmd-R switches one chat to its terminal and back.
+
+If you'd rather see the terminal, turn off "Show chats as the reader" in Settings > Chat. The conversation then lives in the Reader tab of the right panel, next to the terminal.
+
+![A Claude Code chat in its terminal, with the Reader tab showing an inline image and a rendered formula](docs/screenshots/chat-and-reader.jpg)
 
 ### File links that open somewhere useful
 
@@ -108,7 +110,7 @@ One switch at the bottom of the sidebar keeps your Mac running even with the lid
 
 ### Feels like part of your Mac
 
-hantuu is dark and minimal, and it uses native Mac controls throughout. The terminals load your own Ghostty config, so your font, colours and padding carry over without any setup.
+hantuu is dark and minimal, and it uses native Mac controls throughout. The terminals come with hantuu's own quiet dark theme. To use your own Ghostty config instead, with your font, colours and padding, turn it on in Settings > Terminal.
 
 ## Get started
 
@@ -170,11 +172,12 @@ scripts/run.sh --data-dir "$PWD/tmp/appdata"
 - The reader reads the transcript files the agents already write, in `~/.claude/projects/` for Claude Code and `~/.codex/sessions/` for Codex. It only ever reads them.
 - The review tabs read git through a private copy of the index, because a plain `git diff` rewrites the real one and can get in the way of the agent's own commits.
 - The reader and code viewer are local web pages bundled with markdown-it, KaTeX and highlight.js, so nothing loads from the internet.
-- `scripts/selftest.sh` runs 386 checks. They cover transcript parsing, link handling, a live Ghostty terminal and the reader page. They also cover agent status, sessions that survive their client, worktrees, the review tabs and reader mode.
+- In the chat view, your message is typed into the agent's terminal as one paste followed by Return, the same as typing it yourself. Nothing is sent while a menu is waiting there, because Return would answer it.
+- `scripts/selftest.sh` runs 399 checks. They cover transcript parsing, link handling, a live Ghostty terminal and the reader page. They also cover agent status, sessions that survive their client, worktrees, the review tabs and the chat view.
 
 ## Status
 
-This is v2. v1 was the first version I built to try out the idea, and v2 adds agent status, the review tabs, agents that keep running, and worktree chats. Expect some rough edges. A companion iOS app for checking on chats from my phone is planned once the desktop app settles. Light mode and a signed, notarized download aren't there yet.
+This is v2. v1 was the first version I built to try out the idea, and v2 adds agent status, the review tabs, agents that keep running, and worktree chats. Since then, chats open in the readable chat view by default. Expect some rough edges. A companion iOS app for checking on chats from my phone is planned once the desktop app settles. Light mode and a signed, notarized download aren't there yet.
 
 ## License
 
@@ -182,4 +185,4 @@ hantuu is released under the [MIT License](LICENSE).
 
 ## Credits
 
-hantuu is built on [Ghostty](https://github.com/ghostty-org/ghostty) by Mitchell Hashimoto and the Ghostty contributors. The terminal hosting code is adapted from Ghostty's own macOS app. Licenses for Ghostty and the bundled libraries are in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). The icon is a placeholder generated with Codex.
+hantuu is built on [Ghostty](https://github.com/ghostty-org/ghostty) by Mitchell Hashimoto and the Ghostty contributors. The terminal hosting code is adapted from Ghostty's own macOS app. The chat view takes its layout ideas from [T3 Code](https://github.com/pingdotgg/t3code). Licenses for Ghostty and the bundled libraries are in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). The icon is a placeholder generated with Codex.
