@@ -1,0 +1,49 @@
+# hantuu's terminal look, used for every chat and shell unless Settings > Terminal is set
+# to use your own Ghostty config instead. Same format as a Ghostty config file.
+
+# Type. JetBrains Mono is built into Ghostty, so this works without installing it.
+font-family = "JetBrains Mono"
+font-size = 13
+font-thicken = true
+font-feature = -calt
+adjust-cell-height = 25%
+
+# Space around the text, filled with the background colour.
+window-padding-x = 16
+window-padding-y = 14
+window-padding-balance = true
+window-padding-color = extend
+window-colorspace = display-p3
+background-opacity = 1
+
+# A solid block cursor that doesn't blink. no-cursor stops shell integration from
+# switching it to a bar; title lets agents name their chat.
+cursor-style = block
+cursor-style-blink = false
+shell-integration-features = no-cursor,sudo,title
+mouse-hide-while-typing = true
+mouse-scroll-multiplier = 2
+
+# Neutral dark background, with colour kept to the text.
+foreground = #dcdcdc
+background = #161616
+cursor-color = #dcdcdc
+cursor-text = #161616
+selection-foreground = #dcdcdc
+selection-background = #3a3a3a
+palette = 0=#262626
+palette = 1=#eb6f92
+palette = 2=#31748f
+palette = 3=#f6c177
+palette = 4=#9ccfd8
+palette = 5=#c4a7e7
+palette = 6=#ebbcba
+palette = 7=#dcdcdc
+palette = 8=#767676
+palette = 9=#eb6f92
+palette = 10=#31748f
+palette = 11=#f6c177
+palette = 12=#9ccfd8
+palette = 13=#c4a7e7
+palette = 14=#ebbcba
+palette = 15=#f0f0f0

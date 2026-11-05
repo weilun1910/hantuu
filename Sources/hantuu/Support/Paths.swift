@@ -49,6 +49,23 @@ enum Paths {
         return nil
     }
 
+    /// hantuu's own terminal look (Resources/terminal.ghostty), in the app bundle or, for a
+    /// debug build, in the repo.
+    static var terminalTheme: URL? {
+        if let r = Bundle.main.resourceURL?.appendingPathComponent("terminal.ghostty"),
+           FileManager.default.fileExists(atPath: r.path) {
+            return r
+        }
+        let exe = URL(fileURLWithPath: CommandLine.arguments[0]).resolvingSymlinksInPath()
+        var dir = exe.deletingLastPathComponent()
+        for _ in 0..<6 {
+            let candidate = dir.appendingPathComponent("Resources/terminal.ghostty")
+            if FileManager.default.fileExists(atPath: candidate.path) { return candidate }
+            dir = dir.deletingLastPathComponent()
+        }
+        return nil
+    }
+
     /// Bundled web assets (reader, code viewer, JS libraries).
     static var webRoot: URL? {
         if let r = Bundle.main.resourceURL?.appendingPathComponent("web"),

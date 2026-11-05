@@ -270,14 +270,7 @@ struct SettingsView: View {
             }
             SessionSettingsSection()
             NotificationSettingsSection()
-            Section("Terminal") {
-                LabeledContent("Config") {
-                    Text("~/Library/Application Support/com.mitchellh.ghostty/config.ghostty").font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
-                }
-                Text("Fonts, colours and padding come from your Ghostty config. hantuu only reads it.")
-                    .font(.system(size: 11)).foregroundStyle(.secondary)
-                Button("Reload Ghostty Config") { GhosttyApp.shared?.reloadConfig() }
-            }
+            TerminalSettingsSection()
             Section("Data") {
                 LabeledContent("Folder") {
                     Text(Paths.dataDir.path).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)

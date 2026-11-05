@@ -33,6 +33,8 @@ printf 'APPL????' > "$APP/Contents/PkgInfo"
 
 # The reader and code viewer pages plus their bundled JS libraries.
 cp -R "$ROOT/Resources/web" "$APP/Contents/Resources/web"
+# hantuu's own terminal look.
+cp "$ROOT/Resources/terminal.ghostty" "$APP/Contents/Resources/terminal.ghostty"
 
 # Ghostty's runtime resources, laid out the way libghostty looks for them in an app bundle:
 # Contents/Resources/ghostty (shell integration, themes) and
