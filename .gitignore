@@ -1,7 +1,8 @@
 .build/
 build/
-vendor/
+/vendor/
 tmp/
 *.app
 .DS_Store
 .swiftpm/
+.claude/
