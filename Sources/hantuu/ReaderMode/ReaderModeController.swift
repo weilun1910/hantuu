@@ -35,6 +35,9 @@ final class ReaderModeController: NSObject {
     /// stay Working. Once the screen shows the turn has stopped, reader mode believes the
     /// screen.
     private var stoppedAt: [UUID: Date] = [:]
+    /// What reader mode typed into each chat during its current turn. A stopped Claude Code
+    /// turn puts these back in its own input box, where the next message would join them.
+    private var sentThisTurn: [UUID: [String]] = [:]
     private var timer: Timer?
     private var chatSubs = Set<AnyCancellable>()
     private var bag = Set<AnyCancellable>()
@@ -246,6 +249,9 @@ final class ReaderModeController: NSObject {
                 stoppedAt[chat.id] = nil
             } else if !screen.busy && screen.ready {
                 activity = .idle
+                // So the sidebar and the header stop reading Working too.
+                StatusCenter.shared.stoppedFromReader(chat)
+                clearRestoredInput(chat)
             }
         }
         let st = statusProvider(chat)
@@ -330,6 +336,9 @@ final class ReaderModeController: NSObject {
             NSSound.beep()
             return false
         }
+        // A message sent while the agent works joins its turn; otherwise it starts a new one.
+        if !composerMode.isWorking { sentThisTurn[chat.id] = [] }
+        sentThisTurn[chat.id, default: []].append(text)
         t.submit(text)
         composer.textView.text = ""
         drafts[chat.id] = nil
@@ -349,6 +358,17 @@ final class ReaderModeController: NSObject {
         stoppedAt[chat.id] = Date()
         Log.write("reader mode: stop (Esc) chat=\(chat.id)")
         return true
+    }
+
+    /// After a stop, Claude Code puts the stopped message back in its input box, hidden behind
+    /// the reader, and the next message would be typed onto the end of it. Deletes it, but only
+    /// when the bottom of the screen shows text reader mode sent this turn.
+    private func clearRestoredInput(_ chat: Chat) {
+        guard let sent = sentThisTurn.removeValue(forKey: chat.id), let t = chat.terminal else { return }
+        let n = ComposerMessage.restoredLength(screen: t.activeScreenText(), sent: sent)
+        guard n > 0 else { return }
+        t.pressBackspace(times: n)
+        Log.write("reader mode: cleared \(n) restored characters after stop chat=\(chat.id)")
     }
 
     /// Shows the live terminal so a menu can be answered there.

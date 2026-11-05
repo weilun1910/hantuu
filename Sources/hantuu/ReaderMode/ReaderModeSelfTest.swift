@@ -16,6 +16,7 @@ extension SelfTest {
         readerModeSettings(rdir)
         readerModeLogic()
         readerModeNotices()
+        readerModeRestoredInput()
         readerModeKeys()
         readerModeFakeAgent(rdir)
         readerModeSnapshots(rdir)
@@ -112,6 +113,22 @@ extension SelfTest {
         check("message: an empty box sends nothing", ComposerMessage.prepare(" \n\t ") == nil)
         check("drop: files become shell-escaped paths", ComposerMessage.paths([URL(fileURLWithPath: "/tmp/a b/(1).png"), URL(fileURLWithPath: "/tmp/c.pdf")]) == #"/tmp/a\ b/\(1\).png /tmp/c.pdf"#)
         check("working line: elapsed time", Elapsed.text(since: Date(timeIntervalSince1970: 0), now: Date(timeIntervalSince1970: 74)) == "1m 14s")
+    }
+
+    static func readerModeRestoredInput() {
+        let rule = String(repeating: "─", count: 60)
+        let msg = "Write a 500-word short story about a lighthouse keeper. Don't use any tools."
+        // Claude Code after a stop: the history, then the message back in the box between rules.
+        let restored = "❯ Read notes.md\n● It says hi.\n\n\(rule)\n❯ \(msg)\n\(rule)\n  ⏵⏵ auto mode on (shift+tab to cycle)"
+        let n = ComposerMessage.restoredLength(screen: restored, sent: [msg])
+        check("stop: a message put back in Claude Code's box is cleared in full", n >= msg.unicodeScalars.count && n < msg.unicodeScalars.count + 10, "\(n)")
+        let empty = "❯ \(msg)\n● Once upon a time\n\n\(rule)\n❯ \n\(rule)\n  ? for shortcuts"
+        check("stop: the same text higher up in the history doesn't count", ComposerMessage.restoredLength(screen: empty, sent: [msg]) == 0)
+        let pasted = "\(rule)\n❯ [Pasted text #1 +40 lines]\n\(rule)\n  ? for shortcuts"
+        check("stop: a long message shown as pasted text is cleared too", ComposerMessage.restoredLength(screen: pasted, sent: [String(repeating: "x\n", count: 40)]) > 80)
+        check("stop: two messages from one turn are both counted",
+              ComposerMessage.restoredLength(screen: restored, sent: [msg, "and make it sad"]) >= msg.unicodeScalars.count + 15)
+        check("stop: nothing sent this turn, nothing deleted", ComposerMessage.restoredLength(screen: restored, sent: []) == 0)
     }
 
     static func readerModeNotices() {
@@ -272,6 +289,12 @@ extension SelfTest {
               rm.composerMode == .ready && chat.activity == .working, "\(rm.composerMode)")
         check("screen: a running turn is seen on screen", TerminalScreen.analyze("✻ Thinking… (esc to interrupt)\n> \n  ? for shortcuts").busy
               && !TerminalScreen.analyze("> \n  ? for shortcuts").busy)
+        RunLoop.main.run(until: Date().addingTimeInterval(0.3))
+        check("stop: nothing is deleted when the agent's box doesn't show what was sent", !bytes().suffix(from: before).contains(0x7F))
+        let beforeBS = bytes().count
+        tv.pressBackspace(times: 3)
+        check("stop: Backspace reaches the terminal as DEL", waitUntil(5) { bytes().count == beforeBS + 3 && bytes().suffix(3).allSatisfy { $0 == 0x7F } },
+              bytes().suffix(4).map { String(format: "%02x", $0) }.joined(separator: " "))
 
         // The banner: a permission prompt is waiting.
         chat.activity = .needsPermission

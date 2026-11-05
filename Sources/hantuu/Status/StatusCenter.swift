@@ -218,6 +218,14 @@ final class StatusCenter: ObservableObject {
         apply(t, [OriginSignal(origin: .terminal, signal: signal)], notify: true)
     }
 
+    /// Reader mode pressed Esc and the agent's screen shows its turn has stopped. Claude Code
+    /// doesn't always write an interrupt line or fire a hook for that, so without this the
+    /// chat would read Working until its next turn.
+    func stoppedFromReader(_ chat: Chat) {
+        guard let t = trackers[chat.id], chat.activity == .working else { return }
+        apply(t, [OriginSignal(origin: .app, signal: .interrupted)], notify: false)
+    }
+
     // MARK: Publishing
 
     private func publish(_ t: Tracker, notify: Bool) {

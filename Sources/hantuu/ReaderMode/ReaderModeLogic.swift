@@ -146,6 +146,37 @@ enum ComposerMessage {
         return s.isEmpty ? nil : s
     }
 
+    /// How many Backspaces clear what a stopped turn put back in the agent's input box, or 0
+    /// when the box doesn't show any of `sent`. Claude Code draws its box between the last two
+    /// rules at the bottom of the screen; elsewhere the last few lines count. It errs long,
+    /// since a Backspace in an empty box does nothing.
+    static func restoredLength(screen: String, sent: [String]) -> Int {
+        guard !sent.isEmpty else { return 0 }
+        let lines = screen.split(whereSeparator: \.isNewline).map(String.init)
+            .filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
+            .suffix(14)
+        func isRule(_ l: String) -> Bool {
+            let t = l.trimmingCharacters(in: .whitespaces)
+            return t.count >= 10 && Double(t.filter { "─━═".contains($0) }.count) >= Double(t.count) * 0.8
+        }
+        let rules = lines.indices.filter { isRule(lines[$0]) }
+        let box: [String]
+        if rules.count >= 2, let last = rules.last, let prev = rules.dropLast().last, last - prev > 1 {
+            box = Array(lines[(prev + 1)..<last])
+        } else {
+            box = Array(lines.suffix(6))
+        }
+        let text = box.joined(separator: " ").lowercased()
+        let shows = text.contains("[pasted text") || sent.contains { s in
+            let first = s.split(whereSeparator: \.isNewline).first.map(String.init) ?? s
+            let key = String(first.trimmingCharacters(in: .whitespaces).prefix(24)).lowercased()
+            return !key.isEmpty && text.contains(key)
+        }
+        guard shows else { return 0 }
+        let total = sent.reduce(0) { $0 + $1.unicodeScalars.count } + sent.count + 4
+        return min(total, 4000)
+    }
+
     /// Dropped files as the shell-escaped paths a terminal drop would type, space separated.
     static func paths(_ urls: [URL]) -> String {
         urls.filter(\.isFileURL).map { ShellEscape.escape($0.path) }.joined(separator: " ")
@@ -168,6 +199,24 @@ extension TerminalView {
         _ = ghostty_surface_key(surface, ev)
         ev.action = GHOSTTY_ACTION_RELEASE
         _ = ghostty_surface_key(surface, ev)
+    }
+
+    /// Presses Backspace `times` times as real key events.
+    func pressBackspace(times: Int) {
+        guard let surface, times > 0 else { return }
+        var ev = ghostty_input_key_s()
+        ev.keycode = 51            // kVK_Delete, the Backspace key
+        ev.mods = GHOSTTY_MODS_NONE
+        ev.consumed_mods = GHOSTTY_MODS_NONE
+        ev.text = nil
+        ev.unshifted_codepoint = 0x7F
+        ev.composing = false
+        for _ in 0..<times {
+            ev.action = GHOSTTY_ACTION_PRESS
+            _ = ghostty_surface_key(surface, ev)
+            ev.action = GHOSTTY_ACTION_RELEASE
+            _ = ghostty_surface_key(surface, ev)
+        }
     }
 
     /// The text of the visible screen, without scrollback.

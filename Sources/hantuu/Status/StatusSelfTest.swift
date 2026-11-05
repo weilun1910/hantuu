@@ -150,6 +150,9 @@ extension SelfTest {
         let esc = OriginSignal(origin: .transcript, signal: .interrupted)
         let declined = reduce(hookTurn + signals([permBash]) + [decline, esc])
         check("status: declined then interrupted -> Idle, Interrupted", declined.activity == .idle && declined.detail == "Interrupted", declined.detail)
+        // Reader mode's Stop, once the agent's screen shows the turn stopped and nothing else said so.
+        let readerStop = reduce(hookTurn + [OriginSignal(origin: .app, signal: .interrupted)])
+        check("status: reader mode's confirmed Stop -> Idle, Interrupted", readerStop.activity == .idle && readerStop.detail == "Interrupted", readerStop.detail)
 
         // The late Notification hook doesn't duplicate a PermissionRequest or get stuck.
         let late = hook("Notification", #""message":"Claude needs your permission to use Bash","notification_type":"permission_prompt""#)
