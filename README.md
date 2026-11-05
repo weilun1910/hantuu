@@ -92,7 +92,7 @@ scripts/run.sh --data-dir "$PWD/tmp/appdata"
 | Shift-Cmd-O | Add a project folder |
 | Cmd-1 to Cmd-9 | Jump to a chat |
 | Option-Cmd-0 | Show or hide the right panel |
-| Option-Cmd-1, 2, 3 | Terminal, Code or Reader tab |
+| Option-Cmd-1 to 6 | Overview, Changes, Files, Code, Terminal or Reader tab |
 | Cmd-T | New shell tab |
 | Cmd-O | Open a file in the Code tab |
 | Cmd-0 | Show or hide the sidebar |

@@ -45,6 +45,7 @@ enum SelfTest {
         surface(workdir)
         reader(workdir)
         sessions(workdir) // Sessions/SessionSelfTest.swift
+        review(workdir)
 
         print("\n\(passes) passed, \(failures) failed")
         return failures == 0 ? 0 : 1
