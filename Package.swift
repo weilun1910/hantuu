@@ -28,5 +28,11 @@ let package = Package(
                 .linkedLibrary("c++"),
             ]
         ),
+        // The session helper that keeps agents running after the app quits. Plain C: it's all
+        // fork, setsid, ptys and sockets. build.sh copies it next to the app's executable.
+        .executableTarget(
+            name: "hantuu-session",
+            path: "Sources/hantuu-session"
+        ),
     ]
 )

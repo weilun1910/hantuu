@@ -25,6 +25,8 @@ APP="$ROOT/build/hantuu.app.staging"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN_DIR/hantuu" "$APP/Contents/MacOS/hantuu"
+# The session helper that keeps agents running after the app quits (Sources/hantuu-session).
+cp "$BIN_DIR/hantuu-session" "$APP/Contents/MacOS/hantuu-session"
 cp "$ROOT/Resources/Info.plist" "$APP/Contents/Info.plist"
 cp "$ROOT/Resources/AppIcon.icns" "$APP/Contents/Resources/AppIcon.icns" 2>/dev/null || true
 printf 'APPL????' > "$APP/Contents/PkgInfo"
@@ -43,6 +45,8 @@ cp -R "$ROOT/vendor/ghostty-resources/terminfo" "$APP/Contents/Resources/terminf
 # iCloud Drive tags files with extended attributes that codesign refuses to sign over.
 xattr -cr "$APP"
 IDENTITY="${SIGN_IDENTITY:--}"
+# Nested executables are signed before the bundle that contains them.
+codesign --force --sign "$IDENTITY" --timestamp=none "$APP/Contents/MacOS/hantuu-session"
 codesign --force --sign "$IDENTITY" --timestamp=none "$APP"
 rm -rf "$FINAL.old"
 [ -d "$FINAL" ] && mv "$FINAL" "$FINAL.old"

@@ -63,8 +63,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        // Agents run in hantuu-session, so by default quitting leaves them running and they
+        // reattach next launch. Asking first only matters when quitting is set to stop them.
+        let keepRunning = SessionSettings.shared.keepAgentsRunning
         let running = model.chats.filter { $0.status != .ended && $0.terminal != nil && !($0.terminal?.processExited ?? true) }
-        if !running.isEmpty {
+        if !keepRunning && !running.isEmpty {
             let a = NSAlert()
             a.messageText = "Quit hantuu?"
             a.informativeText = "\(running.count) agent\(running.count == 1 ? " is" : "s are") still running. Quitting stops \(running.count == 1 ? "it" : "them"). You can resume Claude Code and Codex chats next time."
@@ -72,6 +75,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             a.addButton(withTitle: "Cancel")
             if a.runModal() != .alertFirstButtonReturn { return .terminateCancel }
         }
+        if !keepRunning { model.stopAllSessions() }
         model.save()
         return .terminateNow
     }
@@ -112,6 +116,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         agentsMenu = agents
         withItem.submenu = agents
         file.addItem(withItem)
+        file.addItem(SessionMenuTarget.newChatInWorktreeItem())
         file.addItem(item("New Terminal Tab", #selector(newTerminal), "t"))
         file.addItem(.separator())
         file.addItem(item("Open File…", #selector(openFile), "o"))
@@ -256,6 +261,7 @@ struct SettingsView: View {
                 Text("hantuu finds agents through your login shell, so they run with the same PATH and environment as in Ghostty. It never adds permission-skipping flags.")
                     .font(.system(size: 11)).foregroundStyle(.secondary)
             }
+            SessionSettingsSection()
             Section("Terminal") {
                 LabeledContent("Config") {
                     Text("~/Library/Application Support/com.mitchellh.ghostty/config.ghostty").font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
