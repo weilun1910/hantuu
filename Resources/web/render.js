@@ -28,7 +28,7 @@
   function highlightBlock(str, lang) {
     try {
       if (lang && hljs.getLanguage(lang)) {
-        return '<pre class="hljs"><code>' + hljs.highlight(str, { language: lang, ignoreIllegals: true }).value + '</code></pre>';
+        return '<pre class="hljs" data-lang="' + escapeHTML(lang) + '"><code>' + hljs.highlight(str, { language: lang, ignoreIllegals: true }).value + '</code></pre>';
       }
       // Unlabeled blocks are usually output, paths or prose: keep them plain so file
       // paths stay in one text node and can be linked.

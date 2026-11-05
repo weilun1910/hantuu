@@ -83,6 +83,15 @@ Open the Reader tab and it follows the conversation as it happens. Your prompts 
 
 Images and PDFs that come up in the chat appear inline instead of as paths. LaTeX is rendered with KaTeX and code blocks are highlighted, which is what makes it usable for studying.
 
+### Read chats instead of the terminal
+
+If you'd rather not read the terminal at all, turn on "Show chats as the reader" in Settings > Chat. A chat then opens as the reader with a message box underneath. The agent still runs in its own terminal behind it, so logging in, slash commands and the status dots all work the same.
+
+- Return sends and Shift-Return adds a line. Dropping files on the box types their paths.
+- While the agent works, a line above the box says what it's doing, and Esc stops it.
+- When it wants your permission or asks you something with options, a banner says so, and Show Terminal brings up the terminal so you can answer there. The reader comes back once the agent carries on.
+- Option-Cmd-R switches one chat between the reader and its terminal.
+
 ### File links that open somewhere useful
 
 Every file path in the chat becomes a link. Text and code files open in the Code tab with syntax highlighting and line numbers, and Markdown files also get a rendered preview. Anything else, like a PDF, is shown in Finder so you can open it with the app you normally use. Cmd-click works on links in the terminal too.
@@ -143,6 +152,7 @@ scripts/run.sh --data-dir "$PWD/tmp/appdata"
 | Cmd-N | New chat with your default agent |
 | Shift-Cmd-N | New chat in its own worktree |
 | Cmd-J | Jump to the next chat that needs you |
+| Option-Cmd-R | Switch the chat between the reader and its terminal |
 | Shift-Cmd-O | Add a project folder |
 | Cmd-1 to Cmd-9 | Jump to a chat |
 | Option-Cmd-0 | Show or hide the right panel |
@@ -160,7 +170,7 @@ scripts/run.sh --data-dir "$PWD/tmp/appdata"
 - The reader reads the transcript files the agents already write, in `~/.claude/projects/` for Claude Code and `~/.codex/sessions/` for Codex. It only ever reads them.
 - The review tabs read git through a private copy of the index, because a plain `git diff` rewrites the real one and can get in the way of the agent's own commits.
 - The reader and code viewer are local web pages bundled with markdown-it, KaTeX and highlight.js, so nothing loads from the internet.
-- `scripts/selftest.sh` runs 316 checks. They cover transcript parsing, link handling, a live Ghostty terminal and the reader page. They also cover agent status, sessions that survive their client, worktrees and the review tabs.
+- `scripts/selftest.sh` runs 386 checks. They cover transcript parsing, link handling, a live Ghostty terminal and the reader page. They also cover agent status, sessions that survive their client, worktrees, the review tabs and reader mode.
 
 ## Status
 

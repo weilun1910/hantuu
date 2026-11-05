@@ -142,6 +142,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let view = NSMenu(title: "View")
         view.addItem(item("Toggle Sidebar", #selector(toggleSidebar), "0"))
         view.addItem(item("Toggle Panel", #selector(togglePanel), "0", [.command, .option]))
+        view.addItem(ReaderModeMenuTarget.toggleItem())
         view.addItem(.separator())
         for (i, tab) in PanelTab.allCases.enumerated() {
             let it = item(tab.rawValue, #selector(showPanelTab(_:)), "\(i + 1)", [.command, .option])
@@ -268,6 +269,7 @@ struct SettingsView: View {
                 Text("hantuu finds agents through your login shell, so they run with the same PATH and environment as in Ghostty. It never adds permission-skipping flags.")
                     .font(.system(size: 11)).foregroundStyle(.secondary)
             }
+            ChatSettingsSection()
             SessionSettingsSection()
             NotificationSettingsSection()
             TerminalSettingsSection()
