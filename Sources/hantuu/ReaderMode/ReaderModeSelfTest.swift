@@ -15,6 +15,7 @@ extension SelfTest {
         Paths.ensure(rdir)
         readerModeSettings(rdir)
         readerModeLogic()
+        readerModeNotices()
         readerModeKeys()
         readerModeFakeAgent(rdir)
         readerModeSnapshots(rdir)
@@ -111,6 +112,12 @@ extension SelfTest {
         check("message: an empty box sends nothing", ComposerMessage.prepare(" \n\t ") == nil)
         check("drop: files become shell-escaped paths", ComposerMessage.paths([URL(fileURLWithPath: "/tmp/a b/(1).png"), URL(fileURLWithPath: "/tmp/c.pdf")]) == #"/tmp/a\ b/\(1\).png /tmp/c.pdf"#)
         check("working line: elapsed time", Elapsed.text(since: Date(timeIntervalSince1970: 0), now: Date(timeIntervalSince1970: 74)) == "1m 14s")
+    }
+
+    static func readerModeNotices() {
+        check("notices: Claude's idle reminder isn't kept as a Needs you card",
+              AppModel.isIdleNotice("Claude Code Claude is waiting for your input")
+              && !AppModel.isIdleNotice("Claude Code Claude needs your permission to use Bash"))
     }
 
     // MARK: Keys in the message box
