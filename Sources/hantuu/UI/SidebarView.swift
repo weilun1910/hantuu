@@ -47,6 +47,7 @@ struct ProjectSection: View {
     @EnvironmentObject var model: AppModel
     let project: Project
     @State private var hovering = false
+    @State private var menuOpen = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 1) {
@@ -62,8 +63,10 @@ struct ProjectSection: View {
                     .lineLimit(1)
                     .truncationMode(.middle)
                 Spacer(minLength: 4)
-                if hovering {
-                    NewChatButton(projectID: project.id, compact: true)
+                // Always in the hierarchy and only faded out: removing the button when the
+                // cursor left the row also dismissed its agent popover before you could reach it.
+                Group {
+                    NewChatButton(projectID: project.id, compact: true, isOpen: $menuOpen)
                     Menu {
                         projectMenu
                     } label: {
@@ -74,6 +77,8 @@ struct ProjectSection: View {
                     .menuIndicator(.hidden)
                     .frame(width: 22)
                 }
+                .opacity(hovering || menuOpen ? 1 : 0)
+                .allowsHitTesting(hovering || menuOpen)
             }
             .padding(.horizontal, 6)
             .frame(height: 24)
@@ -186,10 +191,13 @@ extension AppModel {
 }
 
 /// Click: a new chat with the default agent. Hover: a dropdown of every installed agent.
+/// The dropdown waits a moment after the cursor leaves the button, so there's time to reach it,
+/// and stays open while the cursor is on it.
 struct NewChatButton: View {
     @EnvironmentObject var model: AppModel
     let projectID: UUID?
     let compact: Bool
+    var isOpen: Binding<Bool>? = nil
     @State private var hoverButton = false
     @State private var hoverMenu = false
     @State private var showMenu = false
@@ -214,15 +222,20 @@ struct NewChatButton: View {
         .help("New chat with \(defaultName)  ⌘N")
         .onHover { h in
             hoverButton = h
-            h ? schedule(open: true, after: 0.35) : schedule(open: false, after: 0.3)
+            if h { if !showMenu { schedule(open: true, after: 0.35) } else { cancel() } }
+            else { schedule(open: false, after: showMenu ? 0.9 : 0) }
         }
         .popover(isPresented: $showMenu, arrowEdge: .bottom) {
             AgentPicker(projectID: projectID) { showMenu = false }
                 .environmentObject(model)
                 .onHover { h in
                     hoverMenu = h
-                    if h { cancel() } else { schedule(open: false, after: 0.3) }
+                    if h { cancel() } else { schedule(open: false, after: 0.35) }
                 }
+        }
+        .onChange(of: showMenu) { _, open in
+            if !open { hoverMenu = false }
+            isOpen?.wrappedValue = open
         }
     }
 
@@ -262,9 +275,9 @@ struct AgentPicker: View {
                 }
             }
         }
-        .padding(.bottom, 6)
-        .padding(.horizontal, 4)
-        .frame(width: 220)
+        .padding(.vertical, 4)
+        .padding(.horizontal, 10)
+        .frame(width: 240)
     }
 
     var projectName: String {
