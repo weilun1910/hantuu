@@ -13,7 +13,8 @@ enum ChatStatus: String, Codable {
 }
 
 enum PanelTab: String, Codable, CaseIterable {
-    case terminal = "Terminal", code = "Code", reader = "Reader"
+    case overview = "Overview", changes = "Changes", files = "Files"
+    case code = "Code", terminal = "Terminal", reader = "Reader"
 }
 
 /// One agent session: a real terminal running the agent's own TUI in a project folder.

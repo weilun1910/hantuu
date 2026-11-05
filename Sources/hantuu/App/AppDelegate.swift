@@ -140,9 +140,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         view.addItem(item("Toggle Sidebar", #selector(toggleSidebar), "0"))
         view.addItem(item("Toggle Panel", #selector(togglePanel), "0", [.command, .option]))
         view.addItem(.separator())
-        view.addItem(item("Terminal", #selector(showTerminalTab), "1", [.command, .option]))
-        view.addItem(item("Code", #selector(showCodeTab), "2", [.command, .option]))
-        view.addItem(item("Reader", #selector(showReaderTab), "3", [.command, .option]))
+        for (i, tab) in PanelTab.allCases.enumerated() {
+            let it = item(tab.rawValue, #selector(showPanelTab(_:)), "\(i + 1)", [.command, .option])
+            it.representedObject = tab.rawValue
+            view.addItem(it)
+        }
         view.addItem(.separator())
         let fs = view.addItem(withTitle: "Enter Full Screen", action: #selector(NSWindow.toggleFullScreen(_:)), keyEquivalent: "f")
         fs.keyEquivalentModifierMask = [.command, .control]
@@ -205,9 +207,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
     @objc func toggleSidebar() { model.sidebarVisible.toggle() }
     @objc func togglePanel() { model.panelVisible.toggle() }
-    @objc func showTerminalTab() { showPanel(.terminal) }
-    @objc func showCodeTab() { showPanel(.code) }
-    @objc func showReaderTab() { showPanel(.reader) }
+    @objc func showPanelTab(_ sender: NSMenuItem) {
+        if let raw = sender.representedObject as? String, let tab = PanelTab(rawValue: raw) { showPanel(tab) }
+    }
     @objc func goToChat(_ sender: NSMenuItem) { model.selectChat(index: sender.tag) }
     @objc func resumeChat() { if let c = model.selectedChat, c.status == .ended { model.resume(c) } }
 

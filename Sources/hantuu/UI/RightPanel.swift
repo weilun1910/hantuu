@@ -2,34 +2,44 @@ import AppKit
 import Combine
 import SwiftUI
 
-/// The toggleable right panel: Terminal (plain shells in the project folder), Code (read-only
-/// viewer) and Reader (the chat rendered as prose).
+/// The toggleable right panel: Overview (glance cards for the chat), Changes (the diff, with
+/// line comments for the agent), Files (the project tree), Code (read-only viewer), Terminal
+/// (plain shells in the project folder) and Reader (the chat rendered as prose).
 final class PanelController: NSViewController {
     private let model: AppModel
     let reader: ReaderController
     let code: CodeViewerController
+    let review: ReviewCenter
     private let shells = TerminalContainer(color: Theme.background)
     private var header: NSView!
     private var noShells: NSView!
     private var noFiles: NSView!
+    private var overview: NSView!
+    private var changes: NSView!
+    private var files: NSView!
     private var content: FillView!
     private var bag = Set<AnyCancellable>()
 
-    init(model: AppModel) {
+    init(model: AppModel, review: ReviewCenter = .shared) {
         self.model = model
+        self.review = review
         reader = ReaderController(model: model)
         code = CodeViewerController(model: model)
         super.init(nibName: nil, bundle: nil)
+        review.configure(model: model)
     }
     required init?(coder: NSCoder) { fatalError() }
 
     override func loadView() {
         let root = FillView(color: Theme.chrome)
-        header = ChromeHostingView(rootView: PanelHeader().environmentObject(model))
+        header = ChromeHostingView(rootView: PanelHeader().environmentObject(model).environmentObject(review))
         content = FillView(color: Theme.chrome)
         noShells = ChromeHostingView(rootView: NoShellsView().environmentObject(model))
         noFiles = ChromeHostingView(rootView: NoFilesView().environmentObject(model))
-        let views: [NSView] = [shells, code.view, reader.view, noShells, noFiles]
+        overview = ChromeHostingView(rootView: OverviewView().environmentObject(model).environmentObject(review))
+        changes = ChromeHostingView(rootView: ChangesView().environmentObject(model).environmentObject(review))
+        files = ChromeHostingView(rootView: FilesView().environmentObject(model).environmentObject(review))
+        let views: [NSView] = [shells, code.view, reader.view, noShells, noFiles, overview, changes, files]
         for v in [header!, content!] {
             v.translatesAutoresizingMaskIntoConstraints = false
             root.addSubview(v)
@@ -76,6 +86,10 @@ final class PanelController: NSViewController {
         code.view.isHidden = tab != .code
         noFiles.isHidden = !(tab == .code && model.codeTabs.isEmpty)
         reader.view.isHidden = tab != .reader
+        overview.isHidden = tab != .overview
+        changes.isHidden = tab != .changes
+        files.isHidden = tab != .files
+        review.setActiveTab(model.panelVisible ? tab : nil)
     }
 }
 
@@ -87,10 +101,13 @@ struct PanelHeader: View {
             ZStack {
                 WindowDragArea()
                 HStack(spacing: 2) {
-                    ForEach(PanelTab.allCases, id: \.self) { tab in
-                        PanelTabButton(title: tab.rawValue, selected: model.panelTab == tab) { model.panelTab = tab }
+                    // Six labels fit at the default width; a narrow panel tightens the padding.
+                    ViewThatFits(in: .horizontal) {
+                        tabs(padding: 8)
+                        tabs(padding: 5)
+                        tabs(padding: 3)
                     }
-                    Spacer()
+                    Spacer(minLength: 0)
                     IconButton(symbol: "sidebar.right", help: "Hide Panel  ⌥⌘0") { model.panelVisible = false }
                 }
                 .padding(.horizontal, 10)
@@ -99,6 +116,9 @@ struct PanelHeader: View {
             Rectangle().fill(Color.hDivider).frame(height: 1)
             Group {
                 switch model.panelTab {
+                case .overview: OverviewBar()
+                case .changes: ChangesBar()
+                case .files: FilesBar()
                 case .terminal: ShellTabs()
                 case .code: CodeTabs()
                 case .reader: ReaderBar()
@@ -110,23 +130,40 @@ struct PanelHeader: View {
         }
         .background(Color.hChrome)
     }
+
+    private func tabs(padding: CGFloat) -> some View {
+        HStack(spacing: 2) {
+            ForEach(Array(PanelTab.allCases.enumerated()), id: \.element) { i, tab in
+                PanelTabButton(title: tab.rawValue, selected: model.panelTab == tab, padding: padding) { model.panelTab = tab }
+                    .help("\(tab.rawValue)  ⌥⌘\(i + 1)")
+            }
+        }
+        .fixedSize()
+    }
 }
 
 struct PanelTabButton: View {
     let title: String
     let selected: Bool
+    var padding: CGFloat = 8
     let action: () -> Void
     @State private var hovering = false
 
     var body: some View {
         Button(action: action) {
             VStack(spacing: 5) {
+                // The label reserves its medium-weight width so selecting a tab doesn't shift the row.
                 Text(title)
-                    .font(.system(size: 12.5, weight: selected ? .medium : .regular))
-                    .foregroundStyle(selected ? Color.hText : (hovering ? Color.hText.opacity(0.8) : Color.hSecondary))
+                    .font(.system(size: 12.5, weight: .medium))
+                    .hidden()
+                    .overlay(
+                        Text(title)
+                            .font(.system(size: 12.5, weight: selected ? .medium : .regular))
+                            .foregroundStyle(selected ? Color.hText : (hovering ? Color.hText.opacity(0.8) : Color.hSecondary))
+                    )
                 Rectangle().fill(selected ? Color.hText.opacity(0.85) : .clear).frame(height: 1.5)
             }
-            .padding(.horizontal, 8)
+            .padding(.horizontal, padding)
             .padding(.top, 8)
             .contentShape(Rectangle())
         }

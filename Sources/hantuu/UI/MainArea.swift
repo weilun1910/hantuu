@@ -122,7 +122,7 @@ struct ChatHeader: View {
                     Text("hantuu").font(.system(size: 13, weight: .medium)).foregroundStyle(Color.hSecondary)
                 }
                 Spacer()
-                IconButton(symbol: "text.book.closed", help: "Reader  ⌥⌘3", active: model.panelVisible && model.panelTab == .reader) {
+                IconButton(symbol: "text.book.closed", help: "Reader  ⌥⌘6", active: model.panelVisible && model.panelTab == .reader) {
                     if model.panelVisible && model.panelTab == .reader { model.panelVisible = false } else {
                         model.panelTab = .reader
                         model.panelVisible = true
