@@ -329,7 +329,14 @@ enum SelfTest {
             check("surface: libghostty starts", false, "ghostty_init/app_new failed")
             return
         }
-        check("surface: libghostty starts with the user's Ghostty config", true)
+        check("surface: libghostty starts", true)
+        if let own = GhosttyApp.loadConfig(useGhosttyConfig: false) {
+            let bg = GhosttyApp.color(own, key: "background")
+            check("terminal: hantuu's own look is the default", Paths.terminalTheme != nil
+                  && bg.map { abs($0.redComponent - 0x16 / 255.0) < 0.01 && abs($0.blueComponent - 0x16 / 255.0) < 0.01 } == true,
+                  "theme=\(Paths.terminalTheme?.path ?? "missing") bg=\(String(describing: bg))")
+            ghostty_config_free(own)
+        }
         let w = makeWindow()
         let rec = Recorder()
         let script = #"printf 'hantuu-selftest-%s\n' ok; printf '\033]0;selftest title\007'; echo 'https://example.com/hantuu-selftest-link-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'; read -r line; echo "got:$line"; read -r p; echo "path:$p"; exit 3"#

@@ -18,8 +18,8 @@ final class GhosttyApp {
     var backgroundColor: NSColor { Self.color(config, key: "background") ?? NSColor(hex: 0x161616) }
     var foregroundColor: NSColor { Self.color(config, key: "foreground") ?? NSColor(hex: 0xE6E6E6) }
 
-    /// Call once, before any surface exists. Loads the user's normal Ghostty config files
-    /// (read-only) so the terminals get the same font, colours and padding as Ghostty.
+    /// Call once, before any surface exists. Loads hantuu's terminal look, and the user's own
+    /// Ghostty config on top of it when Settings asks for that (read-only either way).
     @discardableResult
     static func start() -> GhosttyApp? {
         if let shared { return shared }
@@ -49,13 +49,20 @@ final class GhosttyApp {
         return instance
     }
 
-    private static func loadConfig() -> ghostty_config_t? {
+    static func loadConfig(useGhosttyConfig: Bool = TerminalSettings.shared.useGhosttyConfig) -> ghostty_config_t? {
         guard let cfg = ghostty_config_new() else {
             Log.write("ghostty_config_new failed")
             return nil
         }
-        ghostty_config_load_default_files(cfg)
-        ghostty_config_load_recursive_files(cfg)
+        if let theme = Paths.terminalTheme {
+            theme.path.withCString { ghostty_config_load_file(cfg, $0) }
+        } else {
+            Log.write("terminal.ghostty not found, using Ghostty's defaults")
+        }
+        if useGhosttyConfig {
+            ghostty_config_load_default_files(cfg)
+            ghostty_config_load_recursive_files(cfg)
+        }
         ghostty_config_finalize(cfg)
         return cfg
     }
