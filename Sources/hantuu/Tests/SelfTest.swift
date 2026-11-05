@@ -46,6 +46,7 @@ enum SelfTest {
         reader(workdir)
         sessions(workdir) // Sessions/SessionSelfTest.swift
         review(workdir)
+        status(workdir)   // agent states, hooks, notifications, snapshots (Status/StatusSelfTest.swift)
 
         print("\n\(passes) passed, \(failures) failed")
         return failures == 0 ? 0 : 1

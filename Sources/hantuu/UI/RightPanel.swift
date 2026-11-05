@@ -316,7 +316,7 @@ struct ReaderBarTitle: View {
     @ObservedObject var chat: Chat
     var body: some View {
         HStack(spacing: 7) {
-            StatusDot(status: chat.status)
+            ActivityDot(activity: chat.activity)
             Text(chat.displayTitle).font(.system(size: 12)).foregroundStyle(Color.hText).lineLimit(1)
             if chat.follower != nil && chat.status != .ended {
                 Text("Live").font(.system(size: 11)).foregroundStyle(Color.hTertiary)

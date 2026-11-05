@@ -144,7 +144,7 @@ struct ChatTitle: View {
 
     var body: some View {
         HStack(spacing: 8) {
-            StatusDot(status: chat.status)
+            ActivityDot(activity: chat.activity)
             Text(chat.displayTitle)
                 .font(.system(size: 13, weight: .medium))
                 .foregroundStyle(Color.hText)

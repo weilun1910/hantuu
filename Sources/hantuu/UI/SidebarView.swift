@@ -10,6 +10,7 @@ struct SidebarView: View {
                 WindowDragArea()
                 HStack(spacing: 2) {
                     Spacer()
+                    NeedsYouButton()
                     IconButton(symbol: "sidebar.left", help: "Hide Sidebar  ⌘0") { model.sidebarVisible = false }
                     NewChatButton(projectID: nil, compact: false)
                 }
@@ -133,24 +134,21 @@ struct ChatRow: View {
 
     var body: some View {
         HStack(spacing: 9) {
-            StatusDot(status: chat.status).frame(width: 12)
+            ActivityDot(activity: chat.activity).frame(width: 12)
             VStack(alignment: .leading, spacing: 1) {
                 Text(chat.displayTitle)
                     .font(.system(size: 13))
-                    .foregroundStyle(selected ? Color.hText : Color.hText.opacity(0.88))
+                    .foregroundStyle(selected ? Color.hText : Color.hText.opacity(chat.activity == .ended ? 0.62 : 0.88))
                     .lineLimit(1)
                     .truncationMode(.tail)
+                // What the agent is doing: "Wants to run Bash: npm test", "Done 2m ago".
+                // A worktree chat's branch comes first (Sessions/).
                 HStack(spacing: 6) {
-                    Text(chat.agent.name)
-                    if chat.status == .needsYou {
-                        Text("Needs you").foregroundStyle(Color(nsColor: Theme.needsYou))
-                    } else if chat.status == .ended {
-                        Text("Ended")
-                    }
+                    WorktreeBranchLabel(chat: chat)
+                        .font(.system(size: 11))
+                        .foregroundStyle(Color.hTertiary)
+                    ActivityDetailText(chat: chat)
                 }
-                .font(.system(size: 11))
-                .foregroundStyle(Color.hTertiary)
-                .lineLimit(1)
             }
             Spacer(minLength: 0)
             if let index, index < 9, hovering || selected {
