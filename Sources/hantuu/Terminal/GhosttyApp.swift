@@ -243,7 +243,7 @@ final class GhosttyApp {
             return true
 
         // Ghostty keybindings that mean "new terminal", "new window" and so on map onto
-        // hantuu's own commands, so Felix's muscle memory from Ghostty still does something
+        // hantuu's own commands, so muscle memory from Ghostty still does something
         // sensible here.
         case GHOSTTY_ACTION_NEW_TAB:
             DispatchQueue.main.async { AppActions.shared.newTerminalTab() }

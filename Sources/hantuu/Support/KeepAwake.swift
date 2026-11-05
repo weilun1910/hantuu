@@ -1,7 +1,7 @@
 import AppKit
 import IOKit.pwr_mgt
 
-/// The global "keep the Mac awake" switch. Felix keeps the Mac running with the lid shut via
+/// The global "keep the Mac awake" switch. It keeps the Mac running with the lid shut via
 /// `sudo pmset -a disablesleep 1` (and undoes it with `disablesleep 0`). Turning this on
 /// runs that through macOS's standard administrator prompt and also holds an IOKit
 /// no-sleep assertion while hantuu is open. The real state is read from `pmset -g` because

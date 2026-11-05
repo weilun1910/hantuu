@@ -72,7 +72,7 @@ enum AgentCatalog {
     }
 
     /// Detects installed agents through the user's login shell, because a GUI app doesn't
-    /// inherit the PATH Felix has in Ghostty (claude and codex live in ~/.local/bin).
+    /// inherit the PATH you have in Ghostty (claude and codex often live in ~/.local/bin).
     static func detect(timeout: TimeInterval = 10) -> [AgentDefinition] {
         let output = LoginShell.run(detectScript, timeout: timeout)
         let found = parseDetectOutput(output)
@@ -97,7 +97,7 @@ enum LoginShell {
 
     /// The command string handed to libghostty for an agent chat. libghostty itself wraps it
     /// as `login -flp <user> bash -c "exec -l <this>"`, so the agent ends up under a login,
-    /// interactive shell: the same environment Felix gets in a Ghostty window.
+    /// interactive shell: the same environment you get in a Ghostty window.
     /// It clears the screen first, so a chat opens on the agent rather than on login(1)'s
     /// "Last login" line.
     static func surfaceCommand(_ argv: [String]) -> String {

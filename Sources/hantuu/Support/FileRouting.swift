@@ -13,7 +13,7 @@ struct DetectedPath: Codable, Equatable {
 }
 
 /// Finds file paths in agent output that exist on disk. Handles absolute paths with spaces
-/// and emoji (Felix's projects live under ".../Mobile Documents/com~apple~CloudDocs/..."),
+/// and emoji (iCloud Drive projects live under ".../Mobile Documents/com~apple~CloudDocs/..."),
 /// ~/ paths, file:// URLs, relative paths against the project folder, and :line suffixes.
 enum PathDetector {
     static let imageExtensions: Set<String> = ["png", "jpg", "jpeg", "gif", "webp", "heic", "heif", "bmp", "tif", "tiff", "svg", "ico", "avif"]
