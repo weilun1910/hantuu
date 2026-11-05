@@ -49,16 +49,16 @@ struct ChatFaceButtons: View {
     @ObservedObject var mode = ReaderMode.shared
 
     var body: some View {
-        if let chat = model.selectedChat {
-            let reader = mode.face(of: chat) == .reader
-            if !reader {
-                IconButton(symbol: "text.book.closed", help: "Reader in the Panel  ⌥⌘6", active: model.panelVisible && model.panelTab == .reader) {
-                    if model.panelVisible && model.panelTab == .reader { model.panelVisible = false } else {
-                        model.panelTab = .reader
-                        model.panelVisible = true
-                    }
+        let reader = model.selectedChat.map { mode.face(of: $0) == .reader } ?? false
+        if !reader {
+            IconButton(symbol: "text.book.closed", help: "Reader in the Panel  ⌥⌘6", active: model.panelVisible && model.panelTab == .reader) {
+                if model.panelVisible && model.panelTab == .reader { model.panelVisible = false } else {
+                    model.panelTab = .reader
+                    model.panelVisible = true
                 }
             }
+        }
+        if model.selectedChat != nil {
             IconButton(symbol: reader ? "terminal" : "text.alignleft",
                        help: reader ? "Show Terminal  ⌥⌘R" : "Show as Reader  ⌥⌘R") {
                 ReaderModeMenuTarget.shared.toggle(model: model)
@@ -121,8 +121,8 @@ final class ReaderModeStatusModel: ObservableObject {
     static func height(for mode: ComposerMode) -> CGFloat {
         switch mode {
         case .none, .ready: return 0
-        case .starting, .working, .asked: return 26
-        case .blocked: return 74
+        case .starting, .working, .asked: return 24
+        case .blocked: return 60
         }
     }
 }
@@ -147,9 +147,7 @@ struct ReaderModeStatus: View {
                     Text(detail).foregroundStyle(Color.hSecondary).lineLimit(1).truncationMode(.tail).help(detail)
                     if let chat = state.chat { Elapsed(since: chat.activitySince) }
                     Spacer(minLength: 8)
-                    Button("Stop") { state.stop() }
-                        .buttonStyle(BarButtonStyle(prominent: false))
-                        .help("Stop \(state.agentName) (sends Esc)  esc")
+                    StopHint(agentName: state.agentName, stop: state.stop)
                 }
             case .asked(let question):
                 line {
@@ -168,8 +166,35 @@ struct ReaderModeStatus: View {
     private func line<C: View>(@ViewBuilder _ content: () -> C) -> some View {
         HStack(spacing: 8) { content() }
             .font(.system(size: 12))
-            .padding(.horizontal, 4)
-            .frame(height: 26)
+            .padding(.horizontal, 10)
+            .frame(height: 24)
+    }
+}
+
+/// "esc to stop" at the end of the working line: a quiet button with a key cap, the way the
+/// agents' own terminals say "esc to interrupt".
+struct StopHint: View {
+    let agentName: String
+    let stop: () -> Void
+    @State private var hovering = false
+
+    var body: some View {
+        Button(action: stop) {
+            HStack(spacing: 5) {
+                Text("esc")
+                    .font(.system(size: 10.5, weight: .medium))
+                    .padding(.horizontal, 4)
+                    .frame(height: 16)
+                    .background(RoundedRectangle(cornerRadius: 4).fill(Color.white.opacity(hovering ? 0.1 : 0.06)))
+                Text("to stop")
+            }
+            .font(.system(size: 12))
+            .foregroundStyle(hovering ? Color.hText : Color.hTertiary)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering = $0 }
+        .help("Stop \(agentName). Sends Esc to its terminal.")
     }
 }
 
@@ -194,7 +219,8 @@ struct Elapsed: View {
     }
 }
 
-/// Above the message box when a menu waits in the terminal.
+/// Tucked onto the top of the message box when a menu waits in the terminal: what it's about,
+/// and Show Terminal to answer it there. The shape follows T3 Code's question drawer.
 struct NeedsBanner: View {
     let title: String
     let detail: String
@@ -202,32 +228,55 @@ struct NeedsBanner: View {
     let showTerminal: () -> Void
 
     var body: some View {
-        HStack(alignment: .center, spacing: 12) {
-            Rectangle().fill(Color(nsColor: Theme.needsYou)).frame(width: 2)
-            VStack(alignment: .leading, spacing: 3) {
+        let shape = UnevenRoundedRectangle(topLeadingRadius: 10, bottomLeadingRadius: 0, bottomTrailingRadius: 0, topTrailingRadius: 10, style: .continuous)
+        HStack(alignment: .center, spacing: 10) {
+            Image(systemName: title.hasSuffix("permission") ? "hand.raised" : "questionmark.bubble")
+                .font(.system(size: 12.5))
+                .foregroundStyle(Color(nsColor: Theme.needsYou))
+                .frame(width: 18)
+            VStack(alignment: .leading, spacing: 2) {
                 Text(title)
                     .font(.system(size: 11.5, weight: .medium))
                     .foregroundStyle(Color(nsColor: Theme.needsYou))
-                Text(detail)
-                    .font(.system(size: 13))
-                    .foregroundStyle(Color.hText)
                     .lineLimit(1)
-                    .truncationMode(.tail)
-                    .help(detail)
-                Text("Answer it in the terminal. The reader comes back once \(agentName) carries on.")
-                    .font(.system(size: 11))
-                    .foregroundStyle(Color.hTertiary)
-                    .lineLimit(1)
+                DetailText(detail: detail)
             }
             Spacer(minLength: 8)
             Button("Show Terminal") { showTerminal() }
                 .buttonStyle(BarButtonStyle(prominent: true))
+                .help("Answer it in the terminal. The reader comes back once \(agentName) carries on.")
         }
-        .padding(.vertical, 10)
-        .padding(.trailing, 12)
-        .frame(height: 66)
-        .background(RoundedRectangle(cornerRadius: 8).fill(Color.white.opacity(0.03)))
-        .clipShape(RoundedRectangle(cornerRadius: 8))
+        .padding(.leading, 12)
+        .padding(.trailing, 10)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(shape.fill(Color(nsColor: Theme.background.blended(withFraction: 0.06, of: .white) ?? Theme.background)))
+        .overlay(shape.stroke(Color.white.opacity(0.085), lineWidth: 1))
+        .padding(.horizontal, 12)
+    }
+}
+
+/// "Wants to run Bash: npm test" with the command in the code font.
+struct DetailText: View {
+    let detail: String
+
+    var body: some View {
+        let parts = Self.split(detail)
+        Group {
+            if let code = parts.code {
+                Text(parts.lead + ": ").font(.system(size: 13)) + Text(code).font(.system(size: 12.5, design: .monospaced))
+            } else {
+                Text(detail).font(.system(size: 13))
+            }
+        }
+        .foregroundStyle(Color.hText)
+        .lineLimit(1)
+        .truncationMode(.tail)
+        .help(detail)
+    }
+
+    static func split(_ s: String) -> (lead: String, code: String?) {
+        guard s.hasPrefix("Wants to run"), let r = s.range(of: ": ") else { return (s, nil) }
+        return (String(s[..<r.lowerBound]), String(s[r.upperBound...]))
     }
 }
 

@@ -42,16 +42,8 @@ final class HantuuSchemeHandler: NSObject, WKURLSchemeHandler {
 }
 
 /// A WKWebView that loads one bundled page and talks to Swift through `hantuu` messages.
-final class HantuuWebView: WKWebView {
-    /// Reader mode's page never takes the keyboard from the message box under it.
-    var refusesFocus = false
-    var onMouseDown: (() -> Void)?
-    override var acceptsFirstResponder: Bool { !refusesFocus }
-    override func becomeFirstResponder() -> Bool { refusesFocus ? false : super.becomeFirstResponder() }
-    override func mouseDown(with event: NSEvent) {
-        super.mouseDown(with: event)
-        onMouseDown?()
-    }
+class HantuuWebView: WKWebView {
+    override var acceptsFirstResponder: Bool { true }
 }
 
 final class WebPage: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
@@ -61,7 +53,8 @@ final class WebPage: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
     var onMessage: (([String: Any]) -> Void)?
     var onReady: (() -> Void)?
 
-    init(page: String, identifier: String) {
+    /// `focusless` makes reader mode's page, which never takes the keyboard (ReaderMode/).
+    init(page: String, identifier: String, focusless: Bool = false) {
         let config = WKWebViewConfiguration()
         config.setURLSchemeHandler(HantuuSchemeHandler(), forURLScheme: "hantuu")
         // Nothing is stored between launches.
@@ -69,7 +62,7 @@ final class WebPage: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
         let ucc = WKUserContentController()
         config.userContentController = ucc
         config.preferences.isElementFullscreenEnabled = false
-        webView = HantuuWebView(frame: .zero, configuration: config)
+        webView = focusless ? FocuslessWebView(frame: .zero, configuration: config) : HantuuWebView(frame: .zero, configuration: config)
         super.init()
         ucc.add(self, name: "hantuu")
         webView.identifier = NSUserInterfaceItemIdentifier(identifier)

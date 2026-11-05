@@ -5,6 +5,8 @@ private struct ReaderPayload: Encodable {
     var chatID: String?
     var entries: [ReaderEntry]
     var emptyText: String
+    /// The chat's folder, so reader mode can show paths inside it relative to it.
+    var base: String? = nil
 }
 
 /// Shows the selected chat's transcript in the reader page and keeps it live.
@@ -15,8 +17,8 @@ final class ReaderController {
     private var bag = Set<AnyCancellable>()
 
     /// Reader mode makes a second one for the main area, with `layout=main` in the page URL.
-    init(model: AppModel, page: String = "reader.html", identifier: String = "hantuu.reader") {
-        self.page = WebPage(page: page, identifier: identifier)
+    init(model: AppModel, page: String = "reader.html", identifier: String = "hantuu.reader", focusless: Bool = false) {
+        self.page = WebPage(page: page, identifier: identifier, focusless: focusless)
         self.model = model
         self.page.onReady = { [weak self] in self?.reload() }
         self.page.onMessage = { [weak self] msg in self?.handle(msg) }
@@ -52,7 +54,8 @@ final class ReaderController {
         } else {
             empty = "Pick a chat to read it here."
         }
-        page.call("reset", ReaderPayload(chatID: chat?.id.uuidString, entries: chat?.allEntries ?? [], emptyText: empty))
+        page.call("reset", ReaderPayload(chatID: chat?.id.uuidString, entries: chat?.allEntries ?? [], emptyText: empty,
+                                         base: chat.map { model.workingDirectory(of: $0) }))
     }
 
     private func handle(_ msg: [String: Any]) {
@@ -69,6 +72,11 @@ final class ReaderController {
             guard let href = msg["href"] as? String else { return }
             let b = (msg["base"] as? String) ?? base
             FileRouter.shared.open(href.removingPercentEncoding ?? href, base: b)
+        case "copy":
+            // Reader mode's copy buttons on messages and code blocks.
+            guard let text = msg["text"] as? String, !text.isEmpty else { return }
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(text, forType: .string)
         default:
             break
         }

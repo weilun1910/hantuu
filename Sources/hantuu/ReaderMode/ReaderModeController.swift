@@ -37,12 +37,13 @@ final class ReaderModeController: NSObject {
     private var bottomHeight: NSLayoutConstraint!
     private var statusHeight: NSLayoutConstraint!
     private var composerHeight: NSLayoutConstraint!
+    private var statusGap: NSLayoutConstraint!
 
     /// The one in the main window, for Files' Option-click.
     static weak var main: ReaderModeController?
 
     /// The width of the text column, the same as the reader page's (body.main in style.css).
-    static let columnWidth: CGFloat = 680
+    static let columnWidth: CGFloat = 720
     static let sideMargin: CGFloat = 32
 
     init(model: AppModel, mode: ReaderMode = .shared) {
@@ -89,8 +90,10 @@ final class ReaderModeController: NSObject {
             bottom.bottomAnchor.constraint(equalTo: root.bottomAnchor),
             bottomHeight!, statusHeight!, composerHeight!,
             composer.bottomAnchor.constraint(equalTo: bottom.bottomAnchor, constant: -16),
-            statusHost.bottomAnchor.constraint(equalTo: composer.topAnchor, constant: -6),
         ]
+        // The working line sits just above the box; the banner is tucked onto its top edge.
+        statusGap = statusHost.bottomAnchor.constraint(equalTo: composer.topAnchor, constant: -6)
+        cs.append(statusGap)
         for v in [statusHost!, composer] as [NSView] {
             let wide = v.widthAnchor.constraint(equalToConstant: Self.columnWidth)
             wide.priority = .defaultHigh
@@ -129,17 +132,24 @@ final class ReaderModeController: NSObject {
     /// second web view for people who never turn reader mode on.
     private func ensureReader() {
         guard reader == nil else { return }
-        let r = ReaderController(model: model, page: "reader.html?layout=main", identifier: "hantuu.reader.main")
-        r.page.webView.refusesFocus = true
-        r.page.webView.onMouseDown = { [weak self] in self?.focusComposer() }
+        let r = ReaderController(model: model, page: "reader.html?layout=main", identifier: "hantuu.reader.main", focusless: true)
+        (r.page.webView as? FocuslessWebView)?.onMouseDown = { [weak self] in self?.focusComposer() }
         let v = r.view
         v.translatesAutoresizingMaskIntoConstraints = false
         root.addSubview(v, positioned: .below, relativeTo: bottom)
+        // Text scrolling down to the message box fades out instead of stopping at a hard edge.
+        let fade = FadeEdge()
+        fade.translatesAutoresizingMaskIntoConstraints = false
+        root.addSubview(fade, positioned: .above, relativeTo: v)
         NSLayoutConstraint.activate([
             v.topAnchor.constraint(equalTo: root.topAnchor),
             v.leadingAnchor.constraint(equalTo: root.leadingAnchor),
             v.trailingAnchor.constraint(equalTo: root.trailingAnchor),
             v.bottomAnchor.constraint(equalTo: bottom.topAnchor),
+            fade.leadingAnchor.constraint(equalTo: root.leadingAnchor),
+            fade.trailingAnchor.constraint(equalTo: root.trailingAnchor),
+            fade.bottomAnchor.constraint(equalTo: bottom.topAnchor),
+            fade.heightAnchor.constraint(equalToConstant: 22),
         ])
         reader = r
     }
@@ -260,26 +270,29 @@ final class ReaderModeController: NSObject {
         }
         composer.isHidden = m == .none
         statusHost.isHidden = ReaderModeStatusModel.height(for: m) == 0
-        composer.enabled = m != .none
+        composer.enabled = !m.isBlocked
         composer.textView.isEditable = m != .none
-        composer.textView.placeholder = m.isBlocked ? "Answer in the terminal first" : "Message \(chat.agent.name)"
+        composer.textView.placeholder = m.isBlocked ? "Answer in the terminal to carry on" : "Message \(chat.agent.name)"
         updateAction()
         updateHeights()
     }
 
+    /// Send, or Stop while the agent works and the box is empty.
     private func updateAction() {
         let hasText = ComposerMessage.prepare(composer.textView.string) != nil
-        composer.action.kind = .send
+        composer.action.kind = composerMode.isWorking && !hasText ? .stop : .send
         composer.action.active = composerMode.canSend && hasText
     }
 
     private func updateHeights() {
         let s = ReaderModeStatusModel.height(for: composerMode)
         let c = composer.preferredHeight
+        let gap: CGFloat = composerMode.isBlocked ? -1 : (s > 0 ? 6 : 0)
         statusHeight.constant = s
+        statusGap.constant = -gap
         composerHeight.constant = c
         // An ended chat leaves room for the Resume bar MainAreaController draws there.
-        bottomHeight.constant = composerMode == .none ? 38 : 12 + s + (s > 0 ? 6 : 0) + c + 16
+        bottomHeight.constant = composerMode == .none ? 38 : 14 + s + gap + c + 16
     }
 
     private func textChanged() {
@@ -369,5 +382,46 @@ final class ReaderModeController: NSObject {
         composer.textView.insertTyped(text)
         focusComposer()
         return true
+    }
+}
+
+/// A short gradient from clear to the window's background, over the bottom of the reader.
+final class FadeEdge: NSView {
+    private let gradient = CAGradientLayer()
+
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        wantsLayer = true
+        layer?.addSublayer(gradient)
+        let bg = Theme.background
+        gradient.colors = [bg.withAlphaComponent(0).cgColor, bg.cgColor]
+        // Layer coordinates: y grows upward, so the opaque end is at the bottom.
+        gradient.startPoint = CGPoint(x: 0.5, y: 1)
+        gradient.endPoint = CGPoint(x: 0.5, y: 0)
+    }
+    required init?(coder: NSCoder) { fatalError() }
+
+    override func layout() {
+        super.layout()
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        gradient.frame = bounds
+        CATransaction.commit()
+    }
+
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+}
+
+/// Reader mode's page. It never becomes the first responder, so the keyboard stays in the
+/// message box, and a click on it hands the keyboard back to the box. Text can still be
+/// selected; Copy with nothing selected in the box copies it. The shared HantuuWebView stays
+/// as it was, so the panel's pages behave exactly as before.
+final class FocuslessWebView: HantuuWebView {
+    var onMouseDown: (() -> Void)?
+    override var acceptsFirstResponder: Bool { false }
+    override func becomeFirstResponder() -> Bool { false }
+    override func mouseDown(with event: NSEvent) {
+        super.mouseDown(with: event)
+        onMouseDown?()
     }
 }

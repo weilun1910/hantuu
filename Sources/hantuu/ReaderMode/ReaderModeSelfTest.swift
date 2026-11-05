@@ -149,7 +149,9 @@ extension SelfTest {
         let four = box.preferredHeight
         box.textView.text = (1...40).map { "line \($0)" }.joined(separator: "\n")
         let many = box.preferredHeight
-        check("message box: grows with the text, up to a limit", four > one && many > four && many <= ComposerStyle.lineHeight * ComposerStyle.maxLines + ComposerBox.padV * 2 + 0.5,
+        let cap = ComposerBox.padTop + ComposerStyle.lineHeight * ComposerStyle.maxLines + ComposerBox.footer
+        check("message box: two lines to start, grows with the text, up to a limit",
+              abs(one - (ComposerBox.padTop + ComposerStyle.lineHeight * 2 + ComposerBox.footer)) < 0.5 && four > one && many > four && many <= cap + 0.5,
               "one=\(one) four=\(four) many=\(many)")
     }
 
@@ -216,7 +218,7 @@ extension SelfTest {
             _ = w.makeFirstResponder(wv)
             check("focus: the reader page never becomes the first responder", w.firstResponder !== wv)
             w.makeFirstResponder(nil)
-            wv.onMouseDown?()
+            (wv as? FocuslessWebView)?.onMouseDown?()
             check("focus: a click on the reader puts the keyboard back in the message box", w.firstResponder === rm.composer.textView)
         }
 
@@ -243,6 +245,10 @@ extension SelfTest {
         chat.activityDetail = "Running Bash: swift build"
         rm.refresh()
         check("working: the working line shows the detail", rm.composerMode == .working(detail: "Running Bash: swift build") && !rm.statusHost.isHidden && rm.status.mode.isWorking)
+        check("stop: the send button turns into Stop while the box is empty", rm.composer.action.kind == .stop)
+        rm.composer.textView.text = "queued thought"
+        check("stop: it's Send again once there's text to send", rm.composer.action.kind == .send && rm.composer.action.active)
+        rm.composer.textView.text = ""
         let stopped = rm.stop()
         check("stop: sends Esc to the terminal", stopped && waitUntil(5) { bytes().count == before + 1 && bytes().last == 0x1B }, bytes().suffix(8).map { String(format: "%02x", $0) }.joined(separator: " "))
         if let e = keyEvent(53, "\u{1b}", window: w) { rm.composer.textView.keyDown(with: e) }
@@ -390,6 +396,32 @@ extension SelfTest {
             return render(main.view, to: out.appendingPathComponent(name))
         }
         let idle = shot("reader-mode-idle.png")
+        if let page = rm.reader?.page {
+            let summary = js(page, "(document.querySelector('.toolgroup .sumtext') || {}).textContent || ''") as? String ?? ""
+            check("reader page: a run of tool calls folds into one summary line", summary == "Ran a command, read a file and 1 more", summary)
+            let rel = js(page, "Array.from(document.querySelectorAll('.toolrows a.path')).map(a => a.textContent).join('|')") as? String ?? ""
+            check("reader page: paths in the chat's folder read relative to it", rel.contains("Package.swift") && !rel.contains("/"), rel)
+            let lang = js(page, "Array.from(document.querySelectorAll('.codeblock .codehead .lang')).map(l => l.textContent).join('|')") as? String ?? ""
+            check("reader page: code blocks get a header with the language", lang == "swift|bash", lang)
+            let bubble = js(page, "getComputedStyle(document.querySelector('.entry.user')).alignItems + '|' + getComputedStyle(document.querySelector('.entry.user > .label')).display") as? String ?? ""
+            check("reader page: your messages are bubbles on the right, without a label", bubble == "flex-end|none", bubble)
+            _ = js(page, "document.querySelector('.toolgroup .toolsum').click(); 0")
+            let opened = js(page, "document.querySelector('.toolgroup').classList.contains('open') && getComputedStyle(document.querySelector('.toolgroup .toolrows')).display === 'block'") as? Bool ?? false
+            check("reader page: clicking the summary shows the steps", opened)
+            _ = js(page, "document.scrollingElement.scrollTop = 0; 0")
+            _ = shot("reader-mode-steps-open.png")
+            _ = js(page, "document.scrollingElement.scrollTop = document.scrollingElement.scrollHeight; 0")
+            _ = js(page, "document.querySelector('.toolgroup .toolsum').click(); 0")
+            let panel = WebPage(page: "reader.html", identifier: "selftest.reader.panel")
+            panel.webView.frame = NSRect(x: 0, y: 0, width: 500, height: 400)
+            w.contentView?.addSubview(panel.webView)
+            _ = waitUntil(10) { panel.ready }
+            panel.call("reset", ["chatID": "p", "entries": try! JSONSerialization.jsonObject(with: JSONEncoder().encode(f.entries)), "emptyText": ""])
+            _ = waitUntil(3) { (js(panel, "document.querySelectorAll('section.entry').length") as? Int ?? 0) > 3 }
+            let plain = js(panel, "document.querySelectorAll('.toolgroup, .codeblock, .meta').length === 0 && !document.body.classList.contains('main')") as? Bool ?? false
+            check("reader page: the panel's Reader keeps its own look", plain)
+            panel.webView.removeFromSuperview()
+        }
 
         chat.activity = .working
         chat.activityDetail = "Running Bash: swift build"

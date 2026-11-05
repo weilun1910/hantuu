@@ -80,9 +80,10 @@ struct ScreenMenu: Equatable {
 }
 
 enum TerminalScreen {
-    /// Lines in an agent's idle prompt footer. Claude Code and Codex both show one of these
-    /// once their message box is up.
-    static let readyMarks = ["for shortcuts", "context left"]
+    /// Lines in an agent's prompt footer. Claude Code and Codex show one of these once their
+    /// message box is up (a permission mode replaces Claude Code's "? for shortcuts" with
+    /// "shift+tab to cycle"), and "esc to interrupt" while a turn runs.
+    static let readyMarks = ["for shortcuts", "context left", "shift+tab to cycle", "esc to interrupt"]
 
     static let trustMarks = ["do you trust", "trust the files", "trust this folder", "trust the contents",
                              "allow codex to work in this folder", "one you trust"]

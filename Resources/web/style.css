@@ -239,7 +239,160 @@ body.code.previewing #view { max-width: 720px; margin: 0 auto; padding: 22px 28p
 .hljs-strong { font-weight: 600; }
 .hljs-link { color: var(--link); }
 
-/* ---- Reader mode: the reader as the chat's main view (reader.html?layout=main) ---- */
-body.reader.main { font-size: 15.5px; line-height: 1.65; }
-body.reader.main #entries { max-width: 744px; padding: 36px 32px 28px; }
-body.reader.main .empty { padding-top: 22vh; font-size: 13.5px; }
+/* ---- Reader mode: the reader as the chat's main view (reader.html?layout=main) ----
+   Layout ideas from T3 Code's chat view (github.com/pingdotgg/t3code, MIT): bubbles for your
+   messages, a folded work log, a code block header and a hover row. Quieter here: neutral greys,
+   thin lines, smaller radii and less motion. The panel's Reader is unaffected. */
+body.reader.main { font-size: 15px; line-height: 1.66; }
+body.reader.main #entries { max-width: 784px; padding: 30px 32px 20px; }
+body.reader.main .entry { margin: 0 0 16px; }
+body.reader.main .entry.assistant { margin-bottom: 4px; }
+body.reader.main .entry.assistant .md { color: #dadada; }
+body.reader.main .entry .md > :last-child { margin-bottom: 0; }
+
+/* Your messages: a quiet bubble on the right, no label. */
+body.reader.main .entry.user {
+  background: none;
+  padding: 0;
+  margin: 18px 0 8px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+}
+body.reader.main .entry.user:first-child { margin-top: 0; }
+body.reader.main .entry.user > .label { display: none; }
+body.reader.main .entry.user > .md {
+  max-width: 82%;
+  background: rgba(255, 255, 255, 0.062);
+  border-radius: 14px;
+  padding: 9px 15px;
+}
+body.reader.main .entry.user > .md > :last-child { margin-bottom: 0; }
+body.reader.main .entry.user .media { align-items: flex-end; }
+
+/* Time and Copy under a message, shown on hover. */
+body.reader.main .meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 22px;
+  margin-top: 4px;
+  font-size: 11.5px;
+  color: var(--tertiary);
+  font-variant-numeric: tabular-nums;
+  opacity: 0;
+  transition: opacity 0.2s ease;
+}
+body.reader.main .entry:hover > .meta { opacity: 1; }
+body.reader.main button.copy {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 22px;
+  padding: 0 6px;
+  font: 11.5px -apple-system, BlinkMacSystemFont, sans-serif;
+  color: var(--tertiary);
+  background: none;
+  border: 0;
+  border-radius: 5px;
+  cursor: pointer;
+}
+body.reader.main button.copy:hover { color: var(--text); background: var(--fill); }
+body.reader.main button.copy.done { color: var(--secondary); }
+body.reader.main button.copy svg { width: 13px; height: 13px; }
+
+/* Line icons */
+body.reader.main svg.ticon, body.reader.main svg.chev, body.reader.main button.copy svg {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.3;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  flex: none;
+}
+
+/* Tool calls: one line each with an icon, and runs folded into one summary line. */
+body.reader.main .entry.tool { margin: 0; }
+body.reader.main .entry.tool + .entry:not(.tool),
+body.reader.main .toolgroup + .entry:not(.tool) { margin-top: 10px; }
+body.reader.main .entry.user + .entry.tool, body.reader.main .entry.user + .toolgroup { margin-top: 4px; }
+body.reader.main .toolline { gap: 9px; align-items: center; font-size: 13px; min-height: 26px; }
+body.reader.main .toolline::before { content: none; }
+body.reader.main svg.ticon { width: 15px; height: 15px; color: var(--tertiary); }
+body.reader.main .toolline a.path { border-bottom-color: transparent; }
+body.reader.main .toolline a.path:hover { border-bottom-color: rgba(143, 180, 240, 0.5); }
+body.reader.main pre.full { margin-left: 24px; }
+body.reader.main .entry.tool .media { margin-left: 24px; }
+
+body.reader.main .toolgroup { margin: 2px 0 6px; }
+body.reader.main .toolsum {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-height: 26px;
+  font-size: 13px;
+  color: var(--secondary);
+  cursor: pointer;
+  user-select: none;
+  -webkit-user-select: none;
+}
+body.reader.main .toolsum:hover { color: var(--text); }
+body.reader.main .toolsum:hover svg.ticon { color: var(--secondary); }
+body.reader.main svg.chev { width: 11px; height: 11px; color: var(--tertiary); transition: transform 0.2s ease; }
+body.reader.main .toolgroup.open svg.chev { transform: rotate(90deg); }
+body.reader.main .toolrows { display: none; margin: 2px 0 4px 7px; padding-left: 16px; border-left: 1px solid var(--rule); }
+body.reader.main .toolgroup.open .toolrows { display: block; }
+
+/* Code blocks: a soft panel with the language and Copy on top. */
+body.reader.main .codeblock {
+  margin: 0 0 1em;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.034);
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  overflow: hidden;
+}
+body.reader.main .codehead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: 30px;
+  padding: 0 6px 0 14px;
+}
+body.reader.main .codehead .lang { font: 11px var(--mono); color: var(--tertiary); }
+body.reader.main .codehead button.copy { opacity: 0; transition: opacity 0.2s ease; }
+body.reader.main .codeblock:hover .codehead button.copy { opacity: 1; }
+body.reader.main .codeblock pre {
+  margin: 0;
+  border: 0;
+  border-radius: 0;
+  background: none;
+  padding: 0 14px 12px;
+  font-size: 12.5px;
+}
+body.reader.main .md code { background: rgba(255, 255, 255, 0.07); padding: 1px 5px; border-radius: 4px; }
+body.reader.main .md pre code { background: none; padding: 0; }
+
+/* Needs you, questions, errors and plans keep their accent rule. */
+body.reader.main .entry.plan { border-radius: 8px; }
+
+/* The empty state sits in the middle of the view. */
+body.reader.main .empty {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 56px 8vh;
+  font-size: 13.5px;
+}
+body.reader.main .empty[hidden] { display: none; }
+
+body.reader.main .newpill { bottom: 12px; border-radius: 13px; padding: 4px 12px; background: #262626; }
+
+/* New messages settle in. */
+@keyframes hantuu-rise { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+body.reader.main .fresh { animation: hantuu-rise 0.28s ease-out both; }
+@media (prefers-reduced-motion: reduce) {
+  body.reader.main .fresh { animation: none; }
+  body.reader.main svg.chev, body.reader.main .meta { transition: none; }
+}

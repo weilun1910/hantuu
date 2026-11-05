@@ -193,13 +193,13 @@ enum ComposerStyle {
     static let font = NSFont.systemFont(ofSize: 14)
     static let paragraph: NSParagraphStyle = {
         let p = NSMutableParagraphStyle()
-        p.minimumLineHeight = 20
-        p.maximumLineHeight = 20
+        p.minimumLineHeight = 21
+        p.maximumLineHeight = 21
         return p
     }()
-    static let lineHeight: CGFloat = 20
+    static let lineHeight: CGFloat = 21
     static let text = NSColor(white: 0.92, alpha: 1)
-    static let placeholder = NSColor(white: 0.42, alpha: 1)
+    static let placeholder = NSColor(white: 0.44, alpha: 1)
     static let maxLines: CGFloat = 9
 }
 
@@ -282,29 +282,79 @@ final class ComposerActionButton: NSControl {
     override var isFlipped: Bool { false }
 }
 
-/// The message box: the text view in a scroll view, in a thin rounded frame, with the action
-/// button at its trailing edge. It grows with the text up to `ComposerStyle.maxLines`.
+/// A small borderless icon button for the message box's footer, with a faint hover square.
+final class ComposerIconButton: NSControl {
+    private let symbol: String
+    private var hovering = false { didSet { needsDisplay = true } }
+    private var pressed = false { didSet { needsDisplay = true } }
+
+    init(symbol: String, help: String) {
+        self.symbol = symbol
+        super.init(frame: NSRect(x: 0, y: 0, width: 28, height: 28))
+        toolTip = help
+    }
+    required init?(coder: NSCoder) { fatalError() }
+
+    override var intrinsicContentSize: NSSize { NSSize(width: 28, height: 28) }
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+    override var acceptsFirstResponder: Bool { false }
+
+    override func updateTrackingAreas() {
+        trackingAreas.forEach { removeTrackingArea($0) }
+        addTrackingArea(NSTrackingArea(rect: bounds, options: [.mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect], owner: self))
+        super.updateTrackingAreas()
+    }
+    override func mouseEntered(with event: NSEvent) { hovering = true }
+    override func mouseExited(with event: NSEvent) { hovering = false }
+    override func mouseDown(with event: NSEvent) { pressed = true }
+    override func mouseUp(with event: NSEvent) {
+        pressed = false
+        if bounds.contains(convert(event.locationInWindow, from: nil)), let action { sendAction(action, to: target) }
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        if hovering || pressed {
+            NSColor(white: 1, alpha: pressed ? 0.1 : 0.06).setFill()
+            NSBezierPath(roundedRect: bounds.insetBy(dx: 1, dy: 1), xRadius: 6, yRadius: 6).fill()
+        }
+        let config = NSImage.SymbolConfiguration(pointSize: 13, weight: .regular)
+        guard let img = NSImage(systemSymbolName: symbol, accessibilityDescription: toolTip)?.withSymbolConfiguration(config) else { return }
+        let tint = NSColor(white: 1, alpha: hovering ? 0.75 : 0.45)
+        let tinted = NSImage(size: img.size, flipped: false) { r in
+            img.draw(in: r)
+            tint.set()
+            r.fill(using: .sourceAtop)
+            return true
+        }
+        let s = img.size
+        tinted.draw(in: NSRect(x: bounds.midX - s.width / 2, y: bounds.midY - s.height / 2, width: s.width, height: s.height))
+    }
+}
+
+/// The message box: the text in a scroll view, and a footer row with Add Files on the left and
+/// Send (or Stop) on the right. At least two lines tall, it grows with the text up to
+/// `ComposerStyle.maxLines`. The frame and footer follow T3 Code's composer, in hantuu's greys.
 final class ComposerBox: NSView {
     let textView = ComposerTextView.make()
     let scroll = NSScrollView()
     let action = ComposerActionButton(frame: NSRect(x: 0, y: 0, width: 28, height: 28))
+    let attach = ComposerIconButton(symbol: "paperclip", help: "Add files (or drop them on the box)")
     var onHeightChange: (() -> Void)?
-    static let padV: CGFloat = 13
-    static let padH: CGFloat = 14
+    static let padTop: CGFloat = 12
+    static let padH: CGFloat = 16
+    static let footer: CGFloat = 38
+    static let minLines: CGFloat = 2
 
     var enabled = true {
-        didSet {
-            alphaValue = enabled ? 1 : 0.55
-            needsDisplay = true
-        }
+        didSet { alphaValue = enabled ? 1 : 0.7 }
     }
 
     override init(frame: NSRect) {
         super.init(frame: frame)
         wantsLayer = true
-        layer?.cornerRadius = 12
-        layer?.borderWidth = 1
+        layer?.cornerRadius = 14
         layer?.cornerCurve = .continuous
+        layer?.borderWidth = 1
         scroll.drawsBackground = false
         scroll.borderType = .noBorder
         scroll.hasVerticalScroller = true
@@ -312,35 +362,41 @@ final class ComposerBox: NSView {
         scroll.scrollerStyle = .overlay
         scroll.verticalScrollElasticity = .none
         scroll.documentView = textView
-        scroll.translatesAutoresizingMaskIntoConstraints = false
-        action.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(scroll)
-        addSubview(action)
+        for v in [scroll, action, attach] as [NSView] {
+            v.translatesAutoresizingMaskIntoConstraints = false
+            addSubview(v)
+        }
         NSLayoutConstraint.activate([
             scroll.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Self.padH),
-            scroll.trailingAnchor.constraint(equalTo: action.leadingAnchor, constant: -10),
-            scroll.topAnchor.constraint(equalTo: topAnchor, constant: Self.padV),
-            scroll.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -Self.padV),
-            action.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
-            action.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -8),
+            scroll.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -Self.padH),
+            scroll.topAnchor.constraint(equalTo: topAnchor, constant: Self.padTop),
+            scroll.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -Self.footer),
+            attach.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 8),
+            attach.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -6),
+            attach.widthAnchor.constraint(equalToConstant: 28),
+            attach.heightAnchor.constraint(equalToConstant: 28),
+            action.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -7),
+            action.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -6),
             action.widthAnchor.constraint(equalToConstant: 28),
             action.heightAnchor.constraint(equalToConstant: 28),
         ])
         textView.onTextChange = { [weak self] in self?.onHeightChange?() }
+        attach.target = self
+        attach.action = #selector(addFiles)
         updateColors()
     }
     required init?(coder: NSCoder) { fatalError() }
 
     /// The box's height for the current text.
     var preferredHeight: CGFloat {
-        let lines = min(textView.contentHeight, ComposerStyle.lineHeight * ComposerStyle.maxLines)
-        return lines + Self.padV * 2
+        let lines = min(max(textView.contentHeight, ComposerStyle.lineHeight * Self.minLines), ComposerStyle.lineHeight * ComposerStyle.maxLines)
+        return Self.padTop + lines + Self.footer
     }
 
     func updateColors() {
-        let focused = window?.firstResponder === textView
-        layer?.backgroundColor = NSColor(white: 1, alpha: 0.035).cgColor
-        layer?.borderColor = NSColor(white: 1, alpha: focused ? 0.15 : 0.09).cgColor
+        let focused = window?.firstResponder === textView && window?.isKeyWindow == true
+        layer?.backgroundColor = NSColor(white: 1, alpha: 0.045).cgColor
+        layer?.borderColor = NSColor(white: 1, alpha: focused ? 0.14 : 0.085).cgColor
     }
 
     override func viewDidMoveToWindow() {
@@ -351,5 +407,20 @@ final class ComposerBox: NSView {
     // Clicking anywhere in the frame puts the caret in the text.
     override func mouseDown(with event: NSEvent) {
         window?.makeFirstResponder(textView)
+    }
+
+    @objc private func addFiles() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = true
+        panel.prompt = "Add"
+        panel.message = "The files' paths go into your message."
+        let done: (NSApplication.ModalResponse) -> Void = { [weak self] r in
+            guard let self, r == .OK else { return }
+            self.textView.insertPaths(panel.urls)
+            self.window?.makeFirstResponder(self.textView)
+        }
+        if let w = window { panel.beginSheetModal(for: w, completionHandler: done) } else { done(panel.runModal()) }
     }
 }
