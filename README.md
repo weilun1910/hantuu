@@ -124,7 +124,13 @@ Then build and open the app:
 scripts/run.sh
 ```
 
-After that, `build/hantuu.app` opens from Finder like any other app. Your projects and chats are saved in `~/Library/Application Support/hantuu/`. To try things without touching them, point it at a scratch folder:
+To keep it in your Applications folder, so it opens from Spotlight, Launchpad and the Dock like any other app, install it. Run this again whenever you pull changes:
+
+```bash
+scripts/install.sh
+```
+
+Your projects and chats are saved in `~/Library/Application Support/hantuu/`. To try things without touching them, point it at a scratch folder:
 
 ```bash
 scripts/run.sh --data-dir "$PWD/tmp/appdata"
