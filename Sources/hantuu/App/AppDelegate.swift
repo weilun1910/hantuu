@@ -32,10 +32,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         windowController.showWindow(nil)
         windowController.window?.makeKeyAndOrderFront(nil)
         DispatchQueue.main.async { self.windowController.applyInitialWidths() }
+        if ProcessInfo.processInfo.environment["HANTUU_DEBUG_LAYOUT"] == "1", let w = windowController.window {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
+                Log.write("layout frame=\(w.frame) fitting=\(w.contentView?.fittingSize ?? .zero)")
+                for c in w.contentView?.constraintsAffectingLayout(for: .horizontal) ?? [] { Log.write("  h \(c.priority.rawValue) \(c)") }
+                for c in w.contentView?.constraintsAffectingLayout(for: .vertical) ?? [] { Log.write("  v \(c.priority.rawValue) \(c)") }
+            }
+        }
         NSApp.activate()
 
         // Test launches can open a project and start a chat straight away.
         let args = CommandLine.arguments
+        Log.write("args \(args.dropFirst())")
         if let i = args.firstIndex(of: "--open-project"), i + 1 < args.count {
             model.addProject(path: args[i + 1])
         }
@@ -101,6 +109,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         file.addItem(withItem)
         file.addItem(item("New Terminal Tab", #selector(newTerminal), "t"))
         file.addItem(.separator())
+        file.addItem(item("Open File…", #selector(openFile), "o"))
         file.addItem(item("Add Project…", #selector(addProject), "o", [.command, .shift]))
         file.addItem(.separator())
         file.addItem(item("Close", #selector(closeFocused), "w"))
@@ -176,6 +185,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc func newChatWith(_ sender: NSMenuItem) { model.newChat(agentID: sender.representedObject as? String, projectID: nil) }
     @objc func newTerminal() { model.newTerminalTab() }
     @objc func addProject() { model.addProjectWithPanel() }
+    @objc func openFile() { model.openFileWithPanel() }
     @objc func closeFocused() {
         if let w = NSApp.keyWindow, w !== windowController.window {
             w.performClose(nil)

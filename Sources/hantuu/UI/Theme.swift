@@ -100,6 +100,18 @@ struct WindowDragArea: NSViewRepresentable {
 }
 
 /// NSHostingView that never takes first responder from the terminal by accident.
-final class ChromeHostingView<Content: View>: NSHostingView<Content> {
+/// Its size comes from Auto Layout constraints, not from the SwiftUI content (otherwise an
+/// empty view's zero size would squeeze the whole window), and it ignores the titlebar's
+/// safe area so chrome lines up with the traffic lights.
+final class ChromeHostingView<Content: View>: NSHostingView<AnyView> {
+    init(rootView: Content) {
+        super.init(rootView: AnyView(rootView.ignoresSafeArea()))
+        sizingOptions = []
+    }
+    @MainActor required init(rootView: AnyView) {
+        super.init(rootView: rootView)
+        sizingOptions = []
+    }
+    @MainActor required init?(coder: NSCoder) { fatalError() }
     override var acceptsFirstResponder: Bool { false }
 }

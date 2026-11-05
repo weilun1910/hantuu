@@ -254,7 +254,8 @@ enum SelfTest {
     static func misc() {
         check("drop: shell-escaped path", ShellEscape.escape("/a b/(c) it's.png") == #"/a\ b/\(c\)\ it\'s.png"#)
         check("launch: command runs through the login shell", LoginShell.surfaceCommand(["claude", "--session-id", "abc-1"])
-              == "\(ShellEscape.quote(LoginShell.path)) -l -i -c 'exec claude --session-id abc-1'")
+              == "\(ShellEscape.quote(LoginShell.path)) -l -i -c \(ShellEscape.quote("printf '\\033[H\\033[2J'; exec claude --session-id abc-1"))")
+        check("launch: inherited agent-session variables dropped", ProcessInfo.processInfo.environment.keys.allSatisfy { !$0.hasPrefix("CLAUDE") && !$0.hasPrefix("CODEX_") })
         let all = AgentCatalog.known.flatMap { $0.launchArguments(sessionID: "x") + ($0.resumeArguments(sessionID: "x") ?? []) }
         check("launch: no permission-bypass flags", !all.contains { $0.contains("dangerously") || $0.contains("bypass") || $0 == "--yolo" || $0.contains("full-auto") })
         let detectOut = "zsh: some warning\n\(AgentCatalog.beginMarker)\nclaude=/Users/x/.local/bin/claude\ncodex=/Users/x/.local/bin/codex\naider=aider: aliased to foo\n\(AgentCatalog.endMarker)\n"

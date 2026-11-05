@@ -11,6 +11,7 @@ final class PanelController: NSViewController {
     private let shells = TerminalContainer(color: Theme.background)
     private var header: NSView!
     private var noShells: NSView!
+    private var noFiles: NSView!
     private var content: FillView!
     private var bag = Set<AnyCancellable>()
 
@@ -27,7 +28,8 @@ final class PanelController: NSViewController {
         header = ChromeHostingView(rootView: PanelHeader().environmentObject(model))
         content = FillView(color: Theme.chrome)
         noShells = ChromeHostingView(rootView: NoShellsView().environmentObject(model))
-        let views: [NSView] = [shells, code.view, reader.view, noShells]
+        noFiles = ChromeHostingView(rootView: NoFilesView().environmentObject(model))
+        let views: [NSView] = [shells, code.view, reader.view, noShells, noFiles]
         for v in [header!, content!] {
             v.translatesAutoresizingMaskIntoConstraints = false
             root.addSubview(v)
@@ -72,6 +74,7 @@ final class PanelController: NSViewController {
         shells.isHidden = tab != .terminal
         noShells.isHidden = !(tab == .terminal && list.isEmpty)
         code.view.isHidden = tab != .code
+        noFiles.isHidden = !(tab == .code && model.codeTabs.isEmpty)
         reader.view.isHidden = tab != .reader
     }
 }
@@ -295,6 +298,24 @@ struct NoShellsView: View {
             Button("New Terminal  ⌘T") { model.newTerminalTab() }
                 .buttonStyle(BarButtonStyle(prominent: true))
                 .disabled(model.currentProject == nil)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Color.hChrome)
+    }
+}
+
+struct NoFilesView: View {
+    @EnvironmentObject var model: AppModel
+    var body: some View {
+        VStack(spacing: 10) {
+            Text("No files open")
+                .font(.system(size: 12.5))
+                .foregroundStyle(Color.hTertiary)
+            Text("File links in a chat or the reader open here.")
+                .font(.system(size: 11.5))
+                .foregroundStyle(Color.hTertiary.opacity(0.8))
+            Button("Open File…  ⌘O") { model.openFileWithPanel() }
+                .buttonStyle(BarButtonStyle(prominent: true))
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color.hChrome)

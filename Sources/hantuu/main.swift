@@ -15,6 +15,16 @@ while i < args.count {
     i += valueFlags.contains(a) ? 2 : 1
 }
 
+// Started from inside another agent session (a terminal running Claude Code, `open` from an
+// agent's shell), the app inherits that session's markers, and every chat would too. Claude
+// Code then treats itself as a child session: it stops saving transcripts (so the reader goes
+// blank) and turns off terminal titles. Chats run under a login shell, which re-applies the
+// user's own exports, so dropping these here loses nothing.
+let inheritedAgentPrefixes = ["CLAUDE", "ANTHROPIC_", "CODEX_", "MCP_", "AI_AGENT"]
+for key in ProcessInfo.processInfo.environment.keys where inheritedAgentPrefixes.contains(where: { key.hasPrefix($0) }) {
+    unsetenv(key)
+}
+
 if args.contains("--self-test") {
     var workdir = FileManager.default.temporaryDirectory.appendingPathComponent("hantuu-selftest", isDirectory: true)
     if let w = args.firstIndex(of: "--workdir"), w + 1 < args.count {

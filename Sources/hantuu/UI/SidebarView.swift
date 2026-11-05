@@ -308,13 +308,13 @@ struct SidebarFooter: View {
         HStack(spacing: 4) {
             IconButton(symbol: "folder.badge.plus", help: "Add Project…  ⇧⌘O") { model.addProjectWithPanel() }
             Spacer()
+            // No icon here: at the narrowest sidebar width an icon pushed the footer past the edge.
             HStack(spacing: 7) {
-                Image(systemName: keepAwake.isOn ? "cup.and.heat.waves.fill" : "cup.and.saucer")
-                    .font(.system(size: 12))
-                    .foregroundStyle(keepAwake.isOn ? Color(nsColor: Theme.needsYou) : Color.hSecondary)
                 Text("Keep awake")
                     .font(.system(size: 12))
-                    .foregroundStyle(keepAwake.isOn ? Color.hText : Color.hSecondary)
+                    .foregroundStyle(keepAwake.isOn ? Color(nsColor: Theme.needsYou) : Color.hSecondary)
+                    .lineLimit(1)
+                    .fixedSize()
                 Toggle("", isOn: Binding(get: { keepAwake.isOn }, set: { _ in keepAwake.toggle() }))
                     .toggleStyle(.switch)
                     .controlSize(.mini)

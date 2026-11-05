@@ -441,7 +441,9 @@ final class AppModel: ObservableObject, TerminalEvents {
     private func beginTranscriptDiscovery(_ chat: Chat, cwd: String) {
         guard let kind = chat.agent.transcript else { return }
         chat.discoveryTimer?.invalidate()
-        if chat.follower != nil, kind == .claude { return } // resume appends to the same file
+        // Claude Code's resume appends to the same file. A chat restored from disk only read it
+        // once, so start following it now.
+        if let f = chat.follower, kind == .claude { f.start(); return }
         let started = chat.startedAt
         let tick = { [weak self, weak chat] in
             guard let self, let chat else { return }
@@ -510,6 +512,17 @@ final class AppModel: ObservableObject, TerminalEvents {
     }
 
     // MARK: Code viewer
+
+    func openFileWithPanel() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = true
+        panel.prompt = "Open"
+        if let p = currentProject { panel.directoryURL = URL(fileURLWithPath: p.path) }
+        guard panel.runModal() == .OK else { return }
+        for url in panel.urls { openFile(url.path, line: nil) }
+    }
 
     func openFile(_ path: String, line: Int?) {
         if let i = codeTabs.firstIndex(where: { $0.path == path }) {

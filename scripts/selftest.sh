@@ -5,5 +5,5 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 export SDKROOT="$(xcrun --sdk macosx --show-sdk-path)"
-swift build -c debug --scratch-path "$ROOT/.build" 2>&1 | grep -v "could not find symbol" || true
+swift build -c debug --scratch-path "$ROOT/.build"
 HANTUU_NO_PMSET=1 "$ROOT/.build/debug/hantuu" --self-test --workdir "$ROOT/tmp/selftest"

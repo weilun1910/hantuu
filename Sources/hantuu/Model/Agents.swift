@@ -98,8 +98,10 @@ enum LoginShell {
     /// The command string handed to libghostty for an agent chat. libghostty itself wraps it
     /// as `login -flp <user> bash -c "exec -l <this>"`, so the agent ends up under a login,
     /// interactive shell: the same environment Felix gets in a Ghostty window.
+    /// It clears the screen first, so a chat opens on the agent rather than on login(1)'s
+    /// "Last login" line.
     static func surfaceCommand(_ argv: [String]) -> String {
-        let inner = "exec " + argv.map(ShellEscape.quote).joined(separator: " ")
+        let inner = "printf '\\033[H\\033[2J'; exec " + argv.map(ShellEscape.quote).joined(separator: " ")
         return "\(ShellEscape.quote(path)) -l -i -c \(ShellEscape.quote(inner))"
     }
 
