@@ -170,7 +170,7 @@ scripts/run.sh --data-dir "$PWD/tmp/appdata"
 - The reader reads the transcript files the agents already write, in `~/.claude/projects/` for Claude Code and `~/.codex/sessions/` for Codex. It only ever reads them.
 - The review tabs read git through a private copy of the index, because a plain `git diff` rewrites the real one and can get in the way of the agent's own commits.
 - The reader and code viewer are local web pages bundled with markdown-it, KaTeX and highlight.js, so nothing loads from the internet.
-- `scripts/selftest.sh` runs 316 checks. They cover transcript parsing, link handling, a live Ghostty terminal and the reader page. They also cover agent status, sessions that survive their client, worktrees and the review tabs.
+- `scripts/selftest.sh` runs 386 checks. They cover transcript parsing, link handling, a live Ghostty terminal and the reader page. They also cover agent status, sessions that survive their client, worktrees, the review tabs and reader mode.
 
 ## Status
 
