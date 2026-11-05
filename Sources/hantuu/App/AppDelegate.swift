@@ -26,6 +26,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         Theme.configure(from: ghostty)
         NSApp.appearance = NSAppearance(named: .darkAqua)
+        // An ad hoc app that's rebuilt in place can keep a stale generic icon in the Dock,
+        // because macOS cached the bundle before it had one. Setting it here always wins.
+        if let url = Bundle.main.url(forResource: "AppIcon", withExtension: "icns"), let icon = NSImage(contentsOf: url) {
+            NSApp.applicationIconImage = icon
+        }
         model.load()
         buildMenu()
         windowController = MainWindowController(model: model)

@@ -18,7 +18,10 @@ export SDKROOT="$(xcrun --sdk macosx --show-sdk-path)"
 swift build -c "$CONFIG" --scratch-path "$ROOT/.build"
 BIN_DIR="$(swift build -c "$CONFIG" --scratch-path "$ROOT/.build" --show-bin-path)"
 
-APP="$ROOT/build/hantuu.app"
+FINAL="$ROOT/build/hantuu.app"
+# Assemble in a staging folder and swap it in at the end, so a copy of hantuu that's
+# already running keeps finding its resources while this builds.
+APP="$ROOT/build/hantuu.app.staging"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN_DIR/hantuu" "$APP/Contents/MacOS/hantuu"
@@ -41,4 +44,11 @@ cp -R "$ROOT/vendor/ghostty-resources/terminfo" "$APP/Contents/Resources/terminf
 xattr -cr "$APP"
 IDENTITY="${SIGN_IDENTITY:--}"
 codesign --force --sign "$IDENTITY" --timestamp=none "$APP"
-echo "Built $APP (signed with ${IDENTITY/#-/ad hoc})"
+rm -rf "$FINAL.old"
+[ -d "$FINAL" ] && mv "$FINAL" "$FINAL.old"
+mv "$APP" "$FINAL"
+rm -rf "$FINAL.old"
+# Tell Finder and the Dock the bundle changed, so they pick up the icon again.
+touch "$FINAL"
+/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "$FINAL" || true
+echo "Built $FINAL (signed with ${IDENTITY/#-/ad hoc})"
