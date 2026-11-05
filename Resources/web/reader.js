@@ -6,6 +6,10 @@
   const empty = document.getElementById('empty');
   const pill = document.getElementById('newpill');
   const scroller = document.scrollingElement;
+  // Reader mode (the chat's main view) loads this page with ?layout=main.
+  if (new URLSearchParams(location.search).get('layout') === 'main') document.body.classList.add('main');
+  // Reader mode's additions (reader-main.js). Null in the panel's Reader.
+  const main = document.body.classList.contains('main') ? window.hantuuMain : null;
 
   let chatID = null;
   const scrollMemory = {};
@@ -131,14 +135,17 @@
     return el;
   }
 
-  function add(entries) {
+  function add(entries, fresh) {
     const frag = document.createDocumentFragment();
     for (const e of entries) {
       if (seen.has(e.id)) continue;
       seen.add(e.id);
-      frag.appendChild(renderEntry(e));
+      const el = renderEntry(e);
+      if (main) main.decorate(el, e, fresh);
+      frag.appendChild(el);
     }
     list.appendChild(frag);
+    if (main) main.settle(list, !fresh);
     empty.hidden = list.childElementCount > 0;
   }
 
@@ -149,7 +156,8 @@
       seen.clear();
       list.textContent = '';
       empty.textContent = payload.emptyText || '';
-      add(payload.entries || []);
+      if (main) main.reset(payload.base);
+      add(payload.entries || [], false);
       empty.hidden = list.childElementCount > 0;
       // Scroll synchronously: requestAnimationFrame doesn't run while the panel is hidden.
       const memo = chatID ? scrollMemory[chatID] : undefined;
@@ -160,7 +168,7 @@
     append(payload) {
       if (payload.chatID !== chatID) return;
       const stick = atBottom();
-      add(payload.entries || []);
+      add(payload.entries || [], true);
       if (stick) scrollToBottom();
       else pill.hidden = false;
     },

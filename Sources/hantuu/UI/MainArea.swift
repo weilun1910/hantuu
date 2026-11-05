@@ -43,6 +43,8 @@ final class MainAreaController: NSViewController {
     private var header: NSView!
     private var endedBar: NSView!
     private var emptyView: NSView!
+    /// Reader mode: the chat as the reader with a message box, over its terminal (ReaderMode/).
+    private(set) lazy var readerMode = ReaderModeController(model: model)
     private var bag = Set<AnyCancellable>()
 
     init(model: AppModel) {
@@ -78,6 +80,8 @@ final class MainAreaController: NSViewController {
             emptyView.trailingAnchor.constraint(equalTo: root.trailingAnchor),
             emptyView.bottomAnchor.constraint(equalTo: root.bottomAnchor),
         ])
+        readerMode.install(in: root, top: header.bottomAnchor, above: container)
+        readerMode.onLayoutChange = { [weak self] in self?.sync() }
         view = root
     }
 
@@ -92,10 +96,11 @@ final class MainAreaController: NSViewController {
     func sync() {
         let terminals = model.chats.compactMap { $0.terminal }
         let selected = model.selectedChat
-        container.show(terminals, visible: selected?.terminal)
+        let face = readerMode.sync(selected: selected)
+        container.show(terminals, visible: face.showsReader ? nil : selected?.terminal)
         let ended = selected?.status == .ended
         endedBar.isHidden = !ended
-        container.bottomInset = ended ? 38 : 0
+        container.bottomInset = ended || face.peeking ? 38 : 0
         emptyView.isHidden = selected != nil && selected?.terminal != nil
         if let s = selected, s.terminal == nil {
             // An earlier chat restored from disk: nothing running yet.
@@ -122,12 +127,8 @@ struct ChatHeader: View {
                     Text("hantuu").font(.system(size: 13, weight: .medium)).foregroundStyle(Color.hSecondary)
                 }
                 Spacer()
-                IconButton(symbol: "text.book.closed", help: "Reader  ⌥⌘6", active: model.panelVisible && model.panelTab == .reader) {
-                    if model.panelVisible && model.panelTab == .reader { model.panelVisible = false } else {
-                        model.panelTab = .reader
-                        model.panelVisible = true
-                    }
-                }
+                // The reader / terminal switch, and the panel's Reader in terminal mode.
+                ChatFaceButtons()
                 IconButton(symbol: "sidebar.right", help: model.panelVisible ? "Hide Panel  ⌥⌘0" : "Show Panel  ⌥⌘0", active: model.panelVisible) {
                     model.panelVisible.toggle()
                 }

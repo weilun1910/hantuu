@@ -6,6 +6,7 @@ enum SignalOrigin: Equatable {
     case notify      // Codex `notify`, appended to the same file
     case transcript  // the agent's own transcript or rollout file
     case terminal    // OSC 9 / OSC 777 notifications, the bell, OSC 9;4 progress
+    case app         // hantuu saw it itself: reader mode's Stop, confirmed on the agent's screen
 }
 
 /// Everything that can move a chat's state, normalised from every source.

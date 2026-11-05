@@ -652,11 +652,18 @@ final class AppModel: ObservableObject, TerminalEvents {
         }
     }
 
+    /// An agent's reminder that it's idle, as opposed to a prompt that's waiting on you.
+    static func isIdleNotice(_ text: String) -> Bool {
+        text.lowercased().contains("waiting for your input")
+    }
+
     func terminalNeedsAttention(_ view: TerminalView, reason: String) {
         guard let c = chat(for: view), c.status != .ended else { return }
         if reason.hasPrefix("notification:") {
             let text = String(reason.dropFirst("notification:".count)).trimmingCharacters(in: .whitespaces)
-            if !text.isEmpty {
+            // Claude Code's "waiting for your input" comes a minute after every finished turn,
+            // so it isn't a notice worth keeping in the conversation. The status still sees it.
+            if !text.isEmpty && !Self.isIdleNotice(text) {
                 let entry = ReaderEntry(id: "live-\(UUID().uuidString)", kind: .attention, text: text,
                                         time: ISO8601DateFormatter().string(from: Date()))
                 c.liveEntries.append(entry)

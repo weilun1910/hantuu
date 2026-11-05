@@ -95,6 +95,7 @@ final class PanelController: NSViewController {
 
 struct PanelHeader: View {
     @EnvironmentObject var model: AppModel
+    @ObservedObject var readerMode = ReaderMode.shared
 
     var body: some View {
         VStack(spacing: 0) {
@@ -133,7 +134,9 @@ struct PanelHeader: View {
 
     private func tabs(padding: CGFloat) -> some View {
         HStack(spacing: 2) {
-            ForEach(Array(PanelTab.allCases.enumerated()), id: \.element) { i, tab in
+            // Reader repeats the main area while the selected chat shows the reader there.
+            let hideReader = readerMode.hidesPanelReader(selected: model.selectedChat)
+            ForEach(Array(PanelTab.allCases.enumerated()).filter { !(hideReader && $0.element == .reader) }, id: \.element) { i, tab in
                 PanelTabButton(title: tab.rawValue, selected: model.panelTab == tab, padding: padding) { model.panelTab = tab }
                     .help("\(tab.rawValue)  ⌥⌘\(i + 1)")
             }
