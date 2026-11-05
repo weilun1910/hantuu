@@ -246,8 +246,13 @@ extension SelfTest {
         rm.refresh()
         check("working: the working line shows the detail", rm.composerMode == .working(detail: "Running Bash: swift build") && !rm.statusHost.isHidden && rm.status.mode.isWorking)
         check("stop: the send button turns into Stop while the box is empty", rm.composer.action.kind == .stop)
+        check("accessibility: the button reads as Stop", rm.composer.action.isAccessibilityElement() && rm.composer.action.accessibilityRole() == .button
+              && rm.composer.action.accessibilityLabel() == "Stop Claude Code", rm.composer.action.accessibilityLabel() ?? "nil")
         rm.composer.textView.text = "queued thought"
         check("stop: it's Send again once there's text to send", rm.composer.action.kind == .send && rm.composer.action.active)
+        check("accessibility: the button reads as Send, and the paperclip as Add Files", rm.composer.action.accessibilityLabel() == "Send"
+              && rm.composer.action.isAccessibilityEnabled() && rm.composer.attach.accessibilityRole() == .button
+              && (rm.composer.attach.accessibilityLabel() ?? "").hasPrefix("Add files"))
         rm.composer.textView.text = ""
         let stopped = rm.stop()
         check("stop: sends Esc to the terminal", stopped && waitUntil(5) { bytes().count == before + 1 && bytes().last == 0x1B }, bytes().suffix(8).map { String(format: "%02x", $0) }.joined(separator: " "))

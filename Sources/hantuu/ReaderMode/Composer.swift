@@ -280,6 +280,16 @@ final class ComposerActionButton: NSControl {
     }
 
     override var isFlipped: Bool { false }
+
+    // A real button to VoiceOver and other accessibility clients.
+    override func isAccessibilityElement() -> Bool { true }
+    override func accessibilityRole() -> NSAccessibility.Role? { .button }
+    override func accessibilityLabel() -> String? { kind == .send ? "Send" : "Stop \(agentName)" }
+    override func isAccessibilityEnabled() -> Bool { active || kind == .stop }
+    override func accessibilityPerformPress() -> Bool {
+        guard active || kind == .stop, let action else { return false }
+        return sendAction(action, to: target)
+    }
 }
 
 /// A small borderless icon button for the message box's footer, with a faint hover square.
@@ -328,6 +338,14 @@ final class ComposerIconButton: NSControl {
         }
         let s = img.size
         tinted.draw(in: NSRect(x: bounds.midX - s.width / 2, y: bounds.midY - s.height / 2, width: s.width, height: s.height))
+    }
+
+    override func isAccessibilityElement() -> Bool { true }
+    override func accessibilityRole() -> NSAccessibility.Role? { .button }
+    override func accessibilityLabel() -> String? { toolTip }
+    override func accessibilityPerformPress() -> Bool {
+        guard let action else { return false }
+        return sendAction(action, to: target)
     }
 }
 
