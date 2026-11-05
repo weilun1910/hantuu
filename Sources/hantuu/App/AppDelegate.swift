@@ -32,6 +32,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             NSApp.applicationIconImage = icon
         }
         model.load()
+        // Agent states, the needs-you list, the Dock badge and notifications. Asks for
+        // notification permission only when the first notification is due.
+        StatusCenter.shared.start(model: model)
         buildMenu()
         windowController = MainWindowController(model: model)
         windowController.showWindow(nil)
@@ -159,6 +162,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             chat.addItem(it)
         }
         chat.addItem(.separator())
+        chat.addItem(item("Next Chat That Needs You", #selector(jumpToNeedsYou), "j"))
         chat.addItem(item("Resume Chat", #selector(resumeChat), "r", [.command, .shift]))
         chatItem.submenu = chat
         main.addItem(chatItem)
@@ -212,6 +216,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
     @objc func goToChat(_ sender: NSMenuItem) { model.selectChat(index: sender.tag) }
     @objc func resumeChat() { if let c = model.selectedChat, c.status == .ended { model.resume(c) } }
+    @objc func jumpToNeedsYou() { StatusCenter.shared.jumpToNext() }
 
     private func showPanel(_ tab: PanelTab) {
         if model.panelVisible && model.panelTab == tab {
@@ -264,6 +269,7 @@ struct SettingsView: View {
                     .font(.system(size: 11)).foregroundStyle(.secondary)
             }
             SessionSettingsSection()
+            NotificationSettingsSection()
             Section("Terminal") {
                 LabeledContent("Config") {
                     Text("~/Library/Application Support/com.mitchellh.ghostty/config.ghostty").font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
