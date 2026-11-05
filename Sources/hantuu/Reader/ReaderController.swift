@@ -9,15 +9,17 @@ private struct ReaderPayload: Encodable {
 
 /// Shows the selected chat's transcript in the reader page and keeps it live.
 final class ReaderController {
-    let page = WebPage(page: "reader.html", identifier: "hantuu.reader")
+    let page: WebPage
     private let model: AppModel
     private var shownChatID: UUID?
     private var bag = Set<AnyCancellable>()
 
-    init(model: AppModel) {
+    /// Reader mode makes a second one for the main area, with `layout=main` in the page URL.
+    init(model: AppModel, page: String = "reader.html", identifier: String = "hantuu.reader") {
+        self.page = WebPage(page: page, identifier: identifier)
         self.model = model
-        page.onReady = { [weak self] in self?.reload() }
-        page.onMessage = { [weak self] msg in self?.handle(msg) }
+        self.page.onReady = { [weak self] in self?.reload() }
+        self.page.onMessage = { [weak self] msg in self?.handle(msg) }
         model.$selectedChatID
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in self?.reload() }

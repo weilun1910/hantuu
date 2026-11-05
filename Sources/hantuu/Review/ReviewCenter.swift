@@ -398,6 +398,7 @@ final class ReviewCenter: ObservableObject {
     /// Types a shell-escaped path into the chat's terminal, as a drop would.
     func insertPath(_ abs: String) {
         guard canSend, let t = selectedChat?.terminal else { return }
+        if ReaderModeController.main?.insertIntoComposer(ShellEscape.escape(abs) + " ") == true { return }
         t.pasteText(ShellEscape.escape(abs) + " ")
         model?.focusRequest.send(t)
     }

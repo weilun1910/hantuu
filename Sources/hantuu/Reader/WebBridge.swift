@@ -43,7 +43,15 @@ final class HantuuSchemeHandler: NSObject, WKURLSchemeHandler {
 
 /// A WKWebView that loads one bundled page and talks to Swift through `hantuu` messages.
 final class HantuuWebView: WKWebView {
-    override var acceptsFirstResponder: Bool { true }
+    /// Reader mode's page never takes the keyboard from the message box under it.
+    var refusesFocus = false
+    var onMouseDown: (() -> Void)?
+    override var acceptsFirstResponder: Bool { !refusesFocus }
+    override func becomeFirstResponder() -> Bool { refusesFocus ? false : super.becomeFirstResponder() }
+    override func mouseDown(with event: NSEvent) {
+        super.mouseDown(with: event)
+        onMouseDown?()
+    }
 }
 
 final class WebPage: NSObject, WKScriptMessageHandler, WKNavigationDelegate {

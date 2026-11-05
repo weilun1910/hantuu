@@ -238,3 +238,8 @@ body.code.previewing #view { max-width: 720px; margin: 0 auto; padding: 22px 28p
 .hljs-emphasis { font-style: italic; }
 .hljs-strong { font-weight: 600; }
 .hljs-link { color: var(--link); }
+
+/* ---- Reader mode: the reader as the chat's main view (reader.html?layout=main) ---- */
+body.reader.main { font-size: 15.5px; line-height: 1.65; }
+body.reader.main #entries { max-width: 744px; padding: 36px 32px 28px; }
+body.reader.main .empty { padding-top: 22vh; font-size: 13.5px; }

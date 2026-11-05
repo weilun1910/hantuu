@@ -6,6 +6,8 @@
   const empty = document.getElementById('empty');
   const pill = document.getElementById('newpill');
   const scroller = document.scrollingElement;
+  // Reader mode (the chat's main view) loads this page with ?layout=main.
+  if (new URLSearchParams(location.search).get('layout') === 'main') document.body.classList.add('main');
 
   let chatID = null;
   const scrollMemory = {};

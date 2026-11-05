@@ -111,8 +111,9 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
             })
         }.store(in: &bag)
         model.focusRequest.receive(on: DispatchQueue.main).sink { [weak self] v in
-            guard let w = self?.window else { return }
-            DispatchQueue.main.async { w.makeFirstResponder(v) }
+            guard let self, let w = self.window else { return }
+            // In reader mode the chat's terminal is hidden and the message box takes its keys.
+            DispatchQueue.main.async { w.makeFirstResponder(self.mainArea.readerMode.focusTarget(for: v)) }
         }.store(in: &bag)
     }
 
