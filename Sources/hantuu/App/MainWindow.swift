@@ -29,6 +29,9 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
     let panel: PanelController
     private var bag = Set<AnyCancellable>()
     private var syncingCollapse = false
+    /// Setting up the content resizes the window before the saved frame is restored. Saving
+    /// during that would overwrite the saved frame, so saving waits until it's restored.
+    private var frameRestored = false
 
     init(model: AppModel) {
         self.model = model
@@ -69,7 +72,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
 
         panelItem = NSSplitViewItem(viewController: panel)
         panelItem.canCollapse = true
-        panelItem.minimumThickness = 300
+        panelItem.minimumThickness = 360
         panelItem.holdingPriority = NSLayoutConstraint.Priority(255)
 
         split.addSplitViewItem(sidebarItem)
@@ -99,7 +102,13 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
             NSAnimationContext.runAnimationGroup({ ctx in
                 ctx.duration = 0.18
                 self.panelItem.animator().isCollapsed = !v
-            }, completionHandler: { self.syncingCollapse = false })
+            }, completionHandler: {
+                self.syncingCollapse = false
+                // A panel that started out hidden can come back at its minimum width.
+                if v, self.panelItem.viewController.view.frame.width < Self.minPreferredPanelWidth {
+                    self.setPanelWidth(self.preferredPanelWidth())
+                }
+            })
         }.store(in: &bag)
         model.focusRequest.receive(on: DispatchQueue.main).sink { [weak self] v in
             guard let w = self?.window else { return }
@@ -117,9 +126,29 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
             w.setFrame(from: f)
         } else {
             let screen = w.screen?.visibleFrame ?? NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
-            let size = NSSize(width: min(1320, screen.width - 80), height: min(840, screen.height - 60))
+            let size = NSSize(width: min(1560, screen.width - 80), height: min(900, screen.height - 60))
             w.setFrame(NSRect(x: screen.midX - size.width / 2, y: screen.midY - size.height / 2, width: size.width, height: size.height), display: false)
         }
+    }
+
+    /// Wide enough for an 80-column terminal and a comfortable reading line.
+    static let defaultPanelWidth: CGFloat = 560
+    /// Saved widths narrower than this came from the old 300 pt default, so they're replaced.
+    static let minPreferredPanelWidth: CGFloat = 420
+
+    func preferredPanelWidth() -> CGFloat {
+        var w = CGFloat(model.panelWidth ?? 0)
+        if w < Self.minPreferredPanelWidth { w = Self.defaultPanelWidth }
+        // Leave the chat its minimum width.
+        let sidebar = sidebarItem.isCollapsed ? 0 : sidebarItem.viewController.view.frame.width
+        let room = split.splitView.bounds.width - sidebar - mainItem.minimumThickness - 2
+        return max(panelItem.minimumThickness, min(w, room))
+    }
+
+    private func setPanelWidth(_ width: CGFloat) {
+        let sv = split.splitView
+        sv.layoutSubtreeIfNeeded()
+        sv.setPosition(sv.bounds.width - width - 1, ofDividerAt: 1)
     }
 
     func applyInitialWidths() {
@@ -127,15 +156,24 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         let sv = split.splitView
         sv.layoutSubtreeIfNeeded()
         let sidebar = CGFloat(model.sidebarWidth ?? 248)
-        let panelW = CGFloat(model.panelWidth ?? 460)
         if !sidebarItem.isCollapsed { sv.setPosition(sidebar, ofDividerAt: 0) }
-        if !panelItem.isCollapsed { sv.setPosition(sv.bounds.width - panelW - 1, ofDividerAt: 1) }
+        if !panelItem.isCollapsed {
+            setPanelWidth(preferredPanelWidth())
+        } else {
+            // Size the hidden panel now, so showing it later opens at this width.
+            syncingCollapse = true
+            panelItem.isCollapsed = false
+            setPanelWidth(preferredPanelWidth())
+            panelItem.isCollapsed = true
+            syncingCollapse = false
+        }
+        frameRestored = true
     }
 
     // MARK: Split resizing
 
     private func splitDidResize() {
-        guard !syncingCollapse else { return }
+        guard !syncingCollapse, frameRestored else { return }
         if model.sidebarVisible == sidebarItem.isCollapsed { model.sidebarVisible = !sidebarItem.isCollapsed }
         if model.panelVisible == panelItem.isCollapsed { model.panelVisible = !panelItem.isCollapsed }
         if !sidebarItem.isCollapsed { model.sidebarWidth = Double(sidebarItem.viewController.view.frame.width) }
@@ -156,7 +194,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
     func windowDidMove(_ notification: Notification) { saveFrame() }
 
     private func saveFrame() {
-        guard let w = window, !w.styleMask.contains(.fullScreen) else { return }
+        guard frameRestored, let w = window, !w.styleMask.contains(.fullScreen) else { return }
         model.windowFrame = w.frameDescriptor
         model.scheduleSave()
     }

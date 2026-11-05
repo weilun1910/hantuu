@@ -109,6 +109,10 @@ scripts/run.sh --data-dir "$PWD/tmp/appdata"
 
 This is v1, the first version I built to try out the idea, so expect some rough edges. A companion iOS app for checking on chats from my phone is planned once the desktop app settles. Light mode and a signed, notarized download aren't there yet.
 
+## License
+
+hantuu is released under the [MIT License](LICENSE).
+
 ## Credits
 
 hantuu is built on [Ghostty](https://github.com/ghostty-org/ghostty) by Mitchell Hashimoto and the Ghostty contributors. The terminal hosting code is adapted from Ghostty's own macOS app. Licenses for Ghostty and the bundled libraries are in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). The icon is a placeholder generated with Codex.
