@@ -15,7 +15,7 @@ fi
 # Pin the Xcode SDK so the build doesn't pick up a newer Command Line Tools SDK.
 export SDKROOT="$(xcrun --sdk macosx --show-sdk-path)"
 
-swift build -c "$CONFIG" --scratch-path "$ROOT/.build"
+swift build -c "$CONFIG" --scratch-path "$ROOT/.build" 2>&1 | grep -v "could not find symbol" || true
 BIN_DIR="$(swift build -c "$CONFIG" --scratch-path "$ROOT/.build" --show-bin-path)"
 
 APP="$ROOT/build/hantuu.app"

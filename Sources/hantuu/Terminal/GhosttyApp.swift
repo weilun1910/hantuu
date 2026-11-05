@@ -226,7 +226,8 @@ final class GhosttyApp {
         case GHOSTTY_ACTION_CELL_SIZE:
             guard let v = surfaceView else { return false }
             let s = action.action.cell_size
-            DispatchQueue.main.async { v.cellSize = NSSize(width: CGFloat(s.width), height: CGFloat(s.height)) }
+            // Reported in pixels; the view works in points (as Ghostty's own host converts it).
+            DispatchQueue.main.async { v.cellSize = v.convertFromBacking(NSSize(width: CGFloat(s.width), height: CGFloat(s.height))) }
             return true
 
         case GHOSTTY_ACTION_RELOAD_CONFIG:

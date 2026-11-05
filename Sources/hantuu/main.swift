@@ -1,44 +1,39 @@
 import AppKit
 
-// Temporary proof harness: one window, one Ghostty surface running the login shell.
-final class ProofEvents: TerminalEvents {
-    func terminalTitleDidChange(_ view: TerminalView, title: String) { Log.write("title: \(title)") }
-    func terminalNeedsAttention(_ view: TerminalView, reason: String) { Log.write("attention: \(reason)") }
-    func terminalChildDidExit(_ view: TerminalView, code: Int) { Log.write("exit: \(code)") }
-    func terminalRequestedClose(_ view: TerminalView, processAlive: Bool) { Log.write("close alive=\(processAlive)") }
-    func terminalFocusDidChange(_ view: TerminalView, focused: Bool) {}
-}
+let args = CommandLine.arguments
+let known: Set<String> = ["--self-test", "--workdir", "--data-dir", "--no-pmset", "--open-project", "--new-chat"]
+let valueFlags: Set<String> = ["--workdir", "--data-dir", "--open-project", "--new-chat"]
 
-enum FileRouter {
-    static let shared = Router()
-    final class Router { func openFromTerminal(_ s: String, isOSC8: Bool, base: String?) { Log.write("route \(s)") } }
-}
-enum AppActions {
-    static let shared = Actions()
-    final class Actions {
-        func newTerminalTab() {}
-        func newChat(agentID: String?, projectID: UUID?) {}
-        func selectChat(index: Int) {}
+var i = 1
+while i < args.count {
+    let a = args[i]
+    if a.hasPrefix("-psn_") { i += 1; continue } // Finder's process serial number
+    if a.hasPrefix("--") && !known.contains(a) {
+        print("Unknown flag \(a). Flags: --self-test [--workdir <dir>], --data-dir <dir>, --no-pmset, --open-project <folder>, --new-chat <agent>")
+        exit(2)
     }
+    i += valueFlags.contains(a) ? 2 : 1
 }
 
-let app = NSApplication.shared
-app.setActivationPolicy(.regular)
-let events = ProofEvents()
-var window: NSWindow!
-var term: TerminalView!
-DispatchQueue.main.async {
-    guard let g = GhosttyApp.start() else { print("ghostty failed"); exit(1) }
-    window = NSWindow(contentRect: NSRect(x: 200, y: 200, width: 900, height: 560), styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
-    window.title = "hantuu proof"
-    let cmd = CommandLine.arguments.last
-    term = TerminalView(app: g.app, launch: .init(workingDirectory: NSHomeDirectory(), command: cmd), handlesChildExit: true)
-    term.events = events
-    term.autoresizingMask = [.width, .height]
-    term.frame = window.contentView!.bounds
-    window.contentView!.addSubview(term)
-    window.makeKeyAndOrderFront(nil)
-    window.makeFirstResponder(term)
-    NSApp.activate()
+if args.contains("--self-test") {
+    var workdir = FileManager.default.temporaryDirectory.appendingPathComponent("hantuu-selftest", isDirectory: true)
+    if let w = args.firstIndex(of: "--workdir"), w + 1 < args.count {
+        workdir = URL(fileURLWithPath: args[w + 1], isDirectory: true)
+    }
+    // Keep the self test's own log out of the user's data folder.
+    if !args.contains("--data-dir") && ProcessInfo.processInfo.environment["HANTUU_DATA_DIR"] == nil {
+        Paths.dataDir = workdir.appendingPathComponent("data", isDirectory: true)
+    }
+    let app = NSApplication.shared
+    app.setActivationPolicy(.accessory)
+    let code = MainActor.assumeIsolated { SelfTest.run(workdir: workdir) }
+    exit(code)
 }
-app.run()
+
+MainActor.assumeIsolated {
+    let app = NSApplication.shared
+    let delegate = AppDelegate()
+    app.delegate = delegate
+    app.setActivationPolicy(.regular)
+    withExtendedLifetime(delegate) { app.run() }
+}
