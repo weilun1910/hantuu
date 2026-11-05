@@ -1,0 +1,125 @@
+/* The Changes tab's diff. Muted green and red on the neutral darks, thin lines, monospace only
+   for code. Shares the palette and syntax colours in style.css. */
+body.diffpage { font-size: 13px; }
+#view { padding: 4px 0 56px; }
+
+table.diff {
+  border-collapse: collapse;
+  width: 100%;
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.6;
+}
+table.diff td { padding: 0; vertical-align: top; }
+table.diff td.ln {
+  width: 1%;
+  min-width: 30px;
+  white-space: nowrap;
+  text-align: right;
+  color: var(--tertiary);
+  font-size: 11px;
+  padding: 1px 7px 0 4px;
+  user-select: none;
+  -webkit-user-select: none;
+  cursor: pointer;
+}
+table.diff td.ln.o { padding-left: 10px; }
+table.diff tr[data-i] td.ln:hover { color: var(--text); background: rgba(255, 255, 255, 0.06); }
+table.diff td.code {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  padding: 0 14px 0 4px;
+}
+.sign {
+  display: inline-block;
+  width: 1.2em;
+  color: var(--tertiary);
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+tr.add td.code { background: rgba(125, 184, 143, 0.08); }
+tr.add td.ln { background: rgba(125, 184, 143, 0.12); color: rgba(125, 184, 143, 0.75); }
+tr.add .sign { color: #7db88f; }
+tr.del td.code { background: rgba(216, 138, 138, 0.08); }
+tr.del td.ln { background: rgba(216, 138, 138, 0.12); color: rgba(216, 138, 138, 0.75); }
+tr.del .sign { color: #d88a8a; }
+
+tr.hunk td {
+  background: rgba(255, 255, 255, 0.028);
+  color: var(--tertiary);
+  font-size: 11px;
+  padding: 3px 0;
+  border-top: 1px solid var(--rule);
+  border-bottom: 1px solid var(--rule);
+  cursor: default;
+}
+tr.hunk td.code { padding-left: 10px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+tr.hunk:first-child td { border-top: 0; }
+tr.eol td { color: var(--tertiary); font-size: 11px; font-style: italic; }
+
+tr.sel td.code, tr.sel td.ln { background: rgba(143, 180, 240, 0.13); }
+tr.sel td.ln { color: var(--link); }
+tr.commented td.ln.o { box-shadow: inset 2px 0 0 rgba(143, 180, 240, 0.7); }
+
+/* Comment box and saved comments use the interface font. */
+tr.cbox td, tr.note td { padding: 6px 14px 8px 12px; }
+.cbox, .note, .large, .outdated {
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif;
+}
+.cbox {
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.03);
+  padding: 8px 10px 8px;
+  font-size: 12.5px;
+}
+.cbox-head { color: var(--secondary); font-size: 11.5px; margin-bottom: 6px; }
+.cbox textarea {
+  display: block;
+  width: 100%;
+  min-height: 58px;
+  resize: vertical;
+  background: rgba(0, 0, 0, 0.22);
+  color: var(--text);
+  border: 1px solid var(--rule);
+  border-radius: 5px;
+  padding: 6px 8px;
+  font: 12.5px/1.45 -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif;
+  outline: none;
+}
+.cbox textarea:focus { border-color: rgba(143, 180, 240, 0.4); }
+.cbox textarea::placeholder { color: var(--tertiary); }
+.cbox-actions { display: flex; align-items: center; gap: 6px; margin-top: 8px; }
+.cbox-actions .hint { color: var(--tertiary); font-size: 11px; margin-right: auto; }
+
+button.ghost, button.primary {
+  font: 12px -apple-system, BlinkMacSystemFont, sans-serif;
+  height: 24px;
+  padding: 0 10px;
+  border-radius: 5px;
+  cursor: pointer;
+}
+button.ghost { background: transparent; color: var(--secondary); border: 1px solid var(--rule); }
+button.ghost:hover { color: var(--text); }
+button.primary { background: rgba(255, 255, 255, 0.08); color: var(--text); border: 0; font-weight: 500; }
+button.primary:hover { background: rgba(255, 255, 255, 0.12); }
+button.primary:disabled { opacity: 0.4; cursor: default; }
+
+.note {
+  border-left: 2px solid rgba(143, 180, 240, 0.7);
+  background: rgba(255, 255, 255, 0.035);
+  border-radius: 0 6px 6px 0;
+  padding: 6px 10px 7px;
+  font-size: 12.5px;
+  line-height: 1.45;
+  color: var(--text);
+}
+.note-head { display: flex; justify-content: space-between; color: var(--tertiary); font-size: 11px; margin-bottom: 2px; }
+.note-head a { color: var(--tertiary); cursor: pointer; }
+.note-head a:hover { color: var(--secondary); text-decoration: none; }
+.note-body { white-space: pre-wrap; overflow-wrap: anywhere; }
+.outdated { padding: 8px 14px 6px 12px; display: flex; flex-direction: column; gap: 6px; }
+
+.large { text-align: center; padding: 72px 24px; color: var(--tertiary); font-size: 13px; }
+.large button { margin-top: 14px; }
