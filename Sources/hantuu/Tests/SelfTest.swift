@@ -44,6 +44,7 @@ enum SelfTest {
         agentDetection()
         surface(workdir)
         reader(workdir)
+        sessions(workdir) // Sessions/SessionSelfTest.swift
 
         print("\n\(passes) passed, \(failures) failed")
         return failures == 0 ? 0 : 1
