@@ -29,6 +29,11 @@ final class Chat: ObservableObject, Identifiable {
     @Published var exitCode: Int?
     @Published var transcriptPath: String?
     @Published var firstPrompt: String?
+    /// What the agent is doing and the grey line under the title. Kept true by StatusCenter.
+    @Published var activity: AgentActivity = .idle
+    @Published var activityDetail = ""
+    @Published var activitySince = Date()
+    @Published var lastTurnEndedAt: Date?
     var startedAt = Date()
     var terminal: TerminalView?
     var follower: TranscriptFollower?
@@ -378,8 +383,10 @@ final class AppModel: ObservableObject, TerminalEvents {
         // The agent runs inside hantuu-session, so it outlives the app (Sessions/).
         let cmd = LoginShell.surfaceCommand(argv, session: SessionLaunch(chatID: chat.id, mode: .create(cwd: cwd)))
         Log.write("launch chat=\(chat.id) cwd=\(cwd) cmd=\(cmd)")
+        // HANTUU_EVENTS reaches the agent through hantuu-session, which passes on its whole environment.
         let tv = TerminalView(app: g.app, launch: .init(workingDirectory: cwd, command: cmd,
-                                                         environment: ["HANTUU_CHAT_ID": chat.id.uuidString]),
+                                                         environment: ["HANTUU_CHAT_ID": chat.id.uuidString]
+                                                            .merging(AgentHooks.environment(for: chat.id)) { a, _ in a }),
                               handlesChildExit: true)
         tv.events = self
         chat.terminal = tv
@@ -647,7 +654,6 @@ final class AppModel: ObservableObject, TerminalEvents {
 
     func terminalNeedsAttention(_ view: TerminalView, reason: String) {
         guard let c = chat(for: view), c.status != .ended else { return }
-        let isFront = NSApp.isActive && (view.window?.isKeyWindow ?? false) && selectedChatID == c.id && view.focused
         if reason.hasPrefix("notification:") {
             let text = String(reason.dropFirst("notification:".count)).trimmingCharacters(in: .whitespaces)
             if !text.isEmpty {
@@ -657,10 +663,9 @@ final class AppModel: ObservableObject, TerminalEvents {
                 readerAppend.send((c.id, [entry]))
             }
         }
-        guard !isFront else { return }
-        c.status = .needsYou
-        objectWillChange.send()
-        if !NSApp.isActive { NSApp.requestUserAttention(.informationalRequest) }
+        // The bell and desktop notifications are only a fallback signal now; StatusCenter
+        // decides what they mean next to the agent's hooks.
+        StatusCenter.shared.terminalAttention(c, reason: reason)
     }
 
     func terminalChildDidExit(_ view: TerminalView, code: Int) {

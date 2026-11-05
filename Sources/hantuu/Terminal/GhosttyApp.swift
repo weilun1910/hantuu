@@ -264,8 +264,20 @@ final class GhosttyApp {
             if !healthy { Log.write("renderer unhealthy") }
             return true
 
+        // OSC 9;4 progress (Claude Code sends it while it works) and shell-integration command
+        // ends. Only fallback signals for agents without hooks; StatusCenter decides.
+        case GHOSTTY_ACTION_PROGRESS_REPORT:
+            guard let v = surfaceView else { return false }
+            let active = action.action.progress_report.state != GHOSTTY_PROGRESS_STATE_REMOVE
+            DispatchQueue.main.async { TerminalSignals.post(v, .progress(active: active)) }
+            return true
+        case GHOSTTY_ACTION_COMMAND_FINISHED:
+            guard let v = surfaceView else { return false }
+            DispatchQueue.main.async { TerminalSignals.post(v, .progress(active: false)) }
+            return true
+
         case GHOSTTY_ACTION_COLOR_CHANGE, GHOSTTY_ACTION_CONFIG_CHANGE, GHOSTTY_ACTION_SCROLLBAR,
-             GHOSTTY_ACTION_SELECTION_CHANGED, GHOSTTY_ACTION_PROGRESS_REPORT, GHOSTTY_ACTION_COMMAND_FINISHED,
+             GHOSTTY_ACTION_SELECTION_CHANGED,
              GHOSTTY_ACTION_KEY_SEQUENCE, GHOSTTY_ACTION_KEY_TABLE, GHOSTTY_ACTION_INITIAL_SIZE,
              GHOSTTY_ACTION_SIZE_LIMIT, GHOSTTY_ACTION_SECURE_INPUT:
             return true
