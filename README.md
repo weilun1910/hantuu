@@ -4,7 +4,7 @@
 
 # hantuu
 
-hantuu is a native Mac app for running coding agents like Claude Code and Codex. Every chat is a real terminal powered by Ghostty, and next to it sits a reader that turns the conversation into something easy to read, with images, PDFs and LaTeX rendered properly. If you'd rather not read the terminal at all, reader mode makes the reader the chat itself.
+hantuu is a native Mac app for running coding agents like Claude Code and Codex. Every chat is a real terminal powered by Ghostty. Press Shift-Cmd-R and the same chat turns into a reader that's easy on the eyes, with images, PDFs and LaTeX rendered properly and a message box to keep talking.
 
 The name comes from "hantu", the Malay word for ghost, made a little cuter the same way Ghostty did with "ghost".
 
@@ -59,7 +59,7 @@ Cmd-N opens your default agent in the selected project, so you're talking to it 
 
 ### Review the agent's changes without leaving hantuu
 
-The right panel has six tabs: Overview, Changes, Files, Code, Terminal and Reader.
+The right panel has five tabs: Overview, Changes, Files, Code and Terminal.
 
 Overview is a column of cards for the selected chat. They cover:
 - the session and its branch
@@ -77,20 +77,17 @@ Files is the project tree with a filter, and files with changes get a small dot.
 
 ![The Changes tab with a diff and a comment box open on a line](docs/screenshots/changes-comment.jpg)
 
-### A reader for the chat
-
-Open the Reader tab and it follows the conversation as it happens. Your messages sit on the right and the agent's answers read like a normal document. A run of tool calls folds into one line, like "Ran a command, read a file and 1 more", and you can open it to see each step. The agent's thinking is hidden, but permission requests, errors and questions to you always stay visible.
-
-Images and PDFs that come up in the chat appear inline instead of as paths. LaTeX is rendered with KaTeX, and code blocks are highlighted with a Copy button. That's what makes it usable for studying.
-
 ### Reader mode
 
-If you'd rather not read the terminal at all, turn on "Show chats as the reader" in Settings > Chat. Chats then open as the reader, with a message box underneath. The agent still runs in its own terminal behind it, so logging in, slash commands and the status dots all work the same.
+Press Shift-Cmd-R, or click the book icon above the chat, and the chat you're looking at turns into the reader, right where the terminal was. Press it again to get the terminal back. The agent keeps running in its terminal underneath, so logging in, slash commands and the status dots all work the same. Each chat remembers which one it was showing, and "Show chats as the reader" in Settings > Chat makes new chats open as the reader.
+
+The reader follows the conversation as it happens. Your messages sit on the right and the agent's answers read like a normal document. A run of tool calls folds into one line, like "Ran a command, read a file and 1 more", and you can open it to see each step. The agent's thinking is hidden, but permission requests, errors and questions to you always stay visible.
+
+Images and PDFs that come up in the chat appear inline instead of as paths. LaTeX is rendered with KaTeX, and code blocks are highlighted with a Copy button. That's what makes it usable for studying.
 
 - Return sends and Shift-Return adds a line. Dropping files on the box types their paths.
 - While the agent works, a line above the box says what it's doing. Esc or the Stop button stops it.
 - When it wants your permission or asks a question with options, a banner says so. Show Terminal brings up the terminal so you can answer there, and the reader comes back once the agent carries on.
-- Option-Cmd-R switches one chat between the reader and its terminal, whichever way the setting is.
 
 ![Reader mode, with rendered formulas, a code block and file links, and a message box at the bottom](docs/screenshots/reader-mode.jpg)
 
@@ -150,11 +147,12 @@ scripts/run.sh --data-dir "$PWD/tmp/appdata"
 | Cmd-N | New chat with your default agent |
 | Shift-Cmd-N | New chat in its own worktree |
 | Cmd-J | Jump to the next chat that needs you |
-| Option-Cmd-R | Switch the chat between the reader and its terminal |
+| Shift-Cmd-R | Switch the chat between its terminal and the reader |
+| Shift-Cmd-T | Resume an ended chat |
 | Shift-Cmd-O | Add a project folder |
 | Cmd-1 to Cmd-9 | Jump to a chat |
 | Option-Cmd-0 | Show or hide the right panel |
-| Option-Cmd-1 to 6 | Overview, Changes, Files, Code, Terminal or Reader tab |
+| Option-Cmd-1 to 5 | Overview, Changes, Files, Code or Terminal tab |
 | Cmd-T | New shell tab |
 | Cmd-O | Open a file in the Code tab |
 | Cmd-0 | Show or hide the sidebar |
@@ -174,7 +172,7 @@ scripts/run.sh --data-dir "$PWD/tmp/appdata"
 
 ## Status
 
-This is v2. v1 was the first version I built to try out the idea, and v2 adds agent status, the review tabs, agents that keep running, and worktree chats. Since then, it has gained reader mode, a setting that shows chats as the reader with a message box, and light mode, which can follow macOS. Expect some rough edges. A companion iOS app for checking on chats from my phone is planned once the desktop app settles. A signed, notarized download isn't there yet.
+This is v2. v1 was the first version I built to try out the idea, and v2 adds agent status, the review tabs, agents that keep running, and worktree chats. Since then, it has gained reader mode, which turns any chat into the reader with Shift-Cmd-R, and light mode, which can follow macOS. Expect some rough edges. A companion iOS app for checking on chats from my phone is planned once the desktop app settles. A signed, notarized download isn't there yet.
 
 ## License
 
