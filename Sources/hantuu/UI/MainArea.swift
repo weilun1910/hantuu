@@ -5,12 +5,19 @@ import SwiftUI
 /// A solid-colour NSView.
 class FillView: NSView {
     var color: NSColor { didSet { needsDisplay = true } }
+    private var themeObserver: NSObjectProtocol?
     init(color: NSColor) {
         self.color = color
         super.init(frame: .zero)
         wantsLayer = true
+        // Theme's colours are dynamic, so AppKit redraws this when the appearance changes.
+        // A reloaded Ghostty config can change them without that, hence the notification.
+        themeObserver = NotificationCenter.default.addObserver(forName: Theme.didChange, object: nil, queue: .main) { [weak self] _ in
+            self?.needsDisplay = true
+        }
     }
     required init?(coder: NSCoder) { fatalError() }
+    deinit { if let themeObserver { NotificationCenter.default.removeObserver(themeObserver) } }
     override var wantsUpdateLayer: Bool { true }
     override func updateLayer() { layer?.backgroundColor = color.cgColor }
 }
@@ -197,7 +204,7 @@ struct BarButtonStyle: ButtonStyle {
             .foregroundStyle(prominent ? Color.hText : Color.hSecondary)
             .padding(.horizontal, 10)
             .frame(height: 24)
-            .background(RoundedRectangle(cornerRadius: 5).fill(Color.white.opacity(configuration.isPressed ? 0.12 : (prominent ? 0.08 : 0.0))))
+            .background(RoundedRectangle(cornerRadius: 5).fill(Color.hInk(configuration.isPressed ? 0.12 : (prominent ? 0.08 : 0.0))))
             .overlay(RoundedRectangle(cornerRadius: 5).stroke(Color.hDivider, lineWidth: prominent ? 0 : 1))
     }
 }

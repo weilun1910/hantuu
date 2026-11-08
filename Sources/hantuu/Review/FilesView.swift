@@ -106,7 +106,7 @@ struct FileRow: View {
                 Circle().fill(Color(nsColor: ReviewFormat.statusColor(changed))).frame(width: 6, height: 6)
                     .help(ChangedFileRow.statusHelp(changed))
             } else if dirChanged {
-                Circle().fill(Color.white.opacity(0.28)).frame(width: 5, height: 5).help("Contains changes")
+                Circle().fill(Color.hInk(0.28)).frame(width: 5, height: 5).help("Contains changes")
             }
         }
         .padding(.leading, 10)
@@ -161,7 +161,7 @@ struct FilesBar: View {
             }
             .padding(.horizontal, 7)
             .frame(height: 22)
-            .background(RoundedRectangle(cornerRadius: 5).fill(Color.white.opacity(0.05)))
+            .background(RoundedRectangle(cornerRadius: 5).fill(Color.hInk(0.05)))
             .overlay(RoundedRectangle(cornerRadius: 5).stroke(Color.hDivider, lineWidth: 1))
             if let t = review.tree {
                 Text(t.fileCount == 1 ? "1 file" : "\(t.fileCount.formatted()) files")

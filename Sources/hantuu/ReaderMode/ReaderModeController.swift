@@ -428,13 +428,29 @@ final class FadeEdge: NSView {
         super.init(frame: frame)
         wantsLayer = true
         layer?.addSublayer(gradient)
-        let bg = Theme.background
-        gradient.colors = [bg.withAlphaComponent(0).cgColor, bg.cgColor]
+        updateColors()
         // Layer coordinates: y grows upward, so the opaque end is at the bottom.
         gradient.startPoint = CGPoint(x: 0.5, y: 1)
         gradient.endPoint = CGPoint(x: 0.5, y: 0)
+        themeObserver = NotificationCenter.default.addObserver(forName: Theme.didChange, object: nil, queue: .main) { [weak self] _ in
+            self?.updateColors()
+        }
     }
     required init?(coder: NSCoder) { fatalError() }
+    deinit { if let themeObserver { NotificationCenter.default.removeObserver(themeObserver) } }
+    private var themeObserver: NSObjectProtocol?
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        updateColors()
+    }
+
+    private func updateColors() {
+        effectiveAppearance.performAsCurrentDrawingAppearance {
+            let bg = Theme.background.usingColorSpace(.sRGB) ?? Theme.background
+            gradient.colors = [bg.withAlphaComponent(0).cgColor, bg.cgColor]
+        }
+    }
 
     override func layout() {
         super.layout()

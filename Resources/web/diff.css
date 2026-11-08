@@ -1,5 +1,21 @@
-/* The Changes tab's diff. Muted green and red on the neutral darks, thin lines, monospace only
-   for code. Shares the palette and syntax colours in style.css. */
+/* The Changes tab's diff. Muted green and red on the neutral greys, thin lines, monospace only
+   for code. Shares the palette and syntax colours in style.css, which also switches to light. */
+:root {
+  --add: 125, 184, 143;
+  --del: 216, 138, 138;
+  --sel: 143, 180, 240;
+  --wash: 255, 255, 255;
+  --well: rgba(0, 0, 0, 0.22);
+}
+@media (prefers-color-scheme: light) {
+  :root {
+    --add: 61, 138, 85;
+    --del: 191, 78, 78;
+    --sel: 47, 111, 208;
+    --wash: 0, 0, 0;
+    --well: #ffffff;
+  }
+}
 body.diffpage { font-size: 13px; }
 #view { padding: 4px 0 56px; }
 
@@ -24,7 +40,7 @@ table.diff td.ln {
   cursor: pointer;
 }
 table.diff td.ln.o { padding-left: 10px; }
-table.diff tr[data-i] td.ln:hover { color: var(--text); background: rgba(255, 255, 255, 0.06); }
+table.diff tr[data-i] td.ln:hover { color: var(--text); background: rgba(var(--wash), 0.06); }
 table.diff td.code {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
@@ -38,15 +54,15 @@ table.diff td.code {
   -webkit-user-select: none;
 }
 
-tr.add td.code { background: rgba(125, 184, 143, 0.08); }
-tr.add td.ln { background: rgba(125, 184, 143, 0.12); color: rgba(125, 184, 143, 0.75); }
-tr.add .sign { color: #7db88f; }
-tr.del td.code { background: rgba(216, 138, 138, 0.08); }
-tr.del td.ln { background: rgba(216, 138, 138, 0.12); color: rgba(216, 138, 138, 0.75); }
-tr.del .sign { color: #d88a8a; }
+tr.add td.code { background: rgba(var(--add), 0.08); }
+tr.add td.ln { background: rgba(var(--add), 0.12); color: rgba(var(--add), 0.75); }
+tr.add .sign { color: rgb(var(--add)); }
+tr.del td.code { background: rgba(var(--del), 0.08); }
+tr.del td.ln { background: rgba(var(--del), 0.12); color: rgba(var(--del), 0.75); }
+tr.del .sign { color: rgb(var(--del)); }
 
 tr.hunk td {
-  background: rgba(255, 255, 255, 0.028);
+  background: rgba(var(--wash), 0.028);
   color: var(--tertiary);
   font-size: 11px;
   padding: 3px 0;
@@ -58,9 +74,9 @@ tr.hunk td.code { padding-left: 10px; white-space: nowrap; overflow: hidden; tex
 tr.hunk:first-child td { border-top: 0; }
 tr.eol td { color: var(--tertiary); font-size: 11px; font-style: italic; }
 
-tr.sel td.code, tr.sel td.ln { background: rgba(143, 180, 240, 0.13); }
+tr.sel td.code, tr.sel td.ln { background: rgba(var(--sel), 0.13); }
 tr.sel td.ln { color: var(--link); }
-tr.commented td.ln.o { box-shadow: inset 2px 0 0 rgba(143, 180, 240, 0.7); }
+tr.commented td.ln.o { box-shadow: inset 2px 0 0 rgba(var(--sel), 0.7); }
 
 /* Comment box and saved comments use the interface font. */
 tr.cbox td, tr.note td { padding: 6px 14px 8px 12px; }
@@ -68,9 +84,9 @@ tr.cbox td, tr.note td { padding: 6px 14px 8px 12px; }
   font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif;
 }
 .cbox {
-  border: 1px solid rgba(255, 255, 255, 0.1);
+  border: 1px solid rgba(var(--wash), 0.1);
   border-radius: 7px;
-  background: rgba(255, 255, 255, 0.03);
+  background: rgba(var(--wash), 0.03);
   padding: 8px 10px 8px;
   font-size: 12.5px;
 }
@@ -80,7 +96,7 @@ tr.cbox td, tr.note td { padding: 6px 14px 8px 12px; }
   width: 100%;
   min-height: 58px;
   resize: vertical;
-  background: rgba(0, 0, 0, 0.22);
+  background: var(--well);
   color: var(--text);
   border: 1px solid var(--rule);
   border-radius: 5px;
@@ -88,7 +104,7 @@ tr.cbox td, tr.note td { padding: 6px 14px 8px 12px; }
   font: 12.5px/1.45 -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif;
   outline: none;
 }
-.cbox textarea:focus { border-color: rgba(143, 180, 240, 0.4); }
+.cbox textarea:focus { border-color: rgba(var(--sel), 0.4); }
 .cbox textarea::placeholder { color: var(--tertiary); }
 .cbox-actions { display: flex; align-items: center; gap: 6px; margin-top: 8px; }
 .cbox-actions .hint { color: var(--tertiary); font-size: 11px; margin-right: auto; }
@@ -102,13 +118,13 @@ button.ghost, button.primary {
 }
 button.ghost { background: transparent; color: var(--secondary); border: 1px solid var(--rule); }
 button.ghost:hover { color: var(--text); }
-button.primary { background: rgba(255, 255, 255, 0.08); color: var(--text); border: 0; font-weight: 500; }
-button.primary:hover { background: rgba(255, 255, 255, 0.12); }
+button.primary { background: rgba(var(--wash), 0.08); color: var(--text); border: 0; font-weight: 500; }
+button.primary:hover { background: rgba(var(--wash), 0.12); }
 button.primary:disabled { opacity: 0.4; cursor: default; }
 
 .note {
-  border-left: 2px solid rgba(143, 180, 240, 0.7);
-  background: rgba(255, 255, 255, 0.035);
+  border-left: 2px solid rgba(var(--sel), 0.7);
+  background: rgba(var(--wash), 0.035);
   border-radius: 0 6px 6px 0;
   padding: 6px 10px 7px;
   font-size: 12.5px;
