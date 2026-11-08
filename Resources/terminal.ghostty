@@ -24,26 +24,6 @@ shell-integration-features = no-cursor,sudo,title
 mouse-hide-while-typing = true
 mouse-scroll-multiplier = 2
 
-# Neutral dark background, with colour kept to the text.
-foreground = #dcdcdc
-background = #161616
-cursor-color = #dcdcdc
-cursor-text = #161616
-selection-foreground = #dcdcdc
-selection-background = #3a3a3a
-palette = 0=#262626
-palette = 1=#eb6f92
-palette = 2=#31748f
-palette = 3=#f6c177
-palette = 4=#9ccfd8
-palette = 5=#c4a7e7
-palette = 6=#ebbcba
-palette = 7=#dcdcdc
-palette = 8=#767676
-palette = 9=#eb6f92
-palette = 10=#31748f
-palette = 11=#f6c177
-palette = 12=#9ccfd8
-palette = 13=#c4a7e7
-palette = 14=#ebbcba
-palette = 15=#f0f0f0
+# Colours follow hantuu's appearance (Settings > Appearance: light, dark, or match macOS).
+# Both themes ship inside the app, in Contents/Resources/ghostty/themes.
+theme = light:hantuu-light,dark:hantuu-dark

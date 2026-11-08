@@ -169,11 +169,12 @@ scripts/run.sh --data-dir "$PWD/tmp/appdata"
 - The review tabs read git through a private copy of the index, because a plain `git diff` rewrites the real one and can get in the way of the agent's own commits.
 - The reader and code viewer are local web pages bundled with markdown-it, KaTeX and highlight.js, so nothing loads from the internet.
 - In reader mode, your message is typed into the agent's terminal as one paste followed by Return, the same as typing it yourself. Nothing is sent while a menu is waiting there, because Return would answer it.
-- `scripts/selftest.sh` runs 397 checks. They cover transcript parsing, link handling, a live Ghostty terminal and the reader page. They also cover agent status, sessions that survive their client, worktrees, the review tabs and reader mode.
+- Light and dark use Ghostty's own `theme = light:…,dark:…` switching. hantuu ships a light and a dark terminal theme, and tells every terminal which one to show when you change the setting or macOS switches. If you use your own Ghostty config and it has a pair like that, it follows along too.
+- `scripts/selftest.sh` runs 400 checks. They cover transcript parsing, link handling, a live Ghostty terminal and the reader page. They also cover agent status, sessions that survive their client, worktrees, the review tabs and reader mode.
 
 ## Status
 
-This is v2. v1 was the first version I built to try out the idea, and v2 adds agent status, the review tabs, agents that keep running, and worktree chats. Since then, it has gained reader mode, a setting that shows chats as the reader with a message box. Expect some rough edges. A companion iOS app for checking on chats from my phone is planned once the desktop app settles. Light mode and a signed, notarized download aren't there yet.
+This is v2. v1 was the first version I built to try out the idea, and v2 adds agent status, the review tabs, agents that keep running, and worktree chats. Since then, it has gained reader mode, a setting that shows chats as the reader with a message box, and light mode, which can follow macOS. Expect some rough edges. A companion iOS app for checking on chats from my phone is planned once the desktop app settles. A signed, notarized download isn't there yet.
 
 ## License
 

@@ -46,7 +46,6 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         w.titlebarSeparatorStyle = .none
         w.isMovableByWindowBackground = false
         w.backgroundColor = Theme.background
-        w.appearance = NSAppearance(named: .darkAqua)
         w.isRestorable = false
         w.minSize = NSSize(width: 760, height: 460)
         w.collectionBehavior.insert(.fullScreenPrimary)

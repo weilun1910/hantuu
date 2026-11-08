@@ -16,7 +16,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         Paths.ensure(Paths.dataDir)
         Log.write("launch data=\(Paths.dataDir.path)")
-        guard let ghostty = GhosttyApp.start() else {
+        // Light or dark first, so the terminal engine starts in the right colours.
+        AppearanceSettings.shared.apply()
+        guard GhosttyApp.start() != nil else {
             let a = NSAlert()
             a.messageText = "hantuu couldn't start the Ghostty terminal engine"
             a.informativeText = "libghostty failed to initialise. See \(Paths.logFile.path)."
@@ -24,8 +26,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             NSApp.terminate(nil)
             return
         }
-        Theme.configure(from: ghostty)
-        NSApp.appearance = NSAppearance(named: .darkAqua)
+        AppearanceSettings.shared.start()
         // An ad hoc app that's rebuilt in place can keep a stale generic icon in the Dock,
         // because macOS cached the bundle before it had one. Setting it here always wins.
         if let url = Bundle.main.url(forResource: "AppIcon", withExtension: "icns"), let icon = NSImage(contentsOf: url) {
@@ -235,7 +236,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             w.title = "Settings"
             w.isReleasedWhenClosed = false
             w.isRestorable = false
-            w.appearance = NSAppearance(named: .darkAqua)
             w.contentView = NSHostingView(rootView: SettingsView().environmentObject(model))
             w.center()
             settingsWindow = w
@@ -249,6 +249,7 @@ struct SettingsView: View {
 
     var body: some View {
         Form {
+            AppearanceSettingsSection()
             Section {
                 Picker("Default agent", selection: $model.defaultAgentID) {
                     ForEach(model.agents) { a in Text(a.name).tag(a.id) }

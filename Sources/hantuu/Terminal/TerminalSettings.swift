@@ -41,7 +41,7 @@ struct TerminalSettingsSection: View {
         Section("Terminal") {
             Toggle("Use my Ghostty config", isOn: $settings.useGhosttyConfig)
             Text(settings.useGhosttyConfig
-                 ? "Your Ghostty config is loaded on top of hantuu's look, so anything you set there wins. hantuu only reads it. The window's own colours follow after you reopen hantuu."
+                 ? "Your Ghostty config is loaded on top of hantuu's look, so anything you set there wins. hantuu only reads it. A theme = light:…,dark:… line in it follows the Appearance setting. The sidebar picks up new colours after you reopen hantuu."
                  : "Chats and shells use hantuu's own terminal look. Turn this on to use the fonts, colours and padding from your Ghostty config instead.")
                 .font(.system(size: 11)).foregroundStyle(.secondary)
             if settings.useGhosttyConfig {

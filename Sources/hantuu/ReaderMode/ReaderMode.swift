@@ -185,7 +185,7 @@ struct StopHint: View {
                     .font(.system(size: 10.5, weight: .medium))
                     .padding(.horizontal, 4)
                     .frame(height: 16)
-                    .background(RoundedRectangle(cornerRadius: 4).fill(Color.white.opacity(hovering ? 0.1 : 0.06)))
+                    .background(RoundedRectangle(cornerRadius: 4).fill(Color.hInk(hovering ? 0.1 : 0.06)))
                 Text("to stop")
             }
             .font(.system(size: 12))
@@ -249,8 +249,8 @@ struct NeedsBanner: View {
         .padding(.leading, 12)
         .padding(.trailing, 10)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(shape.fill(Color(nsColor: Theme.background.blended(withFraction: 0.06, of: .white) ?? Theme.background)))
-        .overlay(shape.stroke(Color.white.opacity(0.085), lineWidth: 1))
+        .background(shape.fill(Color.hRaised))
+        .overlay(shape.stroke(Color.hInk(0.085, light: 0.1), lineWidth: 1))
         .padding(.horizontal, 12)
     }
 }

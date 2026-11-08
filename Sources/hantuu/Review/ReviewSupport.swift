@@ -67,17 +67,18 @@ enum ReviewFormat {
         switch s {
         case "A", "?": return ReviewColors.added
         case "D": return ReviewColors.removed
-        case "R": return NSColor(hex: 0x8FB4F0)
+        case "R": return Theme.link
         case "U": return Theme.error
-        default: return NSColor(hex: 0xD9B36C)
+        default: return ReviewColors.pending
         }
     }
 }
 
-/// Muted diff colours: readable on the neutral darks without glowing.
+/// Muted diff colours: readable on the neutral backgrounds without glowing. Light mode uses
+/// deeper versions so they hold up on off-white.
 enum ReviewColors {
-    static let added = NSColor(hex: 0x7DB88F)
-    static let removed = NSColor(hex: 0xD88A8A)
-    static let pending = NSColor(hex: 0xD9B36C)
-    static let card = NSColor(white: 1, alpha: 0.025)
+    static let added = Theme.pair(dark: NSColor(hex: 0x7DB88F), light: NSColor(hex: 0x3D8A55))
+    static let removed = Theme.pair(dark: NSColor(hex: 0xD88A8A), light: NSColor(hex: 0xBF4E4E))
+    static let pending = Theme.pair(dark: NSColor(hex: 0xD9B36C), light: NSColor(hex: 0xA77A1C))
+    static let card = Theme.ink(0.025, light: 0.03)
 }

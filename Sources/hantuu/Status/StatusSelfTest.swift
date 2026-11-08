@@ -486,9 +486,9 @@ extension SelfTest {
 
         let w = makeWindow()
         w.appearance = NSAppearance(named: .darkAqua)
-        func render<V: View>(_ view: V, size: NSSize, name: String) -> Bool {
-            let host = NSHostingView(rootView: AnyView(view.environmentObject(model).environment(\.colorScheme, .dark)))
-            host.appearance = NSAppearance(named: .darkAqua)
+        func render<V: View>(_ view: V, size: NSSize, name: String, dark: Bool = true) -> Bool {
+            let host = NSHostingView(rootView: AnyView(view.environmentObject(model).environment(\.colorScheme, dark ? .dark : .light)))
+            host.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
             host.frame = NSRect(origin: .zero, size: size)
             w.contentView?.addSubview(host)
             host.layoutSubtreeIfNeeded()
@@ -520,6 +520,10 @@ extension SelfTest {
         let s4 = render(legend, size: NSSize(width: 180, height: 200), name: "status-dots.png")
         let settings = Form { NotificationSettingsSection() }.formStyle(.grouped)
         let s5 = render(settings, size: NSSize(width: 520, height: 190), name: "status-settings.png")
+        let s6 = render(SidebarView(), size: NSSize(width: 260, height: 430), name: "status-sidebar-light.png", dark: false)
+        let appearance = Form { AppearanceSettingsSection() }.formStyle(.grouped)
+        let s7 = render(appearance, size: NSSize(width: 520, height: 120), name: "settings-appearance-light.png", dark: false)
         check("snapshot: sidebar, narrow sidebar, needs-you list, dots and settings written to \(out.path)", s1 && s2 && s3 && s4 && s5)
+        check("snapshot: light sidebar and the Appearance setting", s6 && s7)
     }
 }

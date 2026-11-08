@@ -53,7 +53,7 @@ final class ComposerTextView: NSTextView {
         insertionPointColor = ComposerStyle.text
         typingAttributes = [.font: ComposerStyle.font, .foregroundColor: ComposerStyle.text, .paragraphStyle: ComposerStyle.paragraph]
         defaultParagraphStyle = ComposerStyle.paragraph
-        selectedTextAttributes = [.backgroundColor: NSColor(white: 1, alpha: 0.16)]
+        selectedTextAttributes = [.backgroundColor: Theme.ink(0.16, light: 0.11)]
         registerForDraggedTypes([.fileURL, .string])
     }
 
@@ -198,8 +198,8 @@ enum ComposerStyle {
         return p
     }()
     static let lineHeight: CGFloat = 21
-    static let text = NSColor(white: 0.92, alpha: 1)
-    static let placeholder = NSColor(white: 0.44, alpha: 1)
+    static let text = Theme.pair(dark: NSColor(white: 0.92, alpha: 1), light: NSColor(white: 0.12, alpha: 1))
+    static let placeholder = Theme.pair(dark: NSColor(white: 0.44, alpha: 1), light: NSColor(white: 0.6, alpha: 1))
     static let maxLines: CGFloat = 9
 }
 
@@ -250,14 +250,17 @@ final class ComposerActionButton: NSControl {
         let enabled = active || kind == .stop
         let circle = NSBezierPath(ovalIn: r)
         let fill: NSColor
+        // A light circle on dark, a dark circle on light.
         if enabled {
-            fill = NSColor(white: pressed ? 0.78 : (hovering ? 0.96 : 0.90), alpha: 1)
+            fill = Theme.pair(dark: NSColor(white: pressed ? 0.78 : (hovering ? 0.96 : 0.90), alpha: 1),
+                              light: NSColor(white: pressed ? 0.32 : (hovering ? 0.10 : 0.16), alpha: 1))
         } else {
-            fill = NSColor(white: 1, alpha: 0.07)
+            fill = Theme.ink(0.07)
         }
         fill.setFill()
         circle.fill()
-        let glyph = enabled ? NSColor(white: 0.08, alpha: 1) : NSColor(white: 0.45, alpha: 1)
+        let glyph = enabled ? Theme.pair(dark: NSColor(white: 0.08, alpha: 1), light: NSColor(white: 0.98, alpha: 1))
+                            : Theme.pair(dark: NSColor(white: 0.45, alpha: 1), light: NSColor(white: 0.62, alpha: 1))
         glyph.setStroke()
         glyph.setFill()
         let c = NSPoint(x: r.midX, y: r.midY)
@@ -324,12 +327,14 @@ final class ComposerIconButton: NSControl {
 
     override func draw(_ dirtyRect: NSRect) {
         if hovering || pressed {
-            NSColor(white: 1, alpha: pressed ? 0.1 : 0.06).setFill()
+            Theme.ink(pressed ? 0.1 : 0.06).setFill()
             NSBezierPath(roundedRect: bounds.insetBy(dx: 1, dy: 1), xRadius: 6, yRadius: 6).fill()
         }
         let config = NSImage.SymbolConfiguration(pointSize: 13, weight: .regular)
         guard let img = NSImage(systemSymbolName: symbol, accessibilityDescription: toolTip)?.withSymbolConfiguration(config) else { return }
-        let tint = NSColor(white: 1, alpha: hovering ? 0.75 : 0.45)
+        // Resolved now, while this view's appearance is the current one.
+        let tint = Theme.pair(dark: NSColor(white: 1, alpha: hovering ? 0.75 : 0.45),
+                              light: NSColor(white: 0, alpha: hovering ? 0.7 : 0.42)).usingColorSpace(.sRGB) ?? .gray
         let tinted = NSImage(size: img.size, flipped: false) { r in
             img.draw(in: r)
             tint.set()
@@ -413,12 +418,20 @@ final class ComposerBox: NSView {
 
     func updateColors() {
         let focused = window?.firstResponder === textView && window?.isKeyWindow == true
-        layer?.backgroundColor = NSColor(white: 1, alpha: 0.045).cgColor
-        layer?.borderColor = NSColor(white: 1, alpha: focused ? 0.14 : 0.085).cgColor
+        // Layer colours don't follow the appearance by themselves, so resolve them in it.
+        effectiveAppearance.performAsCurrentDrawingAppearance {
+            layer?.backgroundColor = Theme.pair(dark: NSColor(white: 1, alpha: 0.045), light: NSColor.white).cgColor
+            layer?.borderColor = Theme.ink(focused ? 0.14 : 0.085, light: focused ? 0.16 : 0.1).cgColor
+        }
     }
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
+        updateColors()
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
         updateColors()
     }
 

@@ -1,4 +1,6 @@
-/* hantuu reader and code viewer. Neutral darks, colour only in text and accents. */
+/* hantuu reader and code viewer. Neutral greys, colour only in text and accents. Dark by
+   default; the block after this one switches to light when the app is light (WKWebView follows
+   the app's appearance through prefers-color-scheme). */
 :root {
   --text: #e3e3e3;
   --strong: #f2f2f2;
@@ -11,7 +13,75 @@
   --accent: #e5a23b;
   --error: #e06c6c;
   --mono: "JetBrains Mono", ui-monospace, "SF Mono", SFMono-Regular, Menlo, monospace;
+  --assistant: #dadada;
+  --selection: rgba(143, 180, 240, 0.32);
+  --link-rule: rgba(143, 180, 240, 0.5);
+  --pill: #2a2a2a;
+  --pill-hover: #333;
+  --pill-main: #262626;
+  --pre: rgba(255, 255, 255, 0.035);
+  --bubble: rgba(255, 255, 255, 0.062);
+  --codeblock: rgba(255, 255, 255, 0.034);
+  --codeblock-rule: rgba(255, 255, 255, 0.05);
+  --code-inline: rgba(255, 255, 255, 0.07);
+  --target: rgba(229, 162, 59, 0.12);
+  --hl-base: #d6d6d6;
+  --hl-comment: #6f6f6f;
+  --hl-keyword: #c9a0f0;
+  --hl-string: #9fcf9f;
+  --hl-number: #e5b47a;
+  --hl-title: #8fb4f0;
+  --hl-type: #7fcfc4;
+  --hl-attr: #a8c4e0;
+  --hl-meta: #a0a0a0;
+  --hl-tag: #e08f8f;
+  --hl-add: #7cc48f;
+  --hl-add-bg: rgba(93, 187, 126, 0.08);
+  --hl-del: #e08585;
+  --hl-del-bg: rgba(224, 108, 108, 0.08);
   color-scheme: dark;
+}
+
+@media (prefers-color-scheme: light) {
+  :root {
+    --text: #2b2b2b;
+    --strong: #111111;
+    --secondary: #6b6b6b;
+    --tertiary: #9a9a9a;
+    --rule: rgba(0, 0, 0, 0.09);
+    --fill: rgba(0, 0, 0, 0.04);
+    --fill-strong: rgba(0, 0, 0, 0.065);
+    --link: #2f6fd0;
+    --accent: #b87914;
+    --error: #c94a4a;
+    --assistant: #262626;
+    --selection: rgba(47, 111, 208, 0.2);
+    --link-rule: rgba(47, 111, 208, 0.45);
+    --pill: #ffffff;
+    --pill-hover: #f0f0f0;
+    --pill-main: #ffffff;
+    --pre: rgba(0, 0, 0, 0.03);
+    --bubble: rgba(0, 0, 0, 0.05);
+    --codeblock: rgba(0, 0, 0, 0.028);
+    --codeblock-rule: rgba(0, 0, 0, 0.06);
+    --code-inline: rgba(0, 0, 0, 0.06);
+    --target: rgba(184, 121, 20, 0.13);
+    --hl-base: #383838;
+    --hl-comment: #8a8a8a;
+    --hl-keyword: #8a4fc7;
+    --hl-string: #3f8a4f;
+    --hl-number: #a66a12;
+    --hl-title: #2f6fd0;
+    --hl-type: #1f8a80;
+    --hl-attr: #3a6a9a;
+    --hl-meta: #7a7a7a;
+    --hl-tag: #b5484c;
+    --hl-add: #3d8a55;
+    --hl-add-bg: rgba(61, 138, 85, 0.1);
+    --hl-del: #bf4e4e;
+    --hl-del-bg: rgba(191, 78, 78, 0.1);
+    color-scheme: light;
+  }
 }
 
 * { box-sizing: border-box; }
@@ -22,11 +92,11 @@ body {
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
 }
-::selection { background: rgba(143, 180, 240, 0.32); }
+::selection { background: var(--selection); }
 
 a { color: var(--link); text-decoration: none; cursor: pointer; }
 a:hover { text-decoration: underline; }
-a.path { border-bottom: 1px dotted rgba(143, 180, 240, 0.5); }
+a.path { border-bottom: 1px dotted var(--link-rule); }
 a.path:hover { text-decoration: none; border-bottom-style: solid; }
 
 .empty {
@@ -126,13 +196,13 @@ pre.full {
   transform: translateX(-50%);
   font: 12px -apple-system, sans-serif;
   color: var(--text);
-  background: #2a2a2a;
+  background: var(--pill);
   border: 1px solid var(--rule);
   border-radius: 6px;
   padding: 5px 12px;
   cursor: pointer;
 }
-.newpill:hover { background: #333; }
+.newpill:hover { background: var(--pill-hover); }
 
 /* ---- Markdown ---- */
 .md > :first-child { margin-top: 0; }
@@ -160,7 +230,7 @@ pre.full {
   font-family: var(--mono);
   font-size: 12.5px;
   line-height: 1.55;
-  background: rgba(255, 255, 255, 0.035);
+  background: var(--pre);
   border: 1px solid var(--rule);
   border-radius: 7px;
   padding: 11px 14px;
@@ -217,24 +287,24 @@ table.source td.ln {
   white-space: nowrap;
 }
 table.source td.src { white-space: pre; padding-right: 24px; }
-table.source tr.target td { background: rgba(229, 162, 59, 0.12); }
+table.source tr.target td { background: var(--target); }
 table.source tr.target td.ln { color: var(--accent); }
 body.code.previewing #view { max-width: 720px; margin: 0 auto; padding: 22px 28px 64px; }
 .truncated { color: var(--tertiary); font-size: 12px; padding: 0 0 32px 16px; }
 
 /* ---- Syntax colours (restrained) ---- */
-.hljs { color: #d6d6d6; }
-.hljs-comment, .hljs-quote { color: #6f6f6f; font-style: italic; }
-.hljs-keyword, .hljs-selector-tag, .hljs-doctag { color: #c9a0f0; }
-.hljs-string, .hljs-regexp, .hljs-template-tag, .hljs-template-variable { color: #9fcf9f; }
-.hljs-number, .hljs-literal, .hljs-symbol, .hljs-bullet { color: #e5b47a; }
-.hljs-title, .hljs-title.function_, .hljs-section { color: #8fb4f0; }
-.hljs-title.class_, .hljs-type, .hljs-built_in { color: #7fcfc4; }
-.hljs-attr, .hljs-attribute, .hljs-property, .hljs-variable, .hljs-params { color: #a8c4e0; }
-.hljs-meta, .hljs-meta .hljs-keyword { color: #a0a0a0; }
-.hljs-tag, .hljs-name { color: #e08f8f; }
-.hljs-addition { color: #7cc48f; background: rgba(93, 187, 126, 0.08); }
-.hljs-deletion { color: #e08585; background: rgba(224, 108, 108, 0.08); }
+.hljs { color: var(--hl-base); }
+.hljs-comment, .hljs-quote { color: var(--hl-comment); font-style: italic; }
+.hljs-keyword, .hljs-selector-tag, .hljs-doctag { color: var(--hl-keyword); }
+.hljs-string, .hljs-regexp, .hljs-template-tag, .hljs-template-variable { color: var(--hl-string); }
+.hljs-number, .hljs-literal, .hljs-symbol, .hljs-bullet { color: var(--hl-number); }
+.hljs-title, .hljs-title.function_, .hljs-section { color: var(--hl-title); }
+.hljs-title.class_, .hljs-type, .hljs-built_in { color: var(--hl-type); }
+.hljs-attr, .hljs-attribute, .hljs-property, .hljs-variable, .hljs-params { color: var(--hl-attr); }
+.hljs-meta, .hljs-meta .hljs-keyword { color: var(--hl-meta); }
+.hljs-tag, .hljs-name { color: var(--hl-tag); }
+.hljs-addition { color: var(--hl-add); background: var(--hl-add-bg); }
+.hljs-deletion { color: var(--hl-del); background: var(--hl-del-bg); }
 .hljs-emphasis { font-style: italic; }
 .hljs-strong { font-weight: 600; }
 .hljs-link { color: var(--link); }
@@ -247,7 +317,7 @@ body.reader.main { font-size: 15px; line-height: 1.66; }
 body.reader.main #entries { max-width: 784px; padding: 30px 32px 20px; }
 body.reader.main .entry { margin: 0 0 16px; }
 body.reader.main .entry.assistant { margin-bottom: 4px; }
-body.reader.main .entry.assistant .md { color: #dadada; }
+body.reader.main .entry.assistant .md { color: var(--assistant); }
 body.reader.main .entry .md > :last-child { margin-bottom: 0; }
 
 /* Your messages: a quiet bubble on the right, no label. */
@@ -263,7 +333,7 @@ body.reader.main .entry.user:first-child { margin-top: 0; }
 body.reader.main .entry.user > .label { display: none; }
 body.reader.main .entry.user > .md {
   max-width: 82%;
-  background: rgba(255, 255, 255, 0.062);
+  background: var(--bubble);
   border-radius: 14px;
   padding: 9px 15px;
 }
@@ -320,7 +390,7 @@ body.reader.main .toolline { gap: 9px; align-items: center; font-size: 13px; min
 body.reader.main .toolline::before { content: none; }
 body.reader.main svg.ticon { width: 15px; height: 15px; color: var(--tertiary); }
 body.reader.main .toolline a.path { border-bottom-color: transparent; }
-body.reader.main .toolline a.path:hover { border-bottom-color: rgba(143, 180, 240, 0.5); }
+body.reader.main .toolline a.path:hover { border-bottom-color: var(--link-rule); }
 body.reader.main pre.full { margin-left: 24px; }
 body.reader.main .entry.tool .media { margin-left: 24px; }
 
@@ -347,8 +417,8 @@ body.reader.main .toolgroup.open .toolrows { display: block; }
 body.reader.main .codeblock {
   margin: 0 0 1em;
   border-radius: 8px;
-  background: rgba(255, 255, 255, 0.034);
-  border: 1px solid rgba(255, 255, 255, 0.05);
+  background: var(--codeblock);
+  border: 1px solid var(--codeblock-rule);
   overflow: hidden;
 }
 body.reader.main .codehead {
@@ -369,7 +439,7 @@ body.reader.main .codeblock pre {
   padding: 0 14px 12px;
   font-size: 12.5px;
 }
-body.reader.main .md code { background: rgba(255, 255, 255, 0.07); padding: 1px 5px; border-radius: 4px; }
+body.reader.main .md code { background: var(--code-inline); padding: 1px 5px; border-radius: 4px; }
 body.reader.main .md pre code { background: none; padding: 0; }
 
 /* Needs you, questions, errors and plans keep their accent rule. */
@@ -387,7 +457,7 @@ body.reader.main .empty {
 }
 body.reader.main .empty[hidden] { display: none; }
 
-body.reader.main .newpill { bottom: 12px; border-radius: 13px; padding: 4px 12px; background: #262626; }
+body.reader.main .newpill { bottom: 12px; border-radius: 13px; padding: 4px 12px; background: var(--pill-main); }
 
 /* New messages settle in. */
 @keyframes hantuu-rise { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }

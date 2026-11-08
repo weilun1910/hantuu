@@ -331,13 +331,20 @@ enum SelfTest {
             return
         }
         check("surface: libghostty starts", true)
-        if let own = GhosttyApp.loadConfig(useGhosttyConfig: false) {
-            let bg = GhosttyApp.color(own, key: "background")
-            check("terminal: hantuu's own look is the default", Paths.terminalTheme != nil
-                  && bg.map { abs($0.redComponent - 0x16 / 255.0) < 0.01 && abs($0.blueComponent - 0x16 / 255.0) < 0.01 } == true,
-                  "theme=\(Paths.terminalTheme?.path ?? "missing") bg=\(String(describing: bg))")
-            ghostty_config_free(own)
+        // hantuu's look picks hantuu-light or hantuu-dark from the colour scheme, and the
+        // window chrome reads both backgrounds from libghostty at start.
+        let near: (NSColor, Int) -> Bool = { c, hex in
+            abs(c.redComponent - CGFloat(hex) / 255) < 0.01 && abs(c.blueComponent - CGFloat(hex) / 255) < 0.01
         }
+        check("terminal: hantuu's own look is the default, with a light and a dark theme",
+              Paths.terminalTheme != nil && !TerminalSettings.shared.useGhosttyConfig
+                && near(Theme.darkBackground, 0x16) && near(Theme.lightBackground, 0xF7),
+              "theme=\(Paths.terminalTheme?.path ?? "missing") dark=\(Theme.darkBackground.hexString) light=\(Theme.lightBackground.hexString) diagnostics=\(g.diagnostics)")
+        g.setColorScheme(dark: false)
+        let lightOK = g.appScheme == GHOSTTY_COLOR_SCHEME_LIGHT && g.surfaceScheme == GHOSTTY_COLOR_SCHEME_LIGHT
+        g.setColorScheme(dark: true)
+        check("terminal: light and dark reach libghostty", lightOK && g.appScheme == GHOSTTY_COLOR_SCHEME_DARK
+              && g.surfaceScheme == GHOSTTY_COLOR_SCHEME_DARK && near(Theme.darkBackground, 0x16) && near(Theme.lightBackground, 0xF7))
         let w = makeWindow()
         let rec = Recorder()
         let script = #"printf 'hantuu-selftest-%s\n' ok; printf '\033]0;selftest title\007'; echo 'https://example.com/hantuu-selftest-link-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'; read -r line; echo "got:$line"; read -r p; echo "path:$p"; exit 3"#

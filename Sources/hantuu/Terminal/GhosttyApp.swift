@@ -14,9 +14,13 @@ final class GhosttyApp {
     private(set) var app: ghostty_app_t!
     private(set) var diagnostics: [String] = []
 
-    /// Terminal background from the user's Ghostty config, used for the window chrome.
-    var backgroundColor: NSColor { Self.color(config, key: "background") ?? NSColor(hex: 0x161616) }
-    var foregroundColor: NSColor { Self.color(config, key: "foreground") ?? NSColor(hex: 0xE6E6E6) }
+    /// The colour scheme libghostty was last told the app is in. Ghostty starts light.
+    /// A `theme = light:…,dark:…` line in the config picks its colours from this.
+    private(set) var appScheme = GHOSTTY_COLOR_SCHEME_LIGHT
+    /// What hantuu's appearance wants every terminal to show.
+    private(set) var surfaceScheme = GHOSTTY_COLOR_SCHEME_DARK
+    /// Every live terminal, so a change of appearance reaches the hidden ones too.
+    private let surfaces = NSHashTable<TerminalView>.weakObjects()
 
     /// Call once, before any surface exists. Loads hantuu's terminal look, and the user's own
     /// Ghostty config on top of it when Settings asks for that (read-only either way).
@@ -100,7 +104,10 @@ final class GhosttyApp {
         }
         self.app = app
         ghostty_app_set_focus(app, NSApp?.isActive ?? false)
-        ghostty_app_set_color_scheme(app, GHOSTTY_COLOR_SCHEME_DARK)
+        // The window chrome needs both terminal backgrounds up front, so it can switch
+        // without waiting on libghostty. Then match whatever hantuu is showing now.
+        surfaceScheme = (NSApp?.effectiveAppearance.isDark ?? true) ? GHOSTTY_COLOR_SCHEME_DARK : GHOSTTY_COLOR_SCHEME_LIGHT
+        captureThemeColors()
 
         let nc = NotificationCenter.default
         nc.addObserver(forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in
@@ -117,10 +124,67 @@ final class GhosttyApp {
     /// Re-read the Ghostty config files (Ghostty's reload_config binding lands here).
     func reloadConfig() {
         guard let cfg = Self.loadConfig() else { return }
-        ghostty_app_update_config(app, cfg)
         let old = config
         config = cfg
+        ghostty_app_update_config(app, cfg)
         ghostty_config_free(old)
+        captureThemeColors()
+    }
+
+    // MARK: Light and dark
+
+    /// Switch every terminal to light or dark. hantuu calls this whenever its effective
+    /// appearance changes (Settings > Appearance, or macOS switching while it matches).
+    func setColorScheme(dark: Bool) {
+        let scheme = dark ? GHOSTTY_COLOR_SCHEME_DARK : GHOSTTY_COLOR_SCHEME_LIGHT
+        surfaceScheme = scheme
+        for view in surfaces.allObjects { view.applyColorScheme(scheme) }
+        setAppScheme(scheme)
+    }
+
+    func register(_ view: TerminalView) {
+        surfaces.add(view)
+        view.applyColorScheme(surfaceScheme)
+    }
+
+    /// Reads the terminal background for light and for dark into Theme. libghostty only
+    /// hands over the colours for the scheme it's in, so this flips the app-level scheme to
+    /// the other one and back; each flip reports its config (GHOSTTY_ACTION_CONFIG_CHANGE).
+    /// Terminals keep their own scheme, so nothing on screen changes.
+    func captureThemeColors() {
+        guard app != nil else { return }
+        let target = surfaceScheme
+        let other = target == GHOSTTY_COLOR_SCHEME_DARK ? GHOSTTY_COLOR_SCHEME_LIGHT : GHOSTTY_COLOR_SCHEME_DARK
+        // Setting the scheme it's already in reports nothing, so visit both, ending on target.
+        if appScheme == target {
+            setAppScheme(other)
+        } else {
+            setAppScheme(target)
+            setAppScheme(other)
+        }
+        setAppScheme(target)
+    }
+
+    private func setAppScheme(_ scheme: ghostty_color_scheme_e) {
+        guard let app, scheme != appScheme else { return }
+        appScheme = scheme
+        ghostty_app_set_color_scheme(app, scheme)
+    }
+
+    /// libghostty asks for a reload when a colour scheme changes ("soft": same files, new
+    /// conditions). Same as Ghostty's own app: hand the current config back to whoever asked.
+    fileprivate func softReload(surface: ghostty_surface_t?) {
+        if let surface {
+            ghostty_surface_update_config(surface, config)
+        } else if let app {
+            ghostty_app_update_config(app, config)
+        }
+    }
+
+    /// The app-level config after libghostty applied the current scheme.
+    fileprivate func appConfigChanged(_ applied: ghostty_config_t) {
+        let dark = appScheme == GHOSTTY_COLOR_SCHEME_DARK
+        if let bg = Self.color(applied, key: "background") { Theme.setTerminalBackground(bg, dark: dark) }
     }
 
     func tick() {
@@ -143,6 +207,12 @@ final class GhosttyApp {
         let state = Unmanaged<GhosttyApp>.fromOpaque(userdata).takeUnretainedValue()
         // Wakeups come from any thread; ticks must happen on the main thread.
         DispatchQueue.main.async { state.tick() }
+    }
+
+    /// The GhosttyApp behind a libghostty app. Works during init too, before `shared` is set.
+    private static func instance(_ app: ghostty_app_t) -> GhosttyApp? {
+        guard let ud = ghostty_app_userdata(app) else { return nil }
+        return Unmanaged<GhosttyApp>.fromOpaque(ud).takeUnretainedValue()
     }
 
     private static func view(fromUserdata userdata: UnsafeMutableRawPointer?) -> TerminalView? {
@@ -238,7 +308,29 @@ final class GhosttyApp {
             return true
 
         case GHOSTTY_ACTION_RELOAD_CONFIG:
-            DispatchQueue.main.async { GhosttyApp.shared?.reloadConfig() }
+            // Soft reloads come from a colour scheme change and are answered right away, the
+            // way Ghostty's own app does. A full reload re-reads the files.
+            let soft = action.action.reload_config.soft
+            let surface: ghostty_surface_t? = target.tag == GHOSTTY_TARGET_SURFACE ? target.target.surface : nil
+            guard let host = instance(app) else { return false }
+            if soft, Thread.isMainThread {
+                host.softReload(surface: surface)
+            } else if soft {
+                DispatchQueue.main.async { host.softReload(surface: surface) }
+            } else {
+                DispatchQueue.main.async { host.reloadConfig() }
+            }
+            return true
+
+        case GHOSTTY_ACTION_CONFIG_CHANGE:
+            // Read the colours now: the config only lives for this call.
+            if target.tag == GHOSTTY_TARGET_APP, let cfg = action.action.config_change.config, let host = instance(app) {
+                if Thread.isMainThread {
+                    host.appConfigChanged(cfg)
+                } else if let copy = ghostty_config_clone(cfg) {
+                    DispatchQueue.main.async { host.appConfigChanged(copy); ghostty_config_free(copy) }
+                }
+            }
             return true
 
         case GHOSTTY_ACTION_TOGGLE_FULLSCREEN:
@@ -283,7 +375,7 @@ final class GhosttyApp {
             DispatchQueue.main.async { TerminalSignals.post(v, .progress(active: false)) }
             return true
 
-        case GHOSTTY_ACTION_COLOR_CHANGE, GHOSTTY_ACTION_CONFIG_CHANGE, GHOSTTY_ACTION_SCROLLBAR,
+        case GHOSTTY_ACTION_COLOR_CHANGE, GHOSTTY_ACTION_SCROLLBAR,
              GHOSTTY_ACTION_SELECTION_CHANGED,
              GHOSTTY_ACTION_KEY_SEQUENCE, GHOSTTY_ACTION_KEY_TABLE, GHOSTTY_ACTION_INITIAL_SIZE,
              GHOSTTY_ACTION_SIZE_LIMIT, GHOSTTY_ACTION_SECURE_INPUT:

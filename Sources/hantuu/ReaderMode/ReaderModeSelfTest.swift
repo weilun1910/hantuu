@@ -438,6 +438,17 @@ extension SelfTest {
             return render(main.view, to: out.appendingPathComponent(name))
         }
         let idle = shot("reader-mode-idle.png")
+        // The same view in light mode: the window chrome, the composer and the page's CSS.
+        if let page = rm.reader?.page {
+            w.appearance = NSAppearance(named: .aqua)
+            g.setColorScheme(dark: false)
+            let lightText = waitUntil(5) { (js(page, "getComputedStyle(document.body).color") as? String) == "rgb(43, 43, 43)" }
+            check("reader page: switches to light colours with the app", lightText, js(page, "getComputedStyle(document.body).color") as? String ?? "")
+            _ = shot("reader-mode-idle-light.png")
+            w.appearance = NSAppearance(named: .darkAqua)
+            g.setColorScheme(dark: true)
+            _ = waitUntil(5) { (js(page, "getComputedStyle(document.body).color") as? String) == "rgb(227, 227, 227)" }
+        }
         if let page = rm.reader?.page {
             let summary = js(page, "(document.querySelector('.toolgroup .sumtext') || {}).textContent || ''") as? String ?? ""
             check("reader page: a run of tool calls folds into one summary line", summary == "Ran a command, read a file and 1 more", summary)

@@ -5,7 +5,7 @@ extension Color {
     static var hAdded: Color { Color(nsColor: ReviewColors.added) }
     static var hRemoved: Color { Color(nsColor: ReviewColors.removed) }
     static var hPending: Color { Color(nsColor: ReviewColors.pending) }
-    static var hLink: Color { Color(nsColor: NSColor(hex: 0x8FB4F0)) }
+    static var hLink: Color { Color(nsColor: Theme.link) }
 }
 
 /// A quiet card: a small title, optional trailing text, thin border. Tappable when it has an
@@ -35,7 +35,7 @@ struct ReviewCard<Content: View>: View {
         .padding(.top, 10)
         .padding(.bottom, 11)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(RoundedRectangle(cornerRadius: 8).fill(hovering && action != nil ? Color.white.opacity(0.045) : Color(nsColor: ReviewColors.card)))
+        .background(RoundedRectangle(cornerRadius: 8).fill(hovering && action != nil ? Color.hHover : Color(nsColor: ReviewColors.card)))
         .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.hDivider, lineWidth: 1))
         .contentShape(Rectangle())
         .onTapGesture { action?() }
@@ -167,7 +167,7 @@ struct OverviewCards: View {
             VStack(alignment: .leading, spacing: 6) {
                 GeometryReader { g in
                     ZStack(alignment: .leading) {
-                        Capsule().fill(Color.white.opacity(0.08))
+                        Capsule().fill(Color.hInk(0.08))
                         Capsule().fill(fraction > 0.8 ? Color.hPending : Color.hText.opacity(0.55))
                             .frame(width: max(2, g.size.width * fraction))
                     }
@@ -226,7 +226,7 @@ struct PullRequestCard: View {
     private var stateColor: Color {
         switch pr.stateLabel {
         case "Open": return .hAdded
-        case "Merged": return Color(nsColor: NSColor(hex: 0xB49AE0))
+        case "Merged": return Color(nsColor: Theme.pair(dark: NSColor(hex: 0xB49AE0), light: NSColor(hex: 0x7F58BF)))
         case "Closed": return .hRemoved
         default: return .hSecondary
         }
