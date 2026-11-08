@@ -1,5 +1,7 @@
 #!/bin/bash
-# Builds the Swift package and wraps it in build/hantuu.app, signed ad hoc.
+# Builds the Swift package and wraps it in build.noindex/hantuu.app, signed ad hoc.
+# The .noindex folder keeps Spotlight from listing this copy as an app. Only
+# scripts/install.sh puts hantuu where macOS shows it: /Applications/hantuu.app.
 # Usage: scripts/build.sh [release|debug]
 # Needs vendor/GhosttyKit.xcframework first: run scripts/build-libghostty.sh once.
 set -euo pipefail
@@ -18,10 +20,10 @@ export SDKROOT="$(xcrun --sdk macosx --show-sdk-path)"
 swift build -c "$CONFIG" --scratch-path "$ROOT/.build"
 BIN_DIR="$(swift build -c "$CONFIG" --scratch-path "$ROOT/.build" --show-bin-path)"
 
-FINAL="$ROOT/build/hantuu.app"
+FINAL="$ROOT/build.noindex/hantuu.app"
 # Assemble in a staging folder and swap it in at the end, so a copy of hantuu that's
 # already running keeps finding its resources while this builds.
-APP="$ROOT/build/hantuu.app.staging"
+APP="$ROOT/build.noindex/hantuu.app.staging"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN_DIR/hantuu" "$APP/Contents/MacOS/hantuu"
@@ -54,7 +56,7 @@ rm -rf "$FINAL.old"
 [ -d "$FINAL" ] && mv "$FINAL" "$FINAL.old"
 mv "$APP" "$FINAL"
 rm -rf "$FINAL.old"
-# Tell Finder and the Dock the bundle changed, so they pick up the icon again.
-touch "$FINAL"
-/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "$FINAL" || true
+# Never register this copy with macOS, and forget it if something did (a launch from here
+# registers it), so the Apps view and Spotlight only ever offer /Applications/hantuu.app.
+/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -u "$FINAL" >/dev/null 2>&1 || true
 echo "Built $FINAL (signed with ${IDENTITY/#-/ad hoc})"
