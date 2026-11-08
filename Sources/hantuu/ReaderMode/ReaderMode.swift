@@ -31,49 +31,33 @@ final class ReaderMode: ObservableObject {
 
     func peek(_ chat: Chat) { peeking.insert(chat.id) }
     func endPeek(_ chat: Chat) { peeking.remove(chat.id) }
-
-    /// The panel's Reader tab repeats the main area when the selected chat's face is the
-    /// reader, so it's hidden then.
-    func hidesPanelReader(selected: Chat?) -> Bool {
-        guard let selected else { return false }
-        return face(of: selected) == .reader
-    }
 }
 
 // MARK: Header button and menu item
 
-/// The icon in the chat header that flips the selected chat between the reader and its
-/// terminal. In terminal mode it also keeps the button for the panel's Reader tab.
+/// The book icon in the chat header. It flips the selected chat between the reader and its
+/// terminal in place, and stays lit while the reader is up.
 struct ChatFaceButtons: View {
     @EnvironmentObject var model: AppModel
     @ObservedObject var mode = ReaderMode.shared
 
     var body: some View {
-        let reader = model.selectedChat.map { mode.face(of: $0) == .reader } ?? false
-        if !reader {
-            IconButton(symbol: "text.book.closed", help: "Reader in the Panel  ⌥⌘6", active: model.panelVisible && model.panelTab == .reader) {
-                if model.panelVisible && model.panelTab == .reader { model.panelVisible = false } else {
-                    model.panelTab = .reader
-                    model.panelVisible = true
-                }
-            }
-        }
-        if model.selectedChat != nil {
-            IconButton(symbol: reader ? "terminal" : "text.alignleft",
-                       help: reader ? "Show Terminal  ⌥⌘R" : "Show as Reader  ⌥⌘R") {
+        if let chat = model.selectedChat {
+            let reader = mode.face(of: chat) == .reader
+            IconButton(symbol: "text.book.closed", help: reader ? "Show Terminal  ⇧⌘R" : "Show as Reader  ⇧⌘R", active: reader) {
                 ReaderModeMenuTarget.shared.toggle(model: model)
             }
         }
     }
 }
 
-/// View > Show Terminal / Show as Reader (Option-Cmd-R) and the Reader tab item's state.
+/// View > Show as Reader / Show Terminal (Shift-Cmd-R), the same shortcut as Safari's Reader.
 final class ReaderModeMenuTarget: NSObject, NSMenuItemValidation {
     static let shared = ReaderModeMenuTarget()
 
     static func toggleItem() -> NSMenuItem {
         let it = NSMenuItem(title: "Show as Reader", action: #selector(toggleFace(_:)), keyEquivalent: "r")
-        it.keyEquivalentModifierMask = [.command, .option]
+        it.keyEquivalentModifierMask = [.command, .shift]
         it.target = shared
         return it
     }
@@ -94,16 +78,6 @@ final class ReaderModeMenuTarget: NSObject, NSMenuItemValidation {
             return false
         }
         item.title = ReaderMode.shared.face(of: chat) == .reader ? "Show Terminal" : "Show as Reader"
-        return true
-    }
-}
-
-extension AppDelegate: NSMenuItemValidation {
-    /// Only the panel's Reader tab item is ever disabled: while the reader is the main area.
-    func validateMenuItem(_ item: NSMenuItem) -> Bool {
-        if item.action == #selector(showPanelTab(_:)), item.representedObject as? String == PanelTab.reader.rawValue {
-            return !ReaderMode.shared.hidesPanelReader(selected: model.selectedChat)
-        }
         return true
     }
 }

@@ -127,6 +127,8 @@ struct ProjectSection: View {
 struct ChatRow: View {
     @EnvironmentObject var model: AppModel
     @ObservedObject var chat: Chat
+    /// So the menu's Show as Reader / Show Terminal follows the chat's face.
+    @ObservedObject private var readerMode = ReaderMode.shared
     let index: Int?
     @State private var hovering = false
 
@@ -168,10 +170,9 @@ struct ChatRow: View {
             if chat.status == .ended {
                 Button(chat.sessionID != nil && chat.agent.resumeArguments(sessionID: "x") != nil ? "Resume" : "Start Again") { model.resume(chat) }
             }
-            Button("Show Reader") {
+            Button(readerMode.face(of: chat) == .reader ? "Show Terminal" : "Show as Reader") {
                 model.select(chat.id)
-                model.panelTab = .reader
-                model.panelVisible = true
+                ReaderModeMenuTarget.shared.toggle(model: model)
             }
             if let p = chat.transcriptPath {
                 Button("Reveal Transcript in Finder") { NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: p)]) }

@@ -9,7 +9,7 @@ enum ChatFace: String, Codable {
 }
 
 /// "Show chats as the reader" (off by default) and the chats flipped away from it with the
-/// header button or Option-Cmd-R. Stored in <data dir>/chat-settings.json, the same way
+/// header button or Shift-Cmd-R. Stored in <data dir>/chat-settings.json, the same way
 /// TerminalSettings stores its switch.
 final class ChatSettings: ObservableObject {
     static let shared = ChatSettings(file: Paths.dataDir.appendingPathComponent("chat-settings.json"))
@@ -77,7 +77,7 @@ struct ChatSettingsSection: View {
         Section {
             Toggle("Show chats as the reader", isOn: $settings.showChatsAsReader)
         } header: { Text("Chat") } footer: {
-            Text("Turn this on to read chats as easy-to-read text with a message box underneath, instead of the agent's terminal. The agent still runs in its terminal, and ⌥⌘R switches one chat between the two.")
+            Text("Turn this on to read chats as easy-to-read text with a message box underneath, instead of the agent's terminal. The agent still runs in its terminal, and ⇧⌘R switches one chat between the two.")
                 .font(.system(size: 11)).foregroundStyle(.secondary)
         }
     }

@@ -3,11 +3,11 @@ import Combine
 import SwiftUI
 
 /// The toggleable right panel: Overview (glance cards for the chat), Changes (the diff, with
-/// line comments for the agent), Files (the project tree), Code (read-only viewer), Terminal
-/// (plain shells in the project folder) and Reader (the chat rendered as prose).
+/// line comments for the agent), Files (the project tree), Code (read-only viewer) and Terminal
+/// (plain shells in the project folder). The reader isn't here: it replaces the chat's
+/// terminal in the main area (Shift-Cmd-R).
 final class PanelController: NSViewController {
     private let model: AppModel
-    let reader: ReaderController
     let code: CodeViewerController
     let review: ReviewCenter
     private let shells = TerminalContainer(color: Theme.background)
@@ -23,7 +23,6 @@ final class PanelController: NSViewController {
     init(model: AppModel, review: ReviewCenter = .shared) {
         self.model = model
         self.review = review
-        reader = ReaderController(model: model)
         code = CodeViewerController(model: model)
         super.init(nibName: nil, bundle: nil)
         review.configure(model: model)
@@ -39,7 +38,7 @@ final class PanelController: NSViewController {
         overview = ChromeHostingView(rootView: OverviewView().environmentObject(model).environmentObject(review))
         changes = ChromeHostingView(rootView: ChangesView().environmentObject(model).environmentObject(review))
         files = ChromeHostingView(rootView: FilesView().environmentObject(model).environmentObject(review))
-        let views: [NSView] = [shells, code.view, reader.view, noShells, noFiles, overview, changes, files]
+        let views: [NSView] = [shells, code.view, noShells, noFiles, overview, changes, files]
         for v in [header!, content!] {
             v.translatesAutoresizingMaskIntoConstraints = false
             root.addSubview(v)
@@ -85,7 +84,6 @@ final class PanelController: NSViewController {
         noShells.isHidden = !(tab == .terminal && list.isEmpty)
         code.view.isHidden = tab != .code
         noFiles.isHidden = !(tab == .code && model.codeTabs.isEmpty)
-        reader.view.isHidden = tab != .reader
         overview.isHidden = tab != .overview
         changes.isHidden = tab != .changes
         files.isHidden = tab != .files
@@ -95,14 +93,13 @@ final class PanelController: NSViewController {
 
 struct PanelHeader: View {
     @EnvironmentObject var model: AppModel
-    @ObservedObject var readerMode = ReaderMode.shared
 
     var body: some View {
         VStack(spacing: 0) {
             ZStack {
                 WindowDragArea()
                 HStack(spacing: 2) {
-                    // Six labels fit at the default width; a narrow panel tightens the padding.
+                    // Five labels fit at the default width; a narrow panel tightens the padding.
                     ViewThatFits(in: .horizontal) {
                         tabs(padding: 8)
                         tabs(padding: 5)
@@ -122,7 +119,6 @@ struct PanelHeader: View {
                 case .files: FilesBar()
                 case .terminal: ShellTabs()
                 case .code: CodeTabs()
-                case .reader: ReaderBar()
                 }
             }
             .frame(height: 31)
@@ -134,9 +130,7 @@ struct PanelHeader: View {
 
     private func tabs(padding: CGFloat) -> some View {
         HStack(spacing: 2) {
-            // Reader repeats the main area while the selected chat shows the reader there.
-            let hideReader = readerMode.hidesPanelReader(selected: model.selectedChat)
-            ForEach(Array(PanelTab.allCases.enumerated()).filter { !(hideReader && $0.element == .reader) }, id: \.element) { i, tab in
+            ForEach(Array(PanelTab.allCases.enumerated()), id: \.element) { i, tab in
                 PanelTabButton(title: tab.rawValue, selected: model.panelTab == tab, padding: padding) { model.panelTab = tab }
                     .help("\(tab.rawValue)  ⌥⌘\(i + 1)")
             }
@@ -290,28 +284,6 @@ struct ModeButton: View {
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-    }
-}
-
-struct ReaderBar: View {
-    @EnvironmentObject var model: AppModel
-
-    var body: some View {
-        HStack(spacing: 8) {
-            if let chat = model.selectedChat {
-                ReaderBarTitle(chat: chat)
-                Spacer()
-                if let p = chat.transcriptPath {
-                    IconButton(symbol: "doc.text.magnifyingglass", size: 12, help: "Reveal the transcript file in Finder") {
-                        NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: p)])
-                    }
-                }
-            } else {
-                Text("No chat selected").font(.system(size: 12)).foregroundStyle(Color.hTertiary)
-                Spacer()
-            }
-        }
-        .padding(.horizontal, 4)
     }
 }
 

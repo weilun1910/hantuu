@@ -165,7 +165,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         chat.addItem(.separator())
         chat.addItem(item("Next Chat That Needs You", #selector(jumpToNeedsYou), "j"))
-        chat.addItem(item("Resume Chat", #selector(resumeChat), "r", [.command, .shift]))
+        chat.addItem(item("Resume Chat", #selector(resumeChat), "t", [.command, .shift]))
         chatItem.submenu = chat
         main.addItem(chatItem)
 
