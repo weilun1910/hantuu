@@ -16,7 +16,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         Paths.ensure(Paths.dataDir)
         Log.write("launch data=\(Paths.dataDir.path)")
-        guard let ghostty = GhosttyApp.start() else {
+        // Set before the terminal engine starts, so the terminals open in the same colours.
+        NSApp.appearance = NSAppearance(named: .darkAqua)
+        guard GhosttyApp.start() != nil else {
             let a = NSAlert()
             a.messageText = "hantuu couldn't start the Ghostty terminal engine"
             a.informativeText = "libghostty failed to initialise. See \(Paths.logFile.path)."
@@ -24,8 +26,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             NSApp.terminate(nil)
             return
         }
-        Theme.configure(from: ghostty)
-        NSApp.appearance = NSAppearance(named: .darkAqua)
         // An ad hoc app that's rebuilt in place can keep a stale generic icon in the Dock,
         // because macOS cached the bundle before it had one. Setting it here always wins.
         if let url = Bundle.main.url(forResource: "AppIcon", withExtension: "icns"), let icon = NSImage(contentsOf: url) {

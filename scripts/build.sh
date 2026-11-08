@@ -43,6 +43,8 @@ cp "$ROOT/Resources/terminal.ghostty" "$APP/Contents/Resources/terminal.ghostty"
 # Contents/Resources/terminfo (xterm-ghostty).
 cp -R "$ROOT/vendor/ghostty-resources/ghostty" "$APP/Contents/Resources/ghostty"
 cp -R "$ROOT/vendor/ghostty-resources/terminfo" "$APP/Contents/Resources/terminfo"
+# hantuu's light and dark terminal themes, found by name from terminal.ghostty.
+cp "$ROOT"/Resources/ghostty-themes/* "$APP/Contents/Resources/ghostty/themes/"
 
 # Ad hoc by default. Set SIGN_IDENTITY to a code signing identity from your keychain to
 # keep macOS permissions across rebuilds.

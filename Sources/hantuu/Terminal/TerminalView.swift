@@ -87,14 +87,15 @@ final class TerminalView: NSView, NSTextInputClient {
             return ghostty_surface_new(app, &cfg)
         }
         if surface == nil { Log.write("ghostty_surface_new failed for command=\(launch.command ?? "<shell>")") }
+        GhosttyApp.shared?.register(self)
 
         registerForDraggedTypes([.fileURL, .string])
         updateTrackingAreas()
 
         linkLabel.font = .systemFont(ofSize: 11)
-        linkLabel.textColor = NSColor(white: 0.85, alpha: 1)
+        linkLabel.textColor = Theme.pair(dark: NSColor(white: 0.85, alpha: 1), light: NSColor(white: 0.2, alpha: 1))
         linkLabel.drawsBackground = true
-        linkLabel.backgroundColor = NSColor(white: 0.12, alpha: 0.95)
+        linkLabel.backgroundColor = Theme.pair(dark: NSColor(white: 0.12, alpha: 0.95), light: NSColor(white: 0.97, alpha: 0.95))
         linkLabel.isBordered = false
         linkLabel.lineBreakMode = .byTruncatingMiddle
         linkLabel.isHidden = true
@@ -111,6 +112,11 @@ final class TerminalView: NSView, NSTextInputClient {
 
     deinit {
         if let surface { ghostty_surface_free(surface) }
+    }
+
+    /// Light or dark terminal colours (GhosttyApp.setColorScheme calls this for every terminal).
+    func applyColorScheme(_ scheme: ghostty_color_scheme_e) {
+        if let surface { ghostty_surface_set_color_scheme(surface, scheme) }
     }
 
     /// Frees the surface now (kills the child process) instead of waiting for deinit.

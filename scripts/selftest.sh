@@ -6,4 +6,6 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 export SDKROOT="$(xcrun --sdk macosx --show-sdk-path)"
 swift build -c debug --scratch-path "$ROOT/.build"
+# The bare binary reads Ghostty's resources from vendor/, so hantuu's themes go there too.
+cp "$ROOT"/Resources/ghostty-themes/* "$ROOT/vendor/ghostty-resources/ghostty/themes/"
 HANTUU_NO_PMSET=1 "$ROOT/.build/debug/hantuu" --self-test --workdir "$ROOT/tmp/selftest"

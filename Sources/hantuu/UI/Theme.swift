@@ -51,9 +51,9 @@ enum Theme {
         NotificationCenter.default.post(name: didChange, object: nil)
     }
 
-    /// Reads the terminal background from the Ghostty config.
+    /// Kept for the self tests: makes sure both backgrounds came from the Ghostty config.
     static func configure(from ghostty: GhosttyApp?) {
-        if let g = ghostty { setTerminalBackground(g.backgroundColor, dark: true) }
+        ghostty?.captureThemeColors()
     }
 }
 

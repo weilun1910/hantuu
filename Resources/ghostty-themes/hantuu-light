@@ -1,0 +1,23 @@
+# hantuu light: a neutral off-white background, with deeper accents so text stays readable.
+foreground = #3a3a3a
+background = #f7f7f7
+cursor-color = #3a3a3a
+cursor-text = #f7f7f7
+selection-foreground = #292929
+selection-background = #dedede
+palette = 0=#3a3a3a
+palette = 1=#b4637a
+palette = 2=#286983
+palette = 3=#9b6b16
+palette = 4=#327c86
+palette = 5=#806698
+palette = 6=#a86464
+palette = 7=#dedede
+palette = 8=#767676
+palette = 9=#b4637a
+palette = 10=#286983
+palette = 11=#9b6b16
+palette = 12=#327c86
+palette = 13=#806698
+palette = 14=#a86464
+palette = 15=#ffffff
