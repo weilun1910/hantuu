@@ -8,7 +8,7 @@ enum ChatFace: String, Codable {
     case reader, terminal
 }
 
-/// "Show chats as the reader" (on by default) and the chats flipped away from it with the
+/// "Show chats as the reader" (off by default) and the chats flipped away from it with the
 /// header button or Option-Cmd-R. Stored in <data dir>/chat-settings.json, the same way
 /// TerminalSettings stores its switch.
 final class ChatSettings: ObservableObject {
@@ -23,14 +23,14 @@ final class ChatSettings: ObservableObject {
     let file: URL
 
     private struct Stored: Codable {
-        var showChatsAsReader = true
+        var showChatsAsReader = false
         var flipped: [String: ChatFace]? = nil
     }
 
     init(file: URL) {
         self.file = file
         let stored = (try? Data(contentsOf: file)).flatMap { try? JSONDecoder().decode(Stored.self, from: $0) }
-        showChatsAsReader = stored?.showChatsAsReader ?? true
+        showChatsAsReader = stored?.showChatsAsReader ?? false
         var f: [UUID: ChatFace] = [:]
         for (k, v) in stored?.flipped ?? [:] { if let id = UUID(uuidString: k) { f[id] = v } }
         flipped = f
@@ -77,7 +77,7 @@ struct ChatSettingsSection: View {
         Section {
             Toggle("Show chats as the reader", isOn: $settings.showChatsAsReader)
         } header: { Text("Chat") } footer: {
-            Text("Chats open as easy-to-read text with a message box underneath. Turn this off to see the agent's own terminal instead. The agent always runs in its terminal, and ⌥⌘R switches one chat between the two.")
+            Text("Turn this on to read chats as easy-to-read text with a message box underneath, instead of the agent's terminal. The agent still runs in its terminal, and ⌥⌘R switches one chat between the two.")
                 .font(.system(size: 11)).foregroundStyle(.secondary)
         }
     }
