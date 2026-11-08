@@ -129,17 +129,13 @@ cd hantuu
 scripts/build-libghostty.sh
 ```
 
-Then build and open the app:
+Then build it, install it in your Applications folder and open it:
 
 ```bash
 scripts/run.sh
 ```
 
-To keep it in your Applications folder, so it opens from Spotlight, Launchpad and the Dock like any other app, install it. Run this again whenever you pull changes:
-
-```bash
-scripts/install.sh
-```
+Run it again whenever you pull changes. It always replaces the same `/Applications/hantuu.app` and makes macOS forget any other copy, so Spotlight, Launchpad and the Dock only ever show one hantuu. `scripts/install.sh` does the same without opening it.
 
 Your projects and chats are saved in `~/Library/Application Support/hantuu/`. To try things without touching them, point it at a scratch folder:
 
