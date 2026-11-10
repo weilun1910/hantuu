@@ -8,7 +8,7 @@ hantuu is a native Mac app for running coding agents like Claude Code and Codex.
 
 The name comes from "hantu", the Malay word for ghost, made a little cuter the same way Ghostty did with "ghost".
 
-![A Claude Code chat in its terminal, with the Reader tab showing an inline image and a rendered formula](docs/screenshots/chat-and-reader.jpg)
+![A Claude Code chat in its terminal, where the maths still shows as raw LaTeX](docs/screenshots/chat-terminal.jpg)
 
 ## Why I built this
 
@@ -89,13 +89,13 @@ Images and PDFs that come up in the chat appear inline instead of as paths. LaTe
 - While the agent works, a line above the box says what it's doing. Esc or the Stop button stops it.
 - When it wants your permission or asks a question with options, a banner says so. Show Terminal brings up the terminal so you can answer there, and the reader comes back once the agent carries on.
 
-![Reader mode, with rendered formulas, a code block and file links, and a message box at the bottom](docs/screenshots/reader-mode.jpg)
+![The same chat as the reader, with the image shown inline, the formulas rendered and a message box at the bottom](docs/screenshots/reader-mode.jpg)
 
 ### File links that open somewhere useful
 
 Every file path in the chat becomes a link. Text and code files open in the Code tab with syntax highlighting and line numbers, and Markdown files also get a rendered preview. Anything else, like a PDF, is shown in Finder so you can open it with the app you normally use. Cmd-click works on links in the terminal too.
 
-![A Markdown file opened from a link in the chat, shown as a rendered preview with formulas](docs/screenshots/markdown-preview.jpg)
+![A Markdown file open in the Code tab, shown as a rendered preview with formulas](docs/screenshots/markdown-preview.jpg)
 
 ### Terminals right next to the chat
 
@@ -107,7 +107,9 @@ One switch at the bottom of the sidebar keeps your Mac running even with the lid
 
 ### Feels like part of your Mac
 
-hantuu is dark and minimal, and it uses native Mac controls throughout. The terminals come with hantuu's own quiet dark theme. To use your own Ghostty config instead, with your font, colours and padding, turn it on in Settings > Terminal.
+hantuu is minimal and uses native Mac controls throughout. Settings > Appearance has System, Light and Dark, and System follows macOS when it switches. The window, the reader and the terminals all change together, because hantuu ships its own quiet light and dark terminal themes. To use your own Ghostty config instead, with your font, colours and padding, turn it on in Settings > Terminal.
+
+![hantuu in light mode, with a chat's terminal and the Changes tab both light](docs/screenshots/light-mode.jpg)
 
 ## Get started
 
@@ -168,7 +170,7 @@ scripts/run.sh --data-dir "$PWD/tmp/appdata"
 - The reader and code viewer are local web pages bundled with markdown-it, KaTeX and highlight.js, so nothing loads from the internet.
 - In reader mode, your message is typed into the agent's terminal as one paste followed by Return, the same as typing it yourself. Nothing is sent while a menu is waiting there, because Return would answer it.
 - Light and dark use Ghostty's own `theme = light:…,dark:…` switching. hantuu ships a light and a dark terminal theme, and tells every terminal which one to show when you change the setting or macOS switches. If you use your own Ghostty config and it has a pair like that, it follows along too.
-- `scripts/selftest.sh` runs 400 checks. They cover transcript parsing, link handling, a live Ghostty terminal and the reader page. They also cover agent status, sessions that survive their client, worktrees, the review tabs and reader mode.
+- `scripts/selftest.sh` runs 401 checks. They cover transcript parsing, link handling, a live Ghostty terminal and the reader page. They also cover agent status, sessions that survive their client, worktrees, the review tabs and reader mode.
 
 ## Status
 
