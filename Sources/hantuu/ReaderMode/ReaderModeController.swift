@@ -194,9 +194,6 @@ final class ReaderModeController: NSObject {
                 w.makeFirstResponder(composerMode == .none ? nil : composer.textView)
             }
         }
-        if mode.hidesPanelReader(selected: chat), model.panelTab == .reader {
-            DispatchQueue.main.async { if self.model.panelTab == .reader { self.model.panelTab = .overview } }
-        }
         return Layout(showsReader: shows, peeking: peeking)
     }
 

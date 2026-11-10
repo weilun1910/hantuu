@@ -509,7 +509,7 @@ extension SelfTest {
         check("snapshot: Files filtered", render(panel.view, to: shots.appendingPathComponent("files-filter.png")))
         center.filter = ""
 
-        // Six tab labels at the default width and at the narrowest panel.
+        // Five tab labels at the default width and at the narrowest panel.
         w.setContentSize(NSSize(width: 360, height: 860))
         model.panelTab = .overview
         RunLoop.main.run(until: Date().addingTimeInterval(0.5))

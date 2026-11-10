@@ -14,7 +14,14 @@ enum ChatStatus: String, Codable {
 
 enum PanelTab: String, Codable, CaseIterable {
     case overview = "Overview", changes = "Changes", files = "Files"
-    case code = "Code", terminal = "Terminal", reader = "Reader"
+    case code = "Code", terminal = "Terminal"
+
+    /// The panel used to have a Reader tab. A saved "Reader", or any tab that's gone, opens
+    /// Overview, so the rest of the saved state still loads.
+    init(from decoder: Decoder) throws {
+        let raw = try decoder.singleValueContainer().decode(String.self)
+        self = PanelTab(rawValue: raw) ?? .overview
+    }
 }
 
 /// One agent session: a real terminal running the agent's own TUI in a project folder.
@@ -115,7 +122,7 @@ private struct SavedState: Codable {
     var defaultAgentID = "claude"
     var sidebarVisible = true
     var panelVisible = false
-    var panelTab: PanelTab = .reader
+    var panelTab: PanelTab = .overview
     var windowFrame: String?
     var sidebarWidth: Double?
     var panelWidth: Double?
@@ -137,7 +144,7 @@ final class AppModel: ObservableObject, TerminalEvents {
     @Published var defaultAgentID = "claude"
     @Published var sidebarVisible = true
     @Published var panelVisible = false
-    @Published var panelTab: PanelTab = .reader
+    @Published var panelTab: PanelTab = .overview
     @Published var shells: [PanelShell] = []
     @Published var selectedShellID: [UUID: UUID] = [:]
     @Published var codeTabs: [CodeTab] = []

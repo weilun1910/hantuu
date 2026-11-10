@@ -134,7 +134,7 @@ struct ChatHeader: View {
                     Text("hantuu").font(.system(size: 13, weight: .medium)).foregroundStyle(Color.hSecondary)
                 }
                 Spacer()
-                // The reader / terminal switch, and the panel's Reader in terminal mode.
+                // Switches the chat between its terminal and the reader (Shift-Cmd-R).
                 ChatFaceButtons()
                 IconButton(symbol: "sidebar.right", help: model.panelVisible ? "Hide Panel  ⌥⌘0" : "Show Panel  ⌥⌘0", active: model.panelVisible) {
                     model.panelVisible.toggle()

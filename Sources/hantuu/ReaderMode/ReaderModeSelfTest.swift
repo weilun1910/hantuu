@@ -63,7 +63,13 @@ extension SelfTest {
         check("peek: a peeking chat shows its terminal for now", !mode.showsReader(a) && mode.face(of: a) == .reader)
         mode.toggle(a)
         check("peek: flipping a chat ends its peek", !mode.isPeeking(a) && mode.face(of: a) == .terminal)
-        check("panel: the Reader tab is hidden only while the reader is the main area", mode.hidesPanelReader(selected: b) && !mode.hidesPanelReader(selected: a) && !mode.hidesPanelReader(selected: nil))
+
+        // The reader lives in the main area only, flipped in place with Shift-Cmd-R.
+        check("panel: no Reader tab", PanelTab.allCases.map(\.rawValue) == ["Overview", "Changes", "Files", "Code", "Terminal"])
+        let saved = try? JSONDecoder().decode([PanelTab].self, from: Data(#"["Reader", "Changes"]"#.utf8))
+        check("panel: a saved Reader tab opens Overview and the rest still loads", saved == [.overview, .changes], "\(String(describing: saved))")
+        let item = ReaderModeMenuTarget.toggleItem()
+        check("shortcut: Shift-Cmd-R flips the chat", item.keyEquivalent == "r" && item.keyEquivalentModifierMask == [.command, .shift])
     }
 
     // MARK: The message box's state
@@ -465,15 +471,6 @@ extension SelfTest {
             _ = shot("reader-mode-steps-open.png")
             _ = js(page, "document.scrollingElement.scrollTop = document.scrollingElement.scrollHeight; 0")
             _ = js(page, "document.querySelector('.toolgroup .toolsum').click(); 0")
-            let panel = WebPage(page: "reader.html", identifier: "selftest.reader.panel")
-            panel.webView.frame = NSRect(x: 0, y: 0, width: 500, height: 400)
-            w.contentView?.addSubview(panel.webView)
-            _ = waitUntil(10) { panel.ready }
-            panel.call("reset", ["chatID": "p", "entries": try! JSONSerialization.jsonObject(with: JSONEncoder().encode(f.entries)), "emptyText": ""])
-            _ = waitUntil(3) { (js(panel, "document.querySelectorAll('section.entry').length") as? Int ?? 0) > 3 }
-            let plain = js(panel, "document.querySelectorAll('.toolgroup, .codeblock, .meta').length === 0 && !document.body.classList.contains('main')") as? Bool ?? false
-            check("reader page: the panel's Reader keeps its own look", plain)
-            panel.webView.removeFromSuperview()
         }
 
         chat.activity = .working
