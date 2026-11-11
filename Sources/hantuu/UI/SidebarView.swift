@@ -369,21 +369,7 @@ struct SidebarFooter: View {
         HStack(spacing: 4) {
             Spacer()
             // No icon here: at the narrowest sidebar width an icon pushed the footer past the edge.
-            HStack(spacing: 7) {
-                Text("Keep awake")
-                    .font(.system(size: 12))
-                    .foregroundStyle(keepAwake.isOn ? Color(nsColor: Theme.needsYou) : Color.hSecondary)
-                    .lineLimit(1)
-                    .fixedSize()
-                Toggle("", isOn: Binding(get: { keepAwake.isOn }, set: { _ in keepAwake.toggle() }))
-                    .toggleStyle(.switch)
-                    .controlSize(.mini)
-                    .labelsHidden()
-                    .disabled(keepAwake.busy)
-            }
-            .help(keepAwake.lastError ?? (keepAwake.isOn
-                ? "On: sleep is disabled (pmset disablesleep 1), even with the lid shut"
-                : "Keep the Mac running with the lid shut. Asks for your password. With the lid open, hantuu already stops idle sleep while agents work."))
+            KeepAwakeControl(keepAwake: keepAwake)
             IconButton(symbol: "gearshape", help: "Settings  ⌘,") { AppDelegate.shared?.showSettings() }
         }
         .padding(.horizontal, 8)

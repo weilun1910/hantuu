@@ -293,7 +293,8 @@ final class AppModel: ObservableObject, TerminalEvents {
         selectedProjectID = projects.first?.id
         // Agents that kept running in hantuu-session while the app was closed reattach.
         restoreSessions()
-        keepAwake.refresh()
+        // Reads the Keep awake switch, and turns sleep back on if an earlier hantuu left it off.
+        keepAwake.start()
         // While any agent works, the Mac doesn't idle-sleep (lid open). No switch needed.
         keepAwake.watchAgents { [weak self] in self?.chats.contains { $0.activity == .working || $0.activity == .background } ?? false }
         detectAgents()
