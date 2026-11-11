@@ -37,6 +37,7 @@ enum SelfTest {
 
         claudeParsing()
         codexParsing()
+        queuedMessages(workdir)
         savedState(workdir)
         discovery(workdir)
         follower(workdir)

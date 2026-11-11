@@ -654,6 +654,36 @@ extension SelfTest {
             rm.composer.setAttachments([])
         }
 
+        // A busy send appears before its transcript arrives, and keeps its chat ownership.
+        chat.activity = .working
+        rm.refresh()
+        rm.composer.textView.text = "queued reader thought"
+        let queuedSend = rm.send()
+        check("queue send: a busy send immediately creates a pending bubble", queuedSend && chat.pendingMessages.entries.first?.text == "queued reader thought")
+        _ = waitUntil(5) { !rm.isTyping }
+        model.chats = [chat, other]
+        model.selectedChatID = other.id
+        rm.sync(selected: other)
+        check("queue send: switching chats preserves the waiting message", chat.pendingMessages.entries.count == 1 && other.pendingMessages.isEmpty)
+        let queuedEntry = ReaderEntry(id: "queued-delivered", kind: .user, text: "queued reader thought")
+        chat.liveEntries.append(queuedEntry)
+        model.readerAppend.send((chat.id, chat.pendingMessages.reconcile([queuedEntry])))
+        model.selectedChatID = chat.id
+        rm.sync(selected: chat)
+        check("queue send: delivery while another chat is selected clears the pending state", chat.pendingMessages.isEmpty)
+        model.chats = [chat]
+
+        // Stop during a delayed paste cancels its Return as well as its pending bubble.
+        rm.composer.textView.text = "cancel before return"
+        let cancelMark = bytes().count
+        _ = rm.send()
+        let cancelled = rm.stop()
+        RunLoop.main.run(until: Date().addingTimeInterval(0.8))
+        check("queue send: Stop drops the pending bubble and cancels the delayed Return",
+              cancelled && chat.pendingMessages.isEmpty && !rm.isTyping && !bytes().suffix(from: cancelMark).contains(0x0D))
+        chat.activity = .idle
+        rm.refresh()
+
         // Stop: Esc, only while working.
         let before = bytes().count
         check("stop: does nothing while the agent isn't working", rm.stop() == false)

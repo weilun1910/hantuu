@@ -40,7 +40,7 @@ final class ReaderModeController: NSObject {
     private var drafts: [UUID: String] = [:]
     private var draftFiles: [UUID: [ComposerAttachment]] = [:]
     /// Messages waiting to be typed, one at a time, so two sends never interleave.
-    private var outbox: [(terminal: TerminalView, steps: [SendStep], files: [URL], command: String?)] = []
+    private var outbox: [(id: String, chatID: UUID, tracksPending: Bool, terminal: TerminalView, steps: [SendStep], files: [URL], command: String?)] = []
     private var typing = false
     /// How long to wait for the agent to show a pasted image before going on anyway.
     var imageWait: TimeInterval = 3
@@ -289,6 +289,13 @@ final class ReaderModeController: NSObject {
         if live, let t = chat.terminal, mode.face(of: chat) == .reader {
             screen = TerminalScreen.analyze(t.activeScreenText())
             if screen.ready { readyChats.insert(chat.id) }
+            // Esc in the terminal can restore queued text without writing an interruption.
+            // Only trust the input box once our own paste has completely finished.
+            if screen.ready && !screen.busy && screen.menu == nil,
+               !outbox.contains(where: { $0.chatID == chat.id }),
+               chat.pendingMessages.isRestored(in: t.activeScreenText()) {
+                discardPendingMessages(chat)
+            }
         }
         var activity = chat.activity
         if let at = stoppedAt[chat.id] {
@@ -426,7 +433,11 @@ final class ReaderModeController: NSObject {
             case .pressReturn: break
             }
         }
-        type(steps, into: t, after: files.map { URL(fileURLWithPath: $0.path) })
+        let sendID = "pending-" + UUID().uuidString
+        if composerMode.isWorking {
+            chat.pendingMessages.enqueue(id: sendID, text: text, files: files, agentID: chat.agent.id, existing: chat.allEntries)
+        }
+        type(steps, into: t, chatID: chat.id, id: sendID, queued: composerMode.isWorking, after: files.map { URL(fileURLWithPath: $0.path) })
         composer.textView.text = ""
         composer.setAttachments([])
         drafts[chat.id] = nil
@@ -442,29 +453,49 @@ final class ReaderModeController: NSObject {
 
     /// Queues a message's steps for a terminal and starts typing if nothing else is. Typing
     /// waits for any of `files` still being converted (PastedImages).
-    private func type(_ steps: [SendStep], into t: TerminalView, after files: [URL] = []) {
+    private func type(_ steps: [SendStep], into t: TerminalView, chatID: UUID, id: String, queued: Bool, after files: [URL] = []) {
         guard !steps.isEmpty else { return }
         let command = steps.compactMap { step -> String? in
             if case .command(let text) = step { return text }; return nil
         }.first
-        outbox.append((t, steps, files, command))
+        outbox.append((id, chatID, queued, t, steps, files, command))
         if !typing { typeNext() }
+    }
+
+    private func canType(_ id: String) -> Bool {
+        guard let first = outbox.first, first.id == id, first.terminal.surface != nil,
+              let chat = model.chats.first(where: { $0.id == first.chatID }), chat.status != .ended else { return false }
+        // A session change or an interruption can drop the queue while a paste is waiting.
+        return !first.tracksPending || chat.pendingMessages.entries.contains { $0.id == id }
     }
 
     private func typeNext() {
         guard !outbox.isEmpty else { typing = false; return }
         typing = true
-        guard !outbox[0].steps.isEmpty, outbox[0].terminal.surface != nil else {
+        let id = outbox[0].id
+        let chat = model.chats.first { $0.id == outbox[0].chatID }
+        guard canType(id) else {
+            chat?.pendingMessages.remove(id: id)
+            outbox.removeFirst()
+            return typeNext()
+        }
+        guard !outbox[0].steps.isEmpty else {
             outbox.removeFirst()
             return typeNext()
         }
         if let busy = outbox[0].files.first(where: PastedImages.isPending) {
-            return PastedImages.whenReady(busy) { [weak self] in self?.typeNext() }
+            return PastedImages.whenReady(busy) { [weak self] in
+                guard let self, self.outbox.first?.id == id else { return }
+                self.typeNext()
+            }
         }
         let t = outbox[0].terminal
         let step = outbox[0].steps.removeFirst()
         let next = { [weak self] (delay: TimeInterval) in
-            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { self?.typeNext() }
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+                guard let self, self.outbox.first?.id == id else { return }
+                self.typeNext()
+            }
         }
         switch step {
         case .command(let text):
@@ -491,6 +522,7 @@ final class ReaderModeController: NSObject {
             t.pasteText(path)
             let deadline = Date().addingTimeInterval(imageWait)
             func check() {
+                guard self.outbox.first?.id == id else { return }
                 if ComposerMessage.imageMarks(t.activeScreenText()) > before { return next(0.1) }
                 if Date() >= deadline {
                     Log.write("reader mode: no image chip showed for a pasted image; carrying on")
@@ -503,9 +535,12 @@ final class ReaderModeController: NSObject {
             let command = outbox[0].command
             // The same pause TerminalView.submit leaves, so the agent has taken the paste in.
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
-                t.pressReturn()
-                if let command { self?.didSendCommand(command, terminal: t) }
-                self?.typeNext()
+                guard let self, self.outbox.first?.id == id else { return }
+                if self.canType(id) {
+                    t.pressReturn()
+                    if let command { self.didSendCommand(command, terminal: t) }
+                }
+                self.typeNext()
             }
         }
     }
@@ -530,6 +565,7 @@ final class ReaderModeController: NSObject {
     @discardableResult
     func stop() -> Bool {
         guard composerMode.isWorking, let chat = model.selectedChat, let t = chat.terminal else { return false }
+        discardPendingMessages(chat)
         t.pressEscape()
         stoppedAt[chat.id] = Date()
         Log.write("reader mode: stop (Esc) chat=\(chat.id)")
@@ -540,11 +576,20 @@ final class ReaderModeController: NSObject {
     /// the reader, and the next message would be typed onto the end of it. Deletes it, but only
     /// when the bottom of the screen shows text reader mode sent this turn.
     private func clearRestoredInput(_ chat: Chat) {
+        discardPendingMessages(chat)
         guard let sent = sentThisTurn.removeValue(forKey: chat.id), let t = chat.terminal else { return }
         let n = ComposerMessage.restoredLength(screen: t.activeScreenText(), sent: sent)
         guard n > 0 else { return }
         t.pressBackspace(times: n)
         Log.write("reader mode: cleared \(n) restored characters after stop chat=\(chat.id)")
+    }
+
+    /// A cancelled send must not press Return later from an image or paste callback.
+    private func discardPendingMessages(_ chat: Chat) {
+        chat.pendingMessages.removeAll()
+        let wasTyping = outbox.first?.chatID == chat.id
+        outbox.removeAll { $0.chatID == chat.id }
+        if wasTyping { typeNext() }
     }
 
     /// Shows the live terminal so a menu can be answered there.
