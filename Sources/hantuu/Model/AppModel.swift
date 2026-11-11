@@ -542,9 +542,15 @@ final class AppModel: ObservableObject, TerminalEvents {
         chat.terminal?.destroy()
         chat.terminal = nil
         if def.id == "codex", let f = chat.follower {
-            // Codex may continue in a new rollout file; keep what we already have.
+            // Codex may continue in a new rollout file; keep what we already have, including
+            // a first read that is still running in the background.
             chat.earlierEntries += f.entries
             f.stop()
+            f.onAppend = { [weak self, weak chat] late in
+                guard let self, let chat else { return }
+                chat.earlierEntries += late
+                self.readerReload.send(chat.id)
+            }
             chat.follower = nil
         }
         launch(chat, argv: argv, in: project)
@@ -658,17 +664,22 @@ final class AppModel: ObservableObject, TerminalEvents {
     }
 
     private func attachFollower(_ chat: Chat, url: URL, kind: TranscriptKind, live: Bool) {
+        chat.follower?.stop()
         let base = workingDirectory(of: chat)
         let f = TranscriptFollower(url: url, kind: kind, baseDir: base)
-        f.onAppend = { [weak self, weak chat] fresh in
-            guard let self, let chat else { return }
+        f.onReset = { [weak self, weak chat, weak f] in
+            guard let self, let chat, let f, chat.follower === f else { return }
+            self.readerReload.send(chat.id)
+        }
+        f.onAppend = { [weak self, weak chat, weak f] fresh in
+            guard let self, let chat, let f, chat.follower === f else { return }
             if chat.firstPrompt == nil, let p = fresh.first(where: { $0.kind == .user })?.text {
                 chat.firstPrompt = p.split(whereSeparator: \.isNewline).first.map(String.init)
             }
             self.readerAppend.send((chat.id, fresh))
         }
         chat.follower = f
-        if live { f.start() } else { f.poll() }
+        f.start(follow: live)
     }
 
     // MARK: Panel shells

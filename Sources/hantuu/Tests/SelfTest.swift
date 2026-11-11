@@ -40,6 +40,7 @@ enum SelfTest {
         savedState(workdir)
         discovery(workdir)
         follower(workdir)
+        transcriptTiming(workdir)
         paths(workdir)
         misc()
         agentDetection()
@@ -268,6 +269,59 @@ enum SelfTest {
         let more = f.poll()
         check("follower: picks up the appended line only", more.count == 1 && more.first?.kind == .tool && f.entries.count == 3)
         check("follower: nothing new means nothing emitted", f.poll().isEmpty)
+    }
+
+    /// Times a synthetic history on every run, and a real one when HANTUU_BENCHMARK_TRANSCRIPT
+    /// names it. The real one is copied into the throwaway folder first and never changed.
+    static func transcriptTiming(_ dir: URL) {
+        let url = dir.appendingPathComponent("large-transcript.jsonl")
+        let line = Data((#"{"type":"assistant","message":{"role":"assistant","content":""#
+                         + String(repeating: "Conversation text. ", count: 900) + #""}}"# + "\n").utf8)
+        FileManager.default.createFile(atPath: url.path, contents: nil)
+        let h = try! FileHandle(forWritingTo: url)
+        var bytes = 0
+        while bytes < 4_000_000 { h.write(line); bytes += line.count }
+        try! h.close()
+        timeTranscript(url, label: "synthetic 4 MB")
+        try? FileManager.default.removeItem(at: url)
+        if let path = ProcessInfo.processInfo.environment["HANTUU_BENCHMARK_TRANSCRIPT"], !path.isEmpty {
+            let copy = dir.appendingPathComponent("real-transcript-copy.jsonl")
+            do {
+                try FileManager.default.copyItem(at: URL(fileURLWithPath: path), to: copy)
+                defer { try? FileManager.default.removeItem(at: copy) }
+                timeTranscript(copy, label: "real transcript copy")
+            } catch {
+                check("follower timing: copies the requested transcript", false, error.localizedDescription)
+            }
+        }
+    }
+
+    private static func timeTranscript(_ url: URL, label: String) {
+        let f = TranscriptFollower(url: url, kind: .claude, baseDir: url.deletingLastPathComponent().path)
+        var delivered = false
+        var onMain = false
+        f.onAppend = { _ in delivered = true; onMain = Thread.isMainThread }
+        // A heartbeat on main: its longest gap is the longest the app would have stopped responding.
+        var last = Date()
+        var stall: TimeInterval = 0
+        let beat = Timer(timeInterval: 0.005, repeats: true) { _ in
+            stall = max(stall, Date().timeIntervalSince(last))
+            last = Date()
+        }
+        RunLoop.main.add(beat, forMode: .common)
+        let start = Date()
+        last = start
+        f.start(follow: false)
+        let attachTime = Date().timeIntervalSince(start)
+        let finished = waitUntil(60) { delivered }
+        let shown = Date().timeIntervalSince(start)
+        RunLoop.main.run(until: Date().addingTimeInterval(0.02))
+        beat.invalidate()
+        check("follower timing: \(label) attaches without blocking main for 300 ms", attachTime < 0.3)
+        check("follower timing: \(label) reads and parses off main, then delivers on main", finished && onMain && !f.lastReadWasOnMain)
+        print(String(format: "      %@: %llu bytes, attach %.2f ms, read and parse %.0f ms off main, longest main stall %.0f ms, entries after %.0f ms, %d entries",
+                     label, LineTail.size(of: url), attachTime * 1000, f.lastReadDuration * 1000, stall * 1000,
+                     shown * 1000, f.entries.count))
     }
 
     // MARK: Paths and routing
