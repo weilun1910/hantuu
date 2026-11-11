@@ -54,6 +54,13 @@ final class DiffPage {
         page.call("clear", text)
     }
 
+    /// Lets the web view go. WebKit holds a page's message handler strongly, so without this
+    /// a repository section's diff page would outlive the section, with its web process.
+    func close() {
+        center = nil
+        page.webView.configuration.userContentController.removeScriptMessageHandler(forName: "hantuu")
+    }
+
     private func handle(_ msg: [String: Any]) {
         guard let center else { return }
         switch msg["type"] as? String {

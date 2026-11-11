@@ -97,7 +97,7 @@ struct OverviewCards: View {
                 session
                 if !review.work.subagents.isEmpty { AgentsCard(agents: review.work.subagents).id(chat.id) }
                 if !review.work.tasks.isEmpty { BackgroundTasksCard(tasks: review.work.tasks).id(chat.id) }
-                if let s = review.branchSummary, s.files > 0, review.repo != nil { changes(s) }
+                if let s = review.overviewSummary, s.files > 0, review.hasRepositories { changes(s) }
                 if let pr = review.pr { PullRequestCard(pr: pr) }
                 if let i = review.insights, let used = i.contextUsed, let window = i.contextWindow { context(used: used, window: window, guess: i.windowIsGuess) }
                 if let plan = review.insights?.plan, !plan.isEmpty { PlanCard(items: plan) }
@@ -147,9 +147,9 @@ struct OverviewCards: View {
 
     private func changes(_ s: ChangeSummary) -> some View {
         let against = review.repo?.mergeBase != nil ? (review.repo?.defaultBranch ?? "the branch base") : "the last commit"
+        let changed = review.repositories.filter(\.hasChanges).count
         return ReviewCard(title: "Changes", action: {
-            review.base = review.repo?.mergeBase != nil ? .branch : .uncommitted
-            model.panelTab = .changes
+            review.showOverviewChanges()
         }) {
             VStack(alignment: .leading, spacing: 3) {
                 HStack(spacing: 8) {
@@ -157,7 +157,7 @@ struct OverviewCards: View {
                     Text("+\(s.added)").font(.system(size: 12).monospacedDigit()).foregroundStyle(Color.hAdded)
                     Text("−\(s.deleted)").font(.system(size: 12).monospacedDigit()).foregroundStyle(Color.hRemoved)
                 }
-                Text("Against \(against)").font(.system(size: 11.5)).foregroundStyle(Color.hTertiary)
+                Text(review.repo != nil ? "Against \(against)" : "In \(changed) \(changed == 1 ? "repository" : "repositories")").font(.system(size: 11.5)).foregroundStyle(Color.hTertiary)
             }
         }
     }
