@@ -25,17 +25,25 @@ I also wanted it to feel like a proper Mac app. hantuu is written in Swift and b
 
 ### All your agents in one sidebar
 
-Add a project folder and its chats show up underneath it. Each chat takes its name from the title the agent gives it. Chats keep running in the background when you switch between them, and Cmd-1 to Cmd-9 jump straight to one.
+Click New Project (Shift-Cmd-O) to pick a folder or create one. Its chats show up underneath it, named from the titles the agents give them. Chats keep running when you switch between them.
+
+Right-click a chat and choose Pin Chat to keep it above your projects. Each pinned row shows which project it's from. Cmd-1 to Cmd-9 jump straight to a chat, counting pinned chats first.
 
 ### Know which agent needs you
 
 Every chat shows what its agent is doing, so you don't have to click through each one to check. A small dot shows the state:
+
 - a slow pulse while it's working
+- still green while subagents or background tasks are running
 - amber when it's waiting for your permission or your answer
 - blue when it finished while you were looking at something else
 - hollow when it's idle
 
 A line under the chat name says what's happening, like "Wants to run Bash: npm test", "Asks: Which database should I use?" or "Done 2m ago".
+
+The chat stays at Running in background until its subagents and background tasks finish. The Done notification waits for them too.
+
+<img src="docs/screenshots/running-in-background.png" width="260" alt="The sidebar showing chats with subagents and a background command still running, alongside working and finished chats">
 
 When something is waiting, the top of the sidebar says how many chats need you, and Cmd-J jumps to the next one. hantuu also sends a macOS notification that quotes the actual question, and clicking it opens that chat. The Dock icon shows the count too. The order of your chats never changes on its own, so Cmd-1 to Cmd-9 always mean the same thing.
 
@@ -43,11 +51,17 @@ The states come from Claude Code's own hooks and Codex's own notifications, whic
 
 ![The sidebar showing one chat working in its own worktree, with the Overview tab on the right](docs/screenshots/status-and-overview.jpg)
 
+Small rings at the bottom of the sidebar show how much of each agent's weekly limit is left. Hover for the numbers and reset times. Codex reads its limits from session logs. Claude's ring uses a status line, which hides Claude's usual footer hints, so it's off by default. Turn it on in Settings > Usage Limits. If you already use a Claude status line, it's on already. hantuu never reads your agent logins or calls a usage API.
+
+<img src="docs/screenshots/usage-rings.png" width="260" alt="Claude Code and Codex usage rings at the left of the sidebar footer, beside Keep awake">
+
 ### Agents keep running when you quit
 
-Quitting hantuu, updating it or a crash doesn't stop your agents anymore. Each chat runs inside a small helper called `hantuu-session` that keeps the agent's terminal alive on its own. When you open hantuu again, the chat reattaches to the same agent with its screen where you left it. With Keep awake on, that means long runs keep going with the lid shut even if hantuu isn't open.
+Quitting hantuu, updating it or a crash doesn't stop your agents. Each chat runs inside a small helper called `hantuu-session` that keeps the agent's terminal alive on its own. When you open hantuu again, the chat reattaches to the same agent with its screen where you left it.
 
 You can switch this off in Settings, and closing a chat still stops its agent. Chats that did end stay in the list, and Resume picks the conversation back up.
+
+Your sidebar survives updates too. A saved chat that can't be read doesn't stop the rest from loading, and hantuu keeps a copy of the last good state. Projects on an unplugged drive come back with their chats when the drive does.
 
 ### A worktree per chat
 
@@ -71,11 +85,17 @@ Overview is a column of cards for the selected chat. They cover:
 
 Each card only shows up when it has something to say.
 
+The Agents card lists the chat's subagents, with running ones first. Click one to read its task and report. Background tasks has its own card, and clicking a task opens its output in Code.
+
 Changes shows every changed file with a highlighted diff. Click a line number to leave a comment on that line, or Shift-click for a range. When you're done, Cmd-Enter sends all your comments to the agent as one message, with the file and line for each. You can also mark files as viewed or revert one.
 
 Files is the project tree with a filter, and files with changes get a small dot. Click a file to open it in Code, or Option-click to type its path into the chat.
 
 ![The Changes tab with a diff and a comment box open on a line](docs/screenshots/changes-comment.jpg)
+
+If your project folder holds several git repositories, Changes gives each one its own section. Repositories with changes come first, and clean ones fold away. Worktrees are counted under their main repo. Overview and the change dots in Files follow the same list.
+
+<img src="docs/screenshots/nested-repositories.png" width="400" alt="Changes showing two nested repositories with changes, a folded clean repository and the selected file's diff below">
 
 ### Reader mode
 
@@ -83,12 +103,16 @@ Press Shift-Cmd-R, or click the book icon above the chat, and the chat you're lo
 
 The reader follows the conversation as it happens. Your messages sit on the right and the agent's answers read like a normal document. A run of tool calls folds into one line, like "Ran a command, read a file and 1 more", and you can open it to see each step. The agent's thinking is hidden, but permission requests, errors and questions to you always stay visible.
 
+It follows Claude Code when you use /resume or /clear, and Resume Chat picks up that conversation after a relaunch. Long conversations load in the background so they don't freeze the window.
+
 Images and PDFs that come up in the chat appear inline instead of as paths, as small previews side by side. Click one to open it out to full width, and click again or press Esc to shrink it. The button in its corner opens it as a tab in the Code tab. LaTeX is rendered with KaTeX, and code blocks are highlighted with a Copy button. That's what makes it usable for studying.
 
 - Return sends and Shift-Return adds a line.
 - Paste a screenshot with Cmd-V, drop files on the box or pick them with the paperclip. They show as small chips above your message, and pictures reach the agent as real image attachments.
 - While the agent works, a line above the box says what it's doing. Esc or the Stop button stops it.
 - When it wants your permission or asks a question with options, a banner says so. Show Terminal brings up the terminal so you can answer there, and the reader comes back once the agent carries on.
+
+![The reader's message box with a pasted image and several file attachments shown as compact chips](docs/screenshots/message-box-attachments.png)
 
 ![The same chat as the reader, with the image shown inline, the formulas rendered and a message box at the bottom](docs/screenshots/reader-mode.jpg)
 
@@ -105,13 +129,22 @@ Folders, and files nothing can preview, are shown in Finder.
 
 ![A Markdown file open in the Code tab, shown as a rendered preview with formulas](docs/screenshots/markdown-preview.jpg)
 
+<p>
+  <img src="docs/screenshots/code-editing.png" width="340" alt="A Swift file in the Code editor with syntax highlighting, find results and an unsaved dot on its tab">
+  <img src="docs/screenshots/code-tab-pdf.png" width="340" alt="A PDF open in the Code tab alongside tabs for text, a CSV, a log and an SVG">
+</p>
+
 ### Terminals right next to the chat
 
 The Terminal tab holds as many plain shells as you want, already open in the project folder. Dropping a file onto a chat or a shell types in its path, which is the quickest way to hand the agent a screenshot or a PDF.
 
 ### Keep your Mac awake
 
-One switch at the bottom of the sidebar keeps your Mac running even with the lid shut, so long agent runs don't stop when you close it. It uses macOS's own `pmset disablesleep` setting, asks for your password through the normal system prompt, and shows the real state even if you change it somewhere else.
+While agents or their background tasks work, hantuu automatically prevents idle sleep. It lets go a minute after the last one stops. There's no switch or password for this.
+
+For lid-shut runs, turn on Keep awake at the bottom of the sidebar. It uses macOS's own `pmset disablesleep` setting and asks for your password through the normal system prompt. That prompt also lets hantuu turn sleep back on later without asking again.
+
+Keep awake turns itself off after 4 hours, after 10 minutes with no agent work, below 20% battery on battery power, when the Mac runs hot, or when hantuu quits. Settings has the limits, and right-clicking the switch adds an hour. A background check restores sleep within about a minute of a crash. The line under the switch shows how long is left or why it ended.
 
 ### Feels like part of your Mac
 
@@ -159,8 +192,8 @@ scripts/run.sh --data-dir "$PWD/tmp/appdata"
 | Cmd-J | Jump to the next chat that needs you |
 | Shift-Cmd-R | Switch the chat between its terminal and the reader |
 | Shift-Cmd-T | Resume an ended chat |
-| Shift-Cmd-O | Add a project folder |
-| Cmd-1 to Cmd-9 | Jump to a chat |
+| Shift-Cmd-O | New project, using an existing or new folder |
+| Cmd-1 to Cmd-9 | Jump to a chat, counting pinned chats first |
 | Option-Cmd-0 | Show or hide the right panel |
 | Option-Cmd-1 to 5 | Overview, Changes, Files, Code or Terminal tab |
 | Cmd-T | New shell tab |
@@ -180,11 +213,13 @@ scripts/run.sh --data-dir "$PWD/tmp/appdata"
 - Saving a file writes a new copy next to it and renames it into place, so a crash never leaves half a file. Through a symlink, it writes the file the link pointed at when you opened it, and refuses if the link has moved since.
 - In reader mode, your message is typed into the agent's terminal as one paste followed by Return, the same as typing it yourself. Nothing is sent while a menu is waiting there, because Return would answer it.
 - Light and dark use Ghostty's own `theme = light:…,dark:…` switching. hantuu ships a light and a dark terminal theme, and tells every terminal which one to show when you change the setting or macOS switches. If you use your own Ghostty config and it has a pair like that, it follows along too.
-- `scripts/selftest.sh` runs 401 checks. They cover transcript parsing, link handling, a live Ghostty terminal and the reader page. They also cover agent status, sessions that survive their client, worktrees, the review tabs and reader mode.
+- `scripts/selftest.sh` checks transcript parsing, link handling, a live Ghostty terminal and the reader page. It also covers agent status, sessions that survive their client, worktrees, the review tabs and reader mode.
 
 ## Status
 
-This is v2. v1 was the first version I built to try out the idea, and v2 adds agent status, the review tabs, agents that keep running, and worktree chats. Since then, it has gained reader mode, which turns any chat into the reader with Shift-Cmd-R, and light mode, which can follow macOS. Expect some rough edges. A companion iOS app for checking on chats from my phone is planned once the desktop app settles. A signed, notarized download isn't there yet.
+This is v2.1. Expect some rough edges. A companion iOS app for checking on chats from my phone is planned once the desktop app settles. A signed, notarized download isn't there yet.
+
+See the [release notes](docs/releases/) for what changed in each version.
 
 ## License
 
