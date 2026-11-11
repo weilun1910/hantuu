@@ -124,7 +124,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         file.addItem(item("New Terminal Tab", #selector(newTerminal), "t"))
         file.addItem(.separator())
         file.addItem(item("Open File…", #selector(openFile), "o"))
-        file.addItem(item("Add Project…", #selector(addProject), "o", [.command, .shift]))
+        file.addItem(item("New Project…", #selector(addProject), "o", [.command, .shift]))
         file.addItem(.separator())
         file.addItem(item("Close", #selector(closeFocused), "w"))
         fileItem.submenu = file

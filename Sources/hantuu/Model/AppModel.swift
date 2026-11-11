@@ -292,9 +292,10 @@ final class AppModel: ObservableObject, TerminalEvents {
         let panel = NSOpenPanel()
         panel.canChooseDirectories = true
         panel.canChooseFiles = false
+        panel.canCreateDirectories = true
         panel.allowsMultipleSelection = true
-        panel.prompt = "Add Project"
-        panel.message = "Pick a project folder. Agents start in it."
+        panel.prompt = "Create Project"
+        panel.message = "Pick a folder for the project, or make one with New Folder. Agents start in it."
         guard panel.runModal() == .OK else { return }
         for url in panel.urls { addProject(path: url.path) }
     }

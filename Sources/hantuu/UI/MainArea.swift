@@ -218,16 +218,16 @@ struct EmptyStateView: View {
                 .font(.system(size: 28, weight: .light))
                 .foregroundStyle(Color.hSecondary)
             if model.projects.isEmpty {
-                Text("Add a project folder, then start a chat in it.")
+                Text("Create a project from a folder, then start a chat in it.")
                     .font(.system(size: 13))
                     .foregroundStyle(Color.hTertiary)
-                Button("Add Project…") { model.addProjectWithPanel() }
+                Button("New Project…") { model.addProjectWithPanel() }
                     .buttonStyle(BarButtonStyle(prominent: true))
             } else {
                 VStack(spacing: 8) {
                     shortcut("New chat", "⌘N") { model.newChat(agentID: nil, projectID: nil) }
                     shortcut("New terminal", "⌘T") { model.newTerminalTab() }
-                    shortcut("Add project", "⇧⌘O") { model.addProjectWithPanel() }
+                    shortcut("New project", "⇧⌘O") { model.addProjectWithPanel() }
                 }
                 if let p = model.currentProject {
                     Text("in \(p.name), with \(model.agents.first(where: { $0.id == model.defaultAgentID })?.name ?? model.defaultAgentID)")

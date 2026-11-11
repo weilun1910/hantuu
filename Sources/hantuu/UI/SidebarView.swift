@@ -12,7 +12,7 @@ struct SidebarView: View {
                     Spacer()
                     NeedsYouButton()
                     IconButton(symbol: "sidebar.left", help: "Hide Sidebar  ⌘0") { model.sidebarVisible = false }
-                    NewChatButton(projectID: nil, compact: false)
+                    IconButton(symbol: "folder.badge.plus", help: "New Project…  ⇧⌘O") { model.addProjectWithPanel() }
                 }
                 .padding(.trailing, 10)
             }
@@ -322,7 +322,6 @@ struct SidebarFooter: View {
 
     var body: some View {
         HStack(spacing: 4) {
-            IconButton(symbol: "folder.badge.plus", help: "Add Project…  ⇧⌘O") { model.addProjectWithPanel() }
             Spacer()
             // No icon here: at the narrowest sidebar width an icon pushed the footer past the edge.
             HStack(spacing: 7) {
