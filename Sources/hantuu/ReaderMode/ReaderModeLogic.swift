@@ -177,10 +177,74 @@ enum ComposerMessage {
         return min(total, 4000)
     }
 
-    /// Dropped files as the shell-escaped paths a terminal drop would type, space separated.
+    /// Files as the shell-escaped paths a terminal drop would type, space separated.
     static func paths(_ urls: [URL]) -> String {
         urls.filter(\.isFileURL).map { ShellEscape.escape($0.path) }.joined(separator: " ")
     }
+
+    // MARK: Attachments
+
+    /// Agents that turn a pasted image path into an "[Image #N]" attachment. Both need the path
+    /// pasted on its own: a path inside other text stays text. Codex also wants one path per
+    /// paste, and neither takes a TIFF or HEIC, so those are converted to PNG first.
+    static let imageAgents: Set<String> = ["claude", "codex"]
+
+    struct OutgoingFile: Equatable {
+        var path: String
+        /// Pasted on its own so the agent attaches it as an image.
+        var image: Bool
+    }
+
+    /// The files to send for a chat's agent. Pictures the agents can't read as images are
+    /// converted to PNG (PastedImages.convert); everything else goes as its path.
+    static func outgoingFiles(_ attachments: [ComposerAttachment], agentID: String, convert: (URL) -> URL? = { PastedImages.convert($0) }) -> [OutgoingFile] {
+        let aware = imageAgents.contains(agentID)
+        return attachments.map { a in
+            guard aware, !a.isFolder else { return OutgoingFile(path: a.url.path, image: false) }
+            if a.isImage { return OutgoingFile(path: a.url.path, image: true) }
+            if a.isPicture, let png = convert(a.url) { return OutgoingFile(path: png.path, image: true) }
+            return OutgoingFile(path: a.url.path, image: false)
+        }
+    }
+
+    /// What reader mode types into the agent for a message: each image's path as a paste of its
+    /// own (the agent shows it as "[Image #N]"), then the text with any other files' paths after
+    /// it, then Return.
+    static func steps(text: String?, files: [OutgoingFile], agentID: String) -> [SendStep] {
+        let images = files.filter(\.image)
+        let others = files.filter { !$0.image }.map { ShellEscape.escape($0.path) }
+        var body = text ?? ""
+        if !others.isEmpty {
+            let list = others.joined(separator: " ")
+            body = body.isEmpty ? list : body + (body.contains("\n") ? "\n\n" : " ") + list
+        }
+        // Claude Code puts nothing between its image chip and pasted text after it.
+        if !images.isEmpty && !body.isEmpty && agentID == "claude" { body = " " + body }
+        // A message that starts with a path isn't a slash command.
+        if text == nil && body.hasPrefix("/") { body = " " + body }
+        var out = images.map { SendStep.image(ShellEscape.escape($0.path)) }
+        if !body.isEmpty { out.append(.paste(body)) }
+        if !out.isEmpty { out.append(.pressReturn) }
+        return out
+    }
+
+    /// How many "[Image #N]" chips the bottom of the agent's screen shows. Reader mode waits for
+    /// this to go up after pasting an image, so the agent has read it before anything follows.
+    static func imageMarks(_ screen: String) -> Int {
+        let tail = screen.split(whereSeparator: \.isNewline).filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }.suffix(12)
+        return tail.reduce(0) { $0 + $1.components(separatedBy: "[Image #").count - 1 }
+    }
+}
+
+/// One thing reader mode types into the agent's terminal when a message goes out.
+enum SendStep: Equatable {
+    /// Text, as one bracketed paste.
+    case paste(String)
+    /// An image's escaped path as a paste of its own. The next step waits until the agent
+    /// shows one more image chip, or a few seconds.
+    case image(String)
+    /// A real Return key, a moment after the last paste.
+    case pressReturn
 }
 
 extension TerminalView {

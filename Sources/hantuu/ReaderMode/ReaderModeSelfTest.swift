@@ -1,5 +1,7 @@
 import AppKit
+import ImageIO
 import SwiftUI
+import UniformTypeIdentifiers
 import WebKit
 
 /// Self test for reader mode: the setting and per-chat flips, the message box's state for every
@@ -18,9 +20,11 @@ extension SelfTest {
         readerModeNotices()
         readerModeRestoredInput()
         readerModeKeys()
+        readerModeAttachments(rdir)
         readerModeFakeAgent(rdir)
         readerModeSnapshots(rdir)
         readerModeRealAgent(rdir)
+        attachmentLiveProbe(rdir)
     }
 
     static func snapshotsFolder(_ dir: URL) -> URL {
@@ -169,9 +173,6 @@ extension SelfTest {
         check("keys: Shift-Return adds a new line", sends == 1 && tv.string == "hello\n", tv.string.debugDescription)
         if let e = keyEvent(53, "\u{1b}", window: w) { tv.keyDown(with: e) }
         check("keys: Esc goes to Stop", escapes == 1)
-        tv.text = "look at"
-        tv.insertPaths([URL(fileURLWithPath: "/tmp/shot one.png")], at: 7)
-        check("drop: dropped files are typed as escaped paths where they land", tv.string == #"look at /tmp/shot\ one.png "#, tv.string.debugDescription)
         let box = ComposerBox(frame: NSRect(x: 0, y: 0, width: 400, height: 50))
         let one = box.preferredHeight
         box.textView.frame = NSRect(x: 0, y: 0, width: 300, height: 20)
@@ -183,6 +184,307 @@ extension SelfTest {
         check("message box: two lines to start, grows with the text, up to a limit",
               abs(one - (ComposerBox.padTop + ComposerStyle.lineHeight * 2 + ComposerBox.footer)) < 0.5 && four > one && many > four && many <= cap + 0.5,
               "one=\(one) four=\(four) many=\(many)")
+    }
+
+    // MARK: Pasting and dropping files and pictures
+
+    /// A private pasteboard holding `items`, so the test never touches the clipboard.
+    static func testPasteboard(_ items: [NSPasteboardItem]) -> NSPasteboard {
+        let pb = NSPasteboard(name: NSPasteboard.Name("hantuu.selftest.\(UUID().uuidString)"))
+        pb.clearContents()
+        pb.writeObjects(items)
+        return pb
+    }
+
+    static func item(_ pairs: [(NSPasteboard.PasteboardType, Data)]) -> NSPasteboardItem {
+        let it = NSPasteboardItem()
+        for (t, d) in pairs { it.setData(d, forType: t) }
+        return it
+    }
+
+    static func fileItem(_ url: URL) -> NSPasteboardItem {
+        // What Finder's Copy writes: the file URL, its name as text, and its icon as a TIFF.
+        let it = NSPasteboardItem()
+        it.setString(url.absoluteString, forType: .fileURL)
+        it.setString(url.lastPathComponent, forType: .string)
+        if let tiff = NSWorkspace.shared.icon(forFile: url.path).tiffRepresentation { it.setData(tiff, forType: .tiff) }
+        return it
+    }
+
+    static func imageData(_ color: NSColor, width: Int, height: Int, type: UTType) -> Data {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("hantuu-selftest-\(UUID().uuidString).\(type.preferredFilenameExtension ?? "img")")
+        defer { try? FileManager.default.removeItem(at: url) }
+        guard let ctx = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: 0,
+                                  space: CGColorSpace(name: CGColorSpace.sRGB)!, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return Data() }
+        ctx.setFillColor((color.usingColorSpace(.sRGB) ?? color).cgColor)
+        ctx.fill(CGRect(x: 0, y: 0, width: width, height: height))
+        guard let img = ctx.makeImage(), let dest = CGImageDestinationCreateWithURL(url as CFURL, type.identifier as CFString, 1, nil) else { return Data() }
+        CGImageDestinationAddImage(dest, img, nil)
+        CGImageDestinationFinalize(dest)
+        return (try? Data(contentsOf: url)) ?? Data()
+    }
+
+    static func pixelSize(_ url: URL) -> (Int, Int)? {
+        guard let src = CGImageSourceCreateWithURL(url as CFURL, nil),
+              let props = CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any],
+              let w = props[kCGImagePropertyPixelWidth] as? Int, let h = props[kCGImagePropertyPixelHeight] as? Int else { return nil }
+        return (w, h)
+    }
+
+    /// A drag that's only a pasteboard, for dropping things on views without a real drag.
+    final class FakeDrag: NSObject, NSDraggingInfo {
+        let pb: NSPasteboard
+        let at: NSPoint
+        let window: NSWindow
+        init(_ pb: NSPasteboard, at: NSPoint, in window: NSWindow) { self.pb = pb; self.at = at; self.window = window }
+        var draggingDestinationWindow: NSWindow? { window }
+        var draggingSourceOperationMask: NSDragOperation { .copy }
+        var draggingLocation: NSPoint { at }
+        var draggedImageLocation: NSPoint { at }
+        var draggedImage: NSImage? { nil }
+        var draggingPasteboard: NSPasteboard { pb }
+        var draggingSource: Any? { nil }
+        var draggingSequenceNumber: Int { 1 }
+        func slideDraggedImage(to screenPoint: NSPoint) {}
+        var draggingFormation: NSDraggingFormation = .default
+        var animatesToDestination = false
+        var numberOfValidItemsForDrop = 1
+        func enumerateDraggingItems(options enumOpts: NSDraggingItemEnumerationOptions = [], for view: NSView?, classes classArray: [AnyClass],
+                                    searchOptions: [NSPasteboard.ReadingOptionKey: Any] = [:], using block: (NSDraggingItem, Int, UnsafeMutablePointer<ObjCBool>) -> Void) {}
+        var springLoadingHighlight: NSSpringLoadingHighlight { .none }
+        func resetSpringLoading() {}
+    }
+
+    static func readerModeAttachments(_ dir: URL) {
+        let files = dir.appendingPathComponent("attach-files", isDirectory: true)
+        Paths.ensure(files)
+        let shot = files.appendingPathComponent("Screen Shot (1).png")
+        let notes = files.appendingPathComponent("notes.pdf")
+        let photo = files.appendingPathComponent("IMG_0042.tiff")
+        try? imageData(.systemOrange, width: 40, height: 30, type: .png).write(to: shot)
+        writeTinyPDF(to: notes, text: "notes")
+        try? imageData(.systemTeal, width: 30, height: 20, type: .tiff).write(to: photo)
+        let saved = PastedImages.folder
+        func savedFiles() -> [String] { ((try? FileManager.default.contentsOfDirectory(atPath: saved.path)) ?? []).sorted() }
+
+        // What's on the pasteboard, case by case.
+        let png = imageData(.systemRed, width: 64, height: 48, type: .png)
+        let onlyImage = testPasteboard([item([(.png, png)])])
+        // How the box behaved before: a plain-text NSTextView, as it was set up.
+        let stock = NSTextView(frame: NSRect(x: 0, y: 0, width: 200, height: 40))
+        stock.isRichText = false
+        stock.importsGraphics = false
+        let tookImage = stock.readSelection(from: onlyImage)
+        let finderBefore = testPasteboard([fileItem(shot), fileItem(notes)])
+        _ = stock.readSelection(from: finderBefore)
+        check("before: a plain text box pastes nothing for a picture, and only the names for Finder files",
+              !tookImage && stock.string == "Screen Shot (1).png\nnotes.pdf", "\(tookImage) \(stock.string.debugDescription)")
+        check("paste: a picture with no file behind it is a picture", ComposerPasteboard.read(onlyImage) == .images([.init(data: png, type: .png)]))
+        check("paste: the Paste menu stays on for a picture alone", ComposerPasteboard.hasContent(onlyImage))
+        let finder = testPasteboard([fileItem(shot), fileItem(notes)])
+        check("paste: files copied in Finder are the files, not their names or icons",
+              ComposerPasteboard.read(finder) == .files([shot, notes]), "\(ComposerPasteboard.read(finder))")
+        let tiff = imageData(.systemGreen, width: 50, height: 40, type: .tiff)
+        let safari = NSPasteboardItem()
+        safari.setData(tiff, forType: .tiff)
+        safari.setString("https://example.com/cat.jpg", forType: .string)
+        check("paste: a copied web image with its address is the picture", ComposerPasteboard.read(testPasteboard([safari])) == .images([.init(data: tiff, type: .tiff)]))
+        let cells = NSPasteboardItem()
+        cells.setString("a\tb\n1\t2", forType: .string)
+        cells.setData(png, forType: .png)
+        check("paste: copied cells or slides with a picture of them stay text", ComposerPasteboard.read(testPasteboard([cells])) == .text("a\tb\n1\t2", images: []))
+        let pdfData = (try? Data(contentsOf: notes)) ?? Data()
+        check("paste: a PDF with no file is a PDF", ComposerPasteboard.read(testPasteboard([item([(.pdf, pdfData)])])) == .pdf(pdfData))
+        check("paste: an empty pasteboard is nothing", ComposerPasteboard.read(testPasteboard([])) == .nothing)
+        let both = NSPasteboardItem()
+        both.setData(png, forType: .png)
+        both.setData(tiff, forType: .tiff)
+        check("paste: PNG is kept over TIFF when both are there", ComposerPasteboard.read(testPasteboard([both])) == .images([.init(data: png, type: .png)]))
+
+        // Saving pasted pictures.
+        let t0 = Date(timeIntervalSince1970: 1_800_000_000)
+        let a = ComposerAttachment.make(from: .images([.init(data: png, type: .png)]), now: t0)
+        check("saved: a pasted PNG is written as it came, in the data folder's attachments",
+              a.count == 1 && a[0].pasted && a[0].url.deletingLastPathComponent().standardizedFileURL == saved.standardizedFileURL
+              && a[0].url.pathExtension == "png" && (try? Data(contentsOf: a[0].url)) == png, "\(a.map(\.url.path))")
+        check("saved: it's called Pasted image on its chip, and its file is named by time",
+              a.first?.label == "Pasted image" && a.first?.url.lastPathComponent.hasPrefix("Pasted ") == true, a.first?.url.lastPathComponent ?? "")
+        let b = ComposerAttachment.make(from: .images([.init(data: tiff, type: .tiff)]), existing: a, now: t0.addingTimeInterval(1))
+        _ = waitUntil(5) { !b.contains { PastedImages.isPending($0.url) } }
+        check("saved: a TIFF becomes a PNG at the same size, and the second is Pasted image 2",
+              b.first?.url.pathExtension == "png" && b.first.flatMap { pixelSize($0.url) }.map { $0 == (50, 40) } == true && b.first?.label == "Pasted image 2",
+              "\(b.map(\.url.lastPathComponent)) \(String(describing: b.first.flatMap { pixelSize($0.url) }))")
+        let c = ComposerAttachment.make(from: .images([.init(data: png, type: .png)]), now: t0)
+        let names = [a, b, c].compactMap(\.first?.url.lastPathComponent)
+        check("saved: names sort by time, and two in the same second don't clash", names.count == 3 && Set(names).count == 3 && names[0] < names[1], "\(names)")
+        check("saved: an unreadable picture is skipped", ComposerAttachment.make(from: .images([.init(data: Data("nope".utf8), type: .tiff)])).isEmpty)
+
+        // A big picture: a 6000 x 4000 TIFF full of noise, the slowest case there is. The chip
+        // appears at once and the PNG is written in the background.
+        var noise = Data(count: 6000 * 4000 * 4)
+        noise.withUnsafeMutableBytes { arc4random_buf($0.baseAddress!, $0.count) }
+        let bigTIFF: Data = {
+            guard let provider = CGDataProvider(data: noise as CFData),
+                  let img = CGImage(width: 6000, height: 4000, bitsPerComponent: 8, bitsPerPixel: 32, bytesPerRow: 6000 * 4,
+                                    space: CGColorSpace(name: CGColorSpace.sRGB)!, bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.noneSkipLast.rawValue),
+                                    provider: provider, decode: nil, shouldInterpolate: false, intent: .defaultIntent) else { return Data() }
+            let d = NSMutableData()
+            guard let dest = CGImageDestinationCreateWithData(d, UTType.tiff.identifier as CFString, 1, nil) else { return Data() }
+            CGImageDestinationAddImage(dest, img, nil)
+            CGImageDestinationFinalize(dest)
+            return d as Data
+        }()
+        var start = Date()
+        let big = ComposerAttachment.make(from: .images([.init(data: bigTIFF, type: .tiff)]))
+        let pasteTime = Date().timeIntervalSince(start)
+        let written = waitUntil(15) { !big.contains { PastedImages.isPending($0.url) } }
+        let convertTime = Date().timeIntervalSince(start)
+        let bigPNG = imageData(.systemPurple, width: 6000, height: 4000, type: .png)
+        start = Date()
+        let bigP = ComposerAttachment.make(from: .images([.init(data: bigPNG, type: .png)]))
+        let pngTime = Date().timeIntervalSince(start)
+        print(String(format: "      big picture: a %.0f MB TIFF gets its chip in %.2fs and is a PNG %.2fs later; a PNG is saved in %.3fs",
+                     Double(bigTIFF.count) / 1e6, pasteTime, convertTime - pasteTime, pngTime))
+        check("saved: a 6000 x 4000 picture gets its chip at once and is saved at full size in the background",
+              big.count == 1 && bigP.count == 1 && pasteTime < 0.3 && pngTime < 0.3 && written
+              && big.first.flatMap { pixelSize($0.url) }.map { $0 == (6000, 4000) } == true,
+              String(format: "paste %.2fs convert %.2fs png %.3fs", pasteTime, convertTime, pngTime))
+        start = Date()
+        let thumb = big.first.flatMap { AttachmentThumbnails.thumbnail($0.url, pixels: 72) }
+        check("chips: a big picture's thumbnail is small and quick", thumb.map { max($0.size.width, $0.size.height) <= 72 } == true && Date().timeIntervalSince(start) < 1,
+              "\(String(describing: thumb?.size)) \(Date().timeIntervalSince(start))")
+
+        // Clearing out old ones at launch.
+        let old = saved.appendingPathComponent("Pasted 2020-01-01 at 10.00.00.png")
+        try? png.write(to: old)
+        try? FileManager.default.setAttributes([.modificationDate: Date().addingTimeInterval(-8 * 24 * 3600)], ofItemAtPath: old.path)
+        let oldDrop = PastedImages.newFolder(now: Date(timeIntervalSince1970: 0))
+        try? FileManager.default.setAttributes([.modificationDate: Date().addingTimeInterval(-9 * 24 * 3600)], ofItemAtPath: oldDrop.path)
+        let before = savedFiles().count
+        let removed = PastedImages.cleanUp()
+        check("cleanup: pictures older than a week are deleted at launch, newer ones stay",
+              removed == 2 && !FileManager.default.fileExists(atPath: old.path) && !FileManager.default.fileExists(atPath: oldDrop.path)
+              && savedFiles().count == before - 2 && FileManager.default.fileExists(atPath: a[0].url.path), "removed=\(removed) \(savedFiles())")
+
+        // The text view: paste from a private pasteboard.
+        let box = ComposerBox(frame: NSRect(x: 0, y: 0, width: 720, height: 120))
+        let w = makeWindow()
+        w.contentView?.addSubview(box)
+        defer { box.removeFromSuperview() }
+        let tv = box.textView
+        let plain = "  keep   this\n\texactly  "
+        tv.text = ""
+        tv.paste(from: testPasteboard([{ let i = NSPasteboardItem(); i.setString(plain, forType: .string); return i }()]))
+        check("paste: plain text goes in exactly as it was, with no attachments", tv.string == plain && box.attachments.isEmpty, tv.string.debugDescription)
+        tv.text = "look "
+        tv.setSelectedRange(NSRange(location: 5, length: 0))
+        let h0 = box.preferredHeight
+        tv.paste(from: onlyImage)
+        check("paste: a picture becomes a chip, and the text stays as it was",
+              box.attachments.count == 1 && box.attachments[0].pasted && tv.string == "look " && box.strip.chips.count == 1, "\(box.attachments) \(tv.string.debugDescription)")
+        check("chips: the box grows by a row for them", box.preferredHeight > h0 + ChipStyle.height - 1, "\(h0) -> \(box.preferredHeight)")
+        tv.paste(from: finder)
+        check("paste: files copied in Finder become chips, not their names", box.attachments.count == 3 && tv.string == "look "
+              && box.attachments.suffix(2).map(\.url) == [shot, notes], "\(box.attachments.map(\.label)) \(tv.string.debugDescription)")
+        tv.paste(from: finder)
+        check("paste: the same file twice is one chip", box.attachments.count == 3)
+        if let rtfd = NSAttributedString(attachment: { let t = NSTextAttachment(); t.fileWrapper = FileWrapper(regularFileWithContents: png); t.fileWrapper?.preferredFilename = "figure.png"; return t }()) as NSAttributedString?,
+           let rich = { () -> Data? in
+               let m = NSMutableAttributedString(string: "See the figure: ")
+               m.append(rtfd)
+               m.append(NSAttributedString(string: " below"))
+               return m.rtfd(from: NSRange(location: 0, length: m.length), documentAttributes: [:])
+           }() {
+            let it = NSPasteboardItem()
+            it.setData(rich, forType: .rtfd)
+            it.setString("See the figure: \u{FFFC} below", forType: .string)
+            tv.text = ""
+            box.setAttachments([])
+            tv.paste(from: testPasteboard([it]))
+            check("paste: rich text with a picture inside gives the text and a chip for the picture",
+                  tv.string == "See the figure:  below" && box.attachments.count == 1 && box.attachments[0].pasted, "\(tv.string.debugDescription) \(box.attachments.count)")
+        }
+        // Dropping: files from Finder and a picture from a browser become chips; text stays text.
+        box.setAttachments([])
+        tv.text = ""
+        let mid = tv.convert(NSPoint(x: 10, y: 10), to: nil)
+        let fileDrop = FakeDrag(testPasteboard([fileItem(shot), fileItem(notes)]), at: mid, in: w)
+        check("drop: dragging files over the box offers to copy them", tv.draggingEntered(fileDrop) == .copy)
+        let droppedFiles = tv.performDragOperation(fileDrop)
+        check("drop: dropped files become chips, not typed paths", droppedFiles && box.attachments.map(\.url) == [shot, notes] && tv.string.isEmpty,
+              "\(box.attachments.map(\.label)) \(tv.string.debugDescription)")
+        let picDrop = FakeDrag(testPasteboard([item([(.png, png)])]), at: mid, in: w)
+        check("drop: a dropped picture with no file becomes a pasted image chip", tv.performDragOperation(picDrop) && box.attachments.count == 3 && box.attachments[2].pasted)
+        let textDrop = FakeDrag(testPasteboard([{ let i = NSPasteboardItem(); i.setString("some words", forType: .string); return i }()]), at: mid, in: w)
+        check("drop: dropped text is not an attachment", !ComposerPasteboard.dropHasAttachment(textDrop.pb) && box.attachments.count == 3)
+
+        // Removing: the x on a chip, and Backspace in an empty box.
+        box.setAttachments([ComposerAttachment(url: shot), ComposerAttachment(url: notes), ComposerAttachment(url: photo)])
+        box.layoutSubtreeIfNeeded()
+        if let x = box.strip.chips.first?.remove {
+            _ = x.accessibilityPerformPress()
+        }
+        check("chips: the x takes one out", box.attachments.map(\.url) == [notes, photo], "\(box.attachments.map(\.label))")
+        check("accessibility: the x reads as Remove and the file's name", box.strip.chips.first?.remove.accessibilityLabel() == "Remove notes.pdf")
+        tv.text = ""
+        w.makeFirstResponder(tv)
+        if let e = keyEvent(51, "\u{7f}", window: w) { tv.keyDown(with: e) }
+        check("chips: Backspace in an empty box takes out the last one", box.attachments.map(\.url) == [notes])
+        tv.text = "ab"
+        tv.setSelectedRange(NSRange(location: 2, length: 0))
+        if let e = keyEvent(51, "\u{7f}", window: w) { tv.keyDown(with: e) }
+        check("chips: Backspace with text deletes text, not a chip", box.attachments.count == 1 && tv.string == "a", tv.string.debugDescription)
+        let many = (1...12).map { ComposerAttachment(url: files.appendingPathComponent("file number \($0) with a fairly long name.txt")) }
+        box.setAttachments(many)
+        let cap = ChipStyle.height * 3 + ChipStyle.gap * 2
+        check("chips: many files wrap, up to three rows, then scroll", abs(box.stripVisibleHeight - cap) < 0.5 && box.strip.contentHeight(width: 696) > cap,
+              "\(box.stripVisibleHeight) \(box.strip.contentHeight(width: 696))")
+        box.setAttachments([])
+        check("chips: none, and the box is its old height again", abs(box.preferredHeight - ComposerBox(frame: .zero).preferredHeight) < 0.5)
+
+        // What gets typed for each agent.
+        let img = ComposerMessage.OutgoingFile(path: "/tmp/a b.png", image: true)
+        let img2 = ComposerMessage.OutgoingFile(path: "/tmp/c.png", image: true)
+        let doc = ComposerMessage.OutgoingFile(path: "/tmp/notes (1).pdf", image: false)
+        check("send to Claude Code: each image pasted on its own, then the text after a space, then Return",
+              ComposerMessage.steps(text: "what is this?", files: [img, img2], agentID: "claude")
+              == [.image(#"/tmp/a\ b.png"#), .image("/tmp/c.png"), .paste(" what is this?"), .pressReturn])
+        check("send to Codex: each image pasted on its own (one path per paste), then the text",
+              ComposerMessage.steps(text: "what is this?", files: [img, img2], agentID: "codex")
+              == [.image(#"/tmp/a\ b.png"#), .image("/tmp/c.png"), .paste("what is this?"), .pressReturn])
+        check("send: other files go as their paths after the text",
+              ComposerMessage.steps(text: "summarize", files: [doc], agentID: "codex") == [.paste(#"summarize /tmp/notes\ \(1\).pdf"#), .pressReturn])
+        check("send: a file on its own doesn't start the message with a slash",
+              ComposerMessage.steps(text: nil, files: [doc], agentID: "claude") == [.paste(#" /tmp/notes\ \(1\).pdf"#), .pressReturn])
+        check("send: an image on its own is the image and Return",
+              ComposerMessage.steps(text: nil, files: [img], agentID: "claude") == [.image(#"/tmp/a\ b.png"#), .pressReturn])
+        check("send: agents hantuu doesn't know get every file as a path in the text",
+              ComposerMessage.steps(text: "hi", files: ComposerMessage.outgoingFiles([ComposerAttachment(url: shot)], agentID: "gemini"), agentID: "gemini")
+              == [.paste("hi " + ShellEscape.escape(shot.path)), .pressReturn])
+        check("send: plain text alone is one paste and Return, as before", ComposerMessage.steps(text: "hello", files: [], agentID: "claude") == [.paste("hello"), .pressReturn])
+        var converted: [URL] = []
+        let out = ComposerMessage.outgoingFiles([ComposerAttachment(url: shot), ComposerAttachment(url: photo), ComposerAttachment(url: notes), ComposerAttachment(url: files)],
+                                                agentID: "codex") { converted.append($0); return PastedImages.convert($0) }
+        _ = waitUntil(5) { !out.contains { PastedImages.isPending(URL(fileURLWithPath: $0.path)) } }
+        check("send: PNG goes as it is, TIFF is converted to PNG first, PDFs and folders go as paths",
+              out.map(\.image) == [true, true, false, false] && out[0].path == shot.path && converted == [photo]
+              && out[1].path.hasSuffix("IMG_0042.png") && out[1].path.hasPrefix(saved.path) && pixelSize(URL(fileURLWithPath: out[1].path)).map { $0 == (30, 20) } == true,
+              "\(out)")
+        // How each agent records a message sent with a pasted image (shapes from Claude Code
+        // 2.1.322 and Codex 0.167.1), and what the reader shows for it.
+        let pixel = "iVBORw0KGgo="
+        var claudeParser = ClaudeTranscriptParser()
+        let claudeLine = #"{"type":"user","uuid":"u9","message":{"role":"user","content":[{"type":"text","text":"[Image #1] What colour is this square?"},{"type":"image","source":{"type":"base64","media_type":"image/png","data":"\#(pixel)"}}]},"imagePasteIds":[1]}"#
+        let ce = claudeParser.parse(line: Data(claudeLine.utf8))
+        check("reader: a Claude Code message with a pasted image shows its text and the image",
+              ce.count == 1 && ce[0].kind == .user && ce[0].text == "[Image #1] What colour is this square?" && ce[0].images == ["data:image/png;base64,\(pixel)"], "\(ce)")
+        var codexParser = CodexTranscriptParser()
+        let codexLine = #"{"timestamp":"2026-11-11T16:31:20.717Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<image name=[Image #1] path=\"/tmp/attachments/Pasted 2026-11-11 at 11.31.19.png\">"},{"type":"input_image","image_url":"data:image/png;base64,\#(pixel)","detail":"high"},{"type":"input_text","text":"</image>"},{"type":"input_text","text":"[Image #1] What colour is this square?"}]}}"#
+        let xe = codexParser.parse(line: Data(codexLine.utf8))
+        check("reader: a Codex message with a pasted image shows its text and the image, without Codex's image tags",
+              xe.count == 1 && xe[0].text == "[Image #1] What colour is this square?" && xe[0].images == ["data:image/png;base64,\(pixel)"], "\(xe)")
+        check("screen: image chips are counted at the bottom of the agent's screen",
+              ComposerMessage.imageMarks("❯ [Image #1] earlier\n" + String(repeating: "x\n", count: 20) + "──────\n❯ [Image #4] [Image #5]what\n──────\n  ? for shortcuts") == 2)
     }
 
     // MARK: Sending, Stop and the banner, through a fake agent
@@ -266,6 +568,68 @@ extension SelfTest {
         _ = waitUntil(5) { String(decoding: bytes(), as: UTF8.self).hasSuffix("second message\u{1b}[201~\r") }
         check("send: Return in the message box sends it", String(decoding: bytes(), as: UTF8.self).hasSuffix("\u{1b}[200~second message\u{1b}[201~\r"), String(decoding: bytes(), as: UTF8.self).debugDescription)
 
+        // Attachments: the image's path as its own paste, then the text with the PDF's path.
+        // The fake agent never draws "[Image #1]", so don't wait long for it.
+        rm.imageWait = 0.3
+        let shot = dir.appendingPathComponent("shot one.png")
+        let pdf = dir.appendingPathComponent("notes (1).pdf")
+        try? imageData(.systemBlue, width: 20, height: 20, type: .png).write(to: shot)
+        writeTinyPDF(to: pdf, text: "notes")
+        rm.composer.add([ComposerAttachment(url: shot), ComposerAttachment(url: pdf)])
+        check("send: attachments alone are enough to send", rm.composer.action.kind == .send && rm.composer.action.active)
+        rm.composer.textView.text = "what are these"
+        let mark = bytes().count
+        let sentFiles = rm.send()
+        let wantFiles = "\u{1b}[200~" + ShellEscape.escape(shot.path) + "\u{1b}[201~" + "\u{1b}[200~ what are these " + ShellEscape.escape(pdf.path) + "\u{1b}[201~\r"
+        let gotFiles = waitUntil(8) { bytes().count > mark && bytes().last == 0x0D }
+        let typedFiles = String(decoding: bytes().suffix(from: mark), as: UTF8.self)
+        check("send: the image goes in as a paste of its own path, then the text and the PDF's path, then Return",
+              sentFiles && gotFiles && typedFiles == wantFiles, typedFiles.debugDescription)
+        check("send: the box empties, chips too", rm.composer.attachments.isEmpty && rm.composer.textView.string.isEmpty && rm.composer.stripScroll.isHidden)
+        // A TIFF is converted to PNG first, and typing waits for it.
+        let tiffFile = dir.appendingPathComponent("scan.tiff")
+        try? imageData(.systemGray, width: 2400, height: 1600, type: .tiff).write(to: tiffFile)
+        rm.composer.add([ComposerAttachment(url: tiffFile)])
+        let mark3 = bytes().count
+        rm.send()
+        _ = waitUntil(8) { bytes().count > mark3 && bytes().last == 0x0D }
+        let typedTIFF = String(decoding: bytes().suffix(from: mark3), as: UTF8.self)
+        let pngPath = ShellEscape.escape(PastedImages.folder.path)
+        check("send: a TIFF goes in as the path of a PNG copy, once it's written",
+              typedTIFF.hasPrefix("\u{1b}[200~" + pngPath) && typedTIFF.hasSuffix("scan.png\u{1b}[201~\r"), typedTIFF.debugDescription)
+        // Two sends in a row are typed one after the other, never mixed.
+        rm.composer.add([ComposerAttachment(url: shot)])
+        rm.composer.textView.text = "first"
+        rm.send()
+        rm.composer.textView.text = "second"
+        rm.send()
+        let mark2 = bytes().count
+        _ = waitUntil(8) { String(decoding: bytes().suffix(from: mark2), as: UTF8.self).hasSuffix("second\u{1b}[201~\r") && !rm.isTyping }
+        let two = String(decoding: bytes().suffix(from: mark2), as: UTF8.self)
+        check("send: a second message waits for the first to finish typing",
+              two == "\u{1b}[200~" + ShellEscape.escape(shot.path) + "\u{1b}[201~\u{1b}[200~ first\u{1b}[201~\r\u{1b}[200~second\u{1b}[201~\r"
+              || String(decoding: bytes().suffix(from: mark), as: UTF8.self).hasSuffix("first\u{1b}[201~\r\u{1b}[200~second\u{1b}[201~\r"), two.debugDescription)
+        // Each chat keeps its own attachments.
+        let other = Chat(projectID: project.id, agentID: "claude")
+        other.terminal = tv
+        model.chats = [chat, other]
+        rm.composer.add([ComposerAttachment(url: pdf)])
+        model.selectedChatID = other.id
+        rm.sync(selected: other)
+        let otherEmpty = rm.composer.attachments.isEmpty
+        model.selectedChatID = chat.id
+        rm.sync(selected: chat)
+        check("chats: each chat keeps its own attachments", otherEmpty && rm.composer.attachments.map(\.url) == [pdf])
+        rm.composer.setAttachments([])
+        model.chats = [chat]
+        // Dropping a file anywhere on the reader puts it in the message box.
+        if let wv = rm.reader?.page.webView as? FocuslessWebView {
+            let drop = FakeDrag(testPasteboard([fileItem(shot)]), at: wv.convert(NSPoint(x: wv.bounds.midX, y: wv.bounds.midY), to: nil), in: w)
+            let took = wv.draggingEntered(drop) == .copy && wv.performDragOperation(drop)
+            check("drop: a file dropped on the reader goes into the message box", took && rm.composer.attachments.map(\.url) == [shot])
+            rm.composer.setAttachments([])
+        }
+
         // Stop: Esc, only while working.
         let before = bytes().count
         check("stop: does nothing while the agent isn't working", rm.stop() == false)
@@ -286,6 +650,12 @@ extension SelfTest {
         rm.composer.textView.text = ""
         let stopped = rm.stop()
         check("stop: sends Esc to the terminal", stopped && waitUntil(5) { bytes().count == before + 1 && bytes().last == 0x1B }, bytes().suffix(8).map { String(format: "%02x", $0) }.joined(separator: " "))
+        // The half-second refresh may already have seen that fake screen go quiet and ended the
+        // turn; start a fresh one so the key press below always meets a working agent.
+        chat.activity = .idle
+        rm.refresh()
+        chat.activity = .working
+        rm.refresh()
         if let e = keyEvent(53, "\u{1b}", window: w) { rm.composer.textView.keyDown(with: e) }
         check("stop: Esc in the message box stops a working agent", waitUntil(5) { bytes().count == before + 2 && bytes().last == 0x1B })
         // The fake agent's screen shows its prompt and no "esc to interrupt", like Claude Code
@@ -473,6 +843,51 @@ extension SelfTest {
             _ = js(page, "document.querySelector('.toolgroup .toolsum').click(); 0")
         }
 
+        // The message box with attachments: one pasted picture, then several files with a long
+        // name, in dark and light. The crops show just the bottom of the window.
+        let attachDir = dir.appendingPathComponent("snapshot-files", isDirectory: true)
+        Paths.ensure(attachDir)
+        let photo = attachDir.appendingPathComponent("Pasted image.png")
+        writeGradient(to: photo, width: 1200, height: 800)
+        let diagram = attachDir.appendingPathComponent("architecture-diagram.png")
+        writeGradient(to: diagram, width: 900, height: 900, warm: true)
+        let pdf = attachDir.appendingPathComponent("Lecture 7 - Fourier series and the heat equation (annotated).pdf")
+        writeTinyPDF(to: pdf, text: "Lecture 7")
+        let csv = attachDir.appendingPathComponent("results.csv")
+        try? "a,b\n1,2\n".write(to: csv, atomically: true, encoding: .utf8)
+        func attachShots(_ name: String, _ list: [ComposerAttachment], text: String) -> Bool {
+            rm.composer.setAttachments(list)
+            rm.composer.textView.text = text
+            rm.refresh()
+            var ok = true
+            for (suffix, dark) in [("", true), ("-light", false)] {
+                w.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
+                g.setColorScheme(dark: dark)
+                if let page = rm.reader?.page {
+                    let want = dark ? "rgb(227, 227, 227)" : "rgb(43, 43, 43)"
+                    _ = waitUntil(5) { (js(page, "getComputedStyle(document.body).color") as? String) == want }
+                }
+                let file = out.appendingPathComponent("\(name)\(suffix).png")
+                ok = shot("\(name)\(suffix).png") && ok
+                cropBottom(file, height: 210, to: out.appendingPathComponent("composer-\(name.replacingOccurrences(of: "reader-mode-", with: ""))\(suffix).png"))
+            }
+            w.appearance = NSAppearance(named: .darkAqua)
+            g.setColorScheme(dark: true)
+            return ok
+        }
+        let oneImage = attachShots("reader-mode-attach-image", [ComposerAttachment(url: photo, pasted: true, label: "Pasted image")], text: "What's wrong with this layout?")
+        let several = attachShots("reader-mode-attach-several", [
+            ComposerAttachment(url: photo, pasted: true, label: "Pasted image"),
+            ComposerAttachment(url: diagram),
+            ComposerAttachment(url: pdf),
+            ComposerAttachment(url: csv),
+            ComposerAttachment(url: attachDir),
+        ], text: "")
+        check("snapshot: the message box with one picture, and with several files and a long name, in dark and light", oneImage && several)
+        rm.composer.setAttachments([])
+        rm.composer.textView.text = ""
+        _ = waitUntil(3) { (js(rm.reader!.page, "getComputedStyle(document.body).color") as? String) == "rgb(227, 227, 227)" }
+
         chat.activity = .working
         chat.activityDetail = "Running Bash: swift build"
         chat.activitySince = Date().addingTimeInterval(-14)
@@ -505,6 +920,33 @@ extension SelfTest {
         let settingsShot = render(form, to: out.appendingPathComponent("reader-mode-settings.png"))
         form.removeFromSuperview()
         check("snapshot: reader mode idle, working, needs permission, ended and its setting in \(out.path)", idle && working && needs && ended && settingsShot)
+    }
+
+    /// A soft two-colour gradient, so a chip's thumbnail looks like a real picture.
+    static func writeGradient(to url: URL, width: Int, height: Int, warm: Bool = false) {
+        guard let ctx = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: 0,
+                                  space: CGColorSpace(name: CGColorSpace.sRGB)!, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return }
+        let a = warm ? NSColor(srgbRed: 0.96, green: 0.80, blue: 0.62, alpha: 1) : NSColor(srgbRed: 0.42, green: 0.62, blue: 0.86, alpha: 1)
+        let b = warm ? NSColor(srgbRed: 0.72, green: 0.38, blue: 0.40, alpha: 1) : NSColor(srgbRed: 0.90, green: 0.92, blue: 0.95, alpha: 1)
+        if let grad = CGGradient(colorsSpace: CGColorSpace(name: CGColorSpace.sRGB), colors: [a.cgColor, b.cgColor] as CFArray, locations: [0, 1]) {
+            ctx.drawLinearGradient(grad, start: .zero, end: CGPoint(x: width, y: height), options: [])
+        }
+        ctx.setFillColor(NSColor(white: 1, alpha: 0.85).cgColor)
+        ctx.fill(CGRect(x: width / 6, y: height / 5, width: width / 2, height: height / 9))
+        guard let img = ctx.makeImage(), let dest = CGImageDestinationCreateWithURL(url as CFURL, UTType.png.identifier as CFString, 1, nil) else { return }
+        CGImageDestinationAddImage(dest, img, nil)
+        CGImageDestinationFinalize(dest)
+    }
+
+    /// The bottom `height` points of a snapshot, saved on their own.
+    static func cropBottom(_ file: URL, height: CGFloat, to out: URL) {
+        guard let src = CGImageSourceCreateWithURL(file as CFURL, nil), let img = CGImageSourceCreateImageAtIndex(src, 0, nil) else { return }
+        let scale = CGFloat(img.width) / 960
+        let h = Int(height * scale)
+        guard let crop = img.cropping(to: CGRect(x: 0, y: img.height - h, width: img.width, height: h)),
+              let dest = CGImageDestinationCreateWithURL(out as CFURL, UTType.png.identifier as CFString, 1, nil) else { return }
+        CGImageDestinationAddImage(dest, crop, nil)
+        CGImageDestinationFinalize(dest)
     }
 
     // MARK: A real Claude Code chat
