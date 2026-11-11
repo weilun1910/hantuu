@@ -7,7 +7,8 @@ import SwiftUI
 /// installs it over the terminals and asks it what to show.
 ///
 /// Sending types the message into the chat's real terminal as one bracketed paste and then
-/// presses Return (`TerminalView.submit`), exactly what pasting into the agent's own box does.
+/// presses Return, exactly what pasting into the agent's own box does. Attached images go
+/// first, each pasted as its own path, which Claude Code and Codex turn into "[Image #N]".
 /// Nothing is ever sent while a menu waits in the terminal, because Return would answer it.
 final class ReaderModeController: NSObject {
     let model: AppModel
@@ -29,6 +30,12 @@ final class ReaderModeController: NSObject {
     private var readyChats = Set<UUID>()
     private var shownChatID: UUID?
     private var drafts: [UUID: String] = [:]
+    private var draftFiles: [UUID: [ComposerAttachment]] = [:]
+    /// Messages waiting to be typed, one at a time, so two sends never interleave.
+    private var outbox: [(terminal: TerminalView, steps: [SendStep], files: [URL])] = []
+    private var typing = false
+    /// How long to wait for the agent to show a pasted image before going on anyway.
+    var imageWait: TimeInterval = 3
     private var calmChecks = 0
     /// When Stop was pressed, per chat. Claude Code doesn't always report a stopped turn (an
     /// Esc before any output leaves no transcript line and fires no hook), so its status can
@@ -69,6 +76,8 @@ final class ReaderModeController: NSObject {
         tv.onCopyWithoutSelection = { [weak self] in self?.copyReaderSelection() }
         tv.onPage = { [weak self] down in self?.page(down: down) }
         composer.onHeightChange = { [weak self] in self?.textChanged() }
+        composer.onAttachmentsChange = { [weak self] in self?.textChanged() }
+        PastedImages.cleanUpOnce()
         composer.action.target = self
         composer.action.action = #selector(actionPressed)
         mode.objectWillChange
@@ -142,6 +151,13 @@ final class ReaderModeController: NSObject {
         guard reader == nil else { return }
         let r = ReaderController(model: model, page: "reader.html?layout=main", identifier: "hantuu.reader.main", focusless: true)
         (r.page.webView as? FocuslessWebView)?.onMouseDown = { [weak self] in self?.focusComposer() }
+        // Files and pictures dropped anywhere on the reader go into the message box.
+        (r.page.webView as? FocuslessWebView)?.onDropAttachments = { [weak self] content in
+            guard let self, !self.composer.isHidden, self.composerMode != .none else { return false }
+            self.composer.attach(content)
+            self.focusComposer()
+            return true
+        }
         let v = r.view
         v.translatesAutoresizingMaskIntoConstraints = false
         root.addSubview(v, positioned: .below, relativeTo: bottom)
@@ -198,9 +214,13 @@ final class ReaderModeController: NSObject {
     }
 
     private func switchChat(to chat: Chat) {
-        if let old = shownChatID { drafts[old] = composer.textView.string.isEmpty ? nil : composer.textView.string }
+        if let old = shownChatID {
+            drafts[old] = composer.textView.string.isEmpty ? nil : composer.textView.string
+            draftFiles[old] = composer.attachments.isEmpty ? nil : composer.attachments
+        }
         shownChatID = chat.id
         composer.textView.text = drafts[chat.id] ?? ""
+        composer.setAttachments(draftFiles[chat.id] ?? [])
         composer.textView.placeholder = "Message \(chat.agent.name)"
         composer.action.agentName = chat.agent.name
         calmChecks = 0
@@ -295,9 +315,9 @@ final class ReaderModeController: NSObject {
 
     /// Send, or Stop while the agent works and the box is empty.
     private func updateAction() {
-        let hasText = ComposerMessage.prepare(composer.textView.string) != nil
-        composer.action.kind = composerMode.isWorking && !hasText ? .stop : .send
-        composer.action.active = composerMode.canSend && hasText
+        let hasContent = ComposerMessage.prepare(composer.textView.string) != nil || !composer.attachments.isEmpty
+        composer.action.kind = composerMode.isWorking && !hasContent ? .stop : .send
+        composer.action.active = composerMode.canSend && hasContent
     }
 
     private func updateHeights() {
@@ -322,29 +342,95 @@ final class ReaderModeController: NSObject {
         if composer.action.kind == .stop { _ = stop() } else { send() }
     }
 
-    /// Types the message into the chat's terminal and presses Return. Returns false, and keeps
-    /// the text, when it can't send right now.
+    /// Types the message and its attachments into the chat's terminal and presses Return.
+    /// Returns false, and keeps everything in the box, when it can't send right now.
     @discardableResult
     func send() -> Bool {
         guard let chat = model.selectedChat, chat.id == shownChatID, let t = chat.terminal else { return false }
         refresh()
-        guard let text = ComposerMessage.prepare(composer.textView.string) else { return false }
+        let text = ComposerMessage.prepare(composer.textView.string)
+        let attachments = composer.attachments
+        guard text != nil || !attachments.isEmpty else { return false }
         guard composerMode.canSend else {
             NSSound.beep()
             return false
         }
+        let files = ComposerMessage.outgoingFiles(attachments, agentID: chat.agent.id)
+        let steps = ComposerMessage.steps(text: text, files: files, agentID: chat.agent.id)
         // A message sent while the agent works joins its turn; otherwise it starts a new one.
         if !composerMode.isWorking { sentThisTurn[chat.id] = [] }
-        sentThisTurn[chat.id, default: []].append(text)
-        t.submit(text)
+        for step in steps {
+            switch step {
+            case .paste(let s): sentThisTurn[chat.id, default: []].append(s)
+            case .image: sentThisTurn[chat.id, default: []].append("[Image #")
+            case .pressReturn: break
+            }
+        }
+        type(steps, into: t, after: files.map { URL(fileURLWithPath: $0.path) })
         composer.textView.text = ""
+        composer.setAttachments([])
         drafts[chat.id] = nil
+        draftFiles[chat.id] = nil
         stoppedAt[chat.id] = nil
-        Log.write("reader mode: sent \(text.count) characters to chat=\(chat.id)")
+        Log.write("reader mode: sent \(text?.count ?? 0) characters and \(files.count) attachments (\(files.filter(\.image).count) as images) to chat=\(chat.id)")
         // Follow the conversation from here, even if you'd scrolled up to read.
         reader?.page.webView.evaluateJavaScript("window.scrollTo(0, document.scrollingElement.scrollHeight); 0", completionHandler: nil)
         return true
     }
+
+    // MARK: Typing into the terminal
+
+    /// Queues a message's steps for a terminal and starts typing if nothing else is. Typing
+    /// waits for any of `files` still being converted (PastedImages).
+    private func type(_ steps: [SendStep], into t: TerminalView, after files: [URL] = []) {
+        guard !steps.isEmpty else { return }
+        outbox.append((t, steps, files))
+        if !typing { typeNext() }
+    }
+
+    private func typeNext() {
+        guard !outbox.isEmpty else { typing = false; return }
+        typing = true
+        guard !outbox[0].steps.isEmpty, outbox[0].terminal.surface != nil else {
+            outbox.removeFirst()
+            return typeNext()
+        }
+        if let busy = outbox[0].files.first(where: PastedImages.isPending) {
+            return PastedImages.whenReady(busy) { [weak self] in self?.typeNext() }
+        }
+        let t = outbox[0].terminal
+        let step = outbox[0].steps.removeFirst()
+        let next = { [weak self] (delay: TimeInterval) in
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { self?.typeNext() }
+        }
+        switch step {
+        case .paste(let text):
+            t.pasteText(text)
+            next(0.15)
+        case .image(let path):
+            let before = ComposerMessage.imageMarks(t.activeScreenText())
+            t.pasteText(path)
+            let deadline = Date().addingTimeInterval(imageWait)
+            func check() {
+                if ComposerMessage.imageMarks(t.activeScreenText()) > before { return next(0.1) }
+                if Date() >= deadline {
+                    Log.write("reader mode: no image chip showed for a pasted image; carrying on")
+                    return next(0)
+                }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { check() }
+            }
+            check()
+        case .pressReturn:
+            // The same pause TerminalView.submit leaves, so the agent has taken the paste in.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+                t.pressReturn()
+                self?.typeNext()
+            }
+        }
+    }
+
+    /// True while a message is still being typed into a terminal.
+    var isTyping: Bool { typing }
 
     /// Esc in the agent's terminal, which stops the running turn. Only while it's working, so
     /// it can never decline a prompt on your behalf.
@@ -466,10 +552,26 @@ final class FadeEdge: NSView {
 /// as it was, so the panel's pages behave exactly as before.
 final class FocuslessWebView: HantuuWebView {
     var onMouseDown: (() -> Void)?
+    /// Files and pictures dropped on the page. Returns false to leave the drop to the page.
+    var onDropAttachments: ((ComposerPasteboard.Content) -> Bool)?
     override var acceptsFirstResponder: Bool { false }
     override func becomeFirstResponder() -> Bool { false }
     override func mouseDown(with event: NSEvent) {
         super.mouseDown(with: event)
         onMouseDown?()
+    }
+
+    private func takesDrop(_ info: NSDraggingInfo) -> Bool {
+        onDropAttachments != nil && ComposerPasteboard.dropHasAttachment(info.draggingPasteboard)
+    }
+    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
+        takesDrop(sender) ? .copy : super.draggingEntered(sender)
+    }
+    override func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation {
+        takesDrop(sender) ? .copy : super.draggingUpdated(sender)
+    }
+    override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        guard takesDrop(sender), let take = onDropAttachments else { return super.performDragOperation(sender) }
+        return ComposerPasteboard.receiveDrop(sender) { content in _ = take(content) }
     }
 }

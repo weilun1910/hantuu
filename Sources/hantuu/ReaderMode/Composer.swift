@@ -1,7 +1,8 @@
 import AppKit
 
 /// The message box's text view: plain text, Return sends, Shift-Return (or Option-Return)
-/// starts a new line, Esc stops a running agent, and dropped files become shell-escaped paths.
+/// starts a new line, and Esc stops a running agent. Files and pictures, pasted or dropped,
+/// become attachments (`onAttach`); text pastes and drops stay plain text.
 final class ComposerTextView: NSTextView {
     var placeholder = "" { didSet { needsDisplay = true } }
     var onSend: (() -> Void)?
@@ -12,6 +13,10 @@ final class ComposerTextView: NSTextView {
     /// Page Up and Page Down scroll the reader, so reading never needs the mouse.
     var onPage: ((_ down: Bool) -> Void)?
     var onTextChange: (() -> Void)?
+    /// Files or pictures from a paste or a drop. Returns false if there was nothing to attach.
+    var onAttach: ((ComposerPasteboard.Content) -> Bool)?
+    /// Backspace in an empty box takes out the last attachment. Returns true if it did.
+    var onDeleteBackwardWhenEmpty: (() -> Bool)?
 
     static func make() -> ComposerTextView {
         let storage = NSTextStorage()
@@ -54,7 +59,7 @@ final class ComposerTextView: NSTextView {
         typingAttributes = [.font: ComposerStyle.font, .foregroundColor: ComposerStyle.text, .paragraphStyle: ComposerStyle.paragraph]
         defaultParagraphStyle = ComposerStyle.paragraph
         selectedTextAttributes = [.backgroundColor: Theme.ink(0.16, light: 0.11)]
-        registerForDraggedTypes([.fileURL, .string])
+        registerForDraggedTypes(ComposerPasteboard.draggedTypes)
     }
 
     var text: String {
@@ -84,6 +89,8 @@ final class ComposerTextView: NSTextView {
             if onEscape?() != true { super.keyDown(with: event) }
         case 116, 121: // Page Up, Page Down
             onPage?(event.keyCode == 121)
+        case 51 where string.isEmpty && mods.isDisjoint(with: [.command, .control, .option]):   // Backspace
+            if onDeleteBackwardWhenEmpty?() != true { super.keyDown(with: event) }
         default:
             super.keyDown(with: event)
         }
@@ -111,39 +118,59 @@ final class ComposerTextView: NSTextView {
 
     override func validateMenuItem(_ item: NSMenuItem) -> Bool {
         if item.action == #selector(copy(_:)) { return true }
+        // A picture alone on the clipboard isn't text, so NSTextView would grey Paste out.
+        if item.action == #selector(paste(_:)) { return isEditable && ComposerPasteboard.hasContent(.general) }
         return super.validateMenuItem(item)
     }
 
-    // MARK: Dropping files
+    // MARK: Paste
 
-    private func dropHasFiles(_ sender: NSDraggingInfo) -> Bool {
-        sender.draggingPasteboard.canReadObject(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true])
+    override func paste(_ sender: Any?) {
+        if !paste(from: .general) { super.paste(sender) }
+    }
+
+    /// Files and pictures become attachments, and text goes in as plain text. Returns false
+    /// when there was nothing it handled, so a plain paste can carry on.
+    @discardableResult
+    func paste(from pb: NSPasteboard) -> Bool {
+        guard isEditable else { return false }
+        let content = ComposerPasteboard.read(pb)
+        switch content {
+        case .files, .images, .pdf:
+            return onAttach?(content) ?? false
+        case .text(let s, let images):
+            if !images.isEmpty { _ = onAttach?(.images(images)) }
+            // Rich text marks each picture with U+FFFC; the pictures came along as attachments.
+            let plain = s.replacingOccurrences(of: "\u{FFFC}", with: "")
+            if plain == s && pb == .general { return false }   // NSTextView's own plain paste
+            insertTyped(plain)
+            return true
+        case .nothing:
+            return false
+        }
+    }
+
+    // MARK: Dropping files and pictures
+
+    private func dropIsAttachment(_ sender: NSDraggingInfo) -> Bool {
+        ComposerPasteboard.dropHasAttachment(sender.draggingPasteboard)
     }
 
     override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
         let op = super.draggingEntered(sender)
-        return dropHasFiles(sender) ? .copy : op
+        return dropIsAttachment(sender) ? .copy : op
     }
 
     override func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation {
         let op = super.draggingUpdated(sender)
-        return dropHasFiles(sender) ? .copy : op
+        return dropIsAttachment(sender) ? .copy : op
     }
 
     override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
-        guard dropHasFiles(sender),
-              let urls = sender.draggingPasteboard.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL],
-              !urls.isEmpty else { return super.performDragOperation(sender) }
-        let at = characterIndexForInsertion(at: convert(sender.draggingLocation, from: nil))
-        insertPaths(urls, at: at)
+        guard dropIsAttachment(sender) else { return super.performDragOperation(sender) }
+        let ok = ComposerPasteboard.receiveDrop(sender) { [weak self] content in _ = self?.onAttach?(content) }
         window?.makeFirstResponder(self)
-        return true
-    }
-
-    /// Types the files' shell-escaped paths where they were dropped, with a space on either
-    /// side unless there's one already.
-    func insertPaths(_ urls: [URL], at index: Int? = nil) {
-        insertTyped(paddedPaths(ComposerMessage.paths(urls), at: index ?? selectedRange().location), at: index)
+        return ok
     }
 
     /// Inserts text as if typed: undoable, and the caret ends up after it.
@@ -156,16 +183,6 @@ final class ComposerTextView: NSTextView {
         textStorage?.replaceCharacters(in: range, with: NSAttributedString(string: text, attributes: typingAttributes))
         didChangeText()
         setSelectedRange(NSRange(location: range.location + (text as NSString).length, length: 0))
-    }
-
-    private func paddedPaths(_ paths: String, at loc: Int) -> String {
-        guard !paths.isEmpty else { return "" }
-        let ns = string as NSString
-        let before = loc > 0 && loc <= ns.length ? ns.substring(with: NSRange(location: loc - 1, length: 1)) : ""
-        let after = loc < ns.length ? ns.substring(with: NSRange(location: loc, length: 1)) : ""
-        let lead = before.isEmpty || before == " " || before == "\n" ? "" : " "
-        let trail = after == " " || after == "\n" ? "" : " "
-        return lead + paths + trail
     }
 
     // MARK: Placeholder
@@ -354,19 +371,32 @@ final class ComposerIconButton: NSControl {
     }
 }
 
-/// The message box: the text in a scroll view, and a footer row with Add Files on the left and
-/// Send (or Stop) on the right. At least two lines tall, it grows with the text up to
-/// `ComposerStyle.maxLines`. The frame and footer follow T3 Code's composer, in hantuu's greys.
+/// The message box: attachments as a row of chips at the top, the text in a scroll view, and a
+/// footer row with Add Files on the left and Send (or Stop) on the right. At least two lines
+/// tall, it grows with the text up to `ComposerStyle.maxLines`. The frame and footer follow T3
+/// Code's composer, in hantuu's greys.
 final class ComposerBox: NSView {
     let textView = ComposerTextView.make()
     let scroll = NSScrollView()
     let action = ComposerActionButton(frame: NSRect(x: 0, y: 0, width: 28, height: 28))
-    let attach = ComposerIconButton(symbol: "paperclip", help: "Add files (or drop them on the box)")
+    let attach = ComposerIconButton(symbol: "paperclip", help: "Add files (or drop or paste them on the box)")
+    let strip = AttachmentStrip()
+    let stripScroll = NSScrollView()
     var onHeightChange: (() -> Void)?
+    /// The attachments changed: added, removed, or swapped for another chat's.
+    var onAttachmentsChange: (() -> Void)?
+    /// What goes out with the next message, in the order it was added.
+    private(set) var attachments: [ComposerAttachment] = []
     static let padTop: CGFloat = 12
     static let padH: CGFloat = 16
     static let footer: CGFloat = 38
     static let minLines: CGFloat = 2
+    /// The chips sit a little further out than the text, so their pictures line up with it.
+    static let stripInset: CGFloat = 12
+    static let stripTop: CGFloat = 10
+    static let stripGap: CGFloat = 8
+    private var scrollTop: NSLayoutConstraint!
+    private var stripHeight: NSLayoutConstraint!
 
     var enabled = true {
         didSet { alphaValue = enabled ? 1 : 0.7 }
@@ -385,14 +415,28 @@ final class ComposerBox: NSView {
         scroll.scrollerStyle = .overlay
         scroll.verticalScrollElasticity = .none
         scroll.documentView = textView
-        for v in [scroll, action, attach] as [NSView] {
+        stripScroll.drawsBackground = false
+        stripScroll.borderType = .noBorder
+        stripScroll.hasVerticalScroller = true
+        stripScroll.autohidesScrollers = true
+        stripScroll.scrollerStyle = .overlay
+        stripScroll.verticalScrollElasticity = .none
+        stripScroll.documentView = strip
+        stripScroll.isHidden = true
+        for v in [stripScroll, scroll, action, attach] as [NSView] {
             v.translatesAutoresizingMaskIntoConstraints = false
             addSubview(v)
         }
+        scrollTop = scroll.topAnchor.constraint(equalTo: topAnchor, constant: Self.padTop)
+        stripHeight = stripScroll.heightAnchor.constraint(equalToConstant: 0)
         NSLayoutConstraint.activate([
+            stripScroll.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Self.stripInset),
+            stripScroll.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -Self.stripInset),
+            stripScroll.topAnchor.constraint(equalTo: topAnchor, constant: Self.stripTop),
+            stripHeight,
             scroll.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Self.padH),
             scroll.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -Self.padH),
-            scroll.topAnchor.constraint(equalTo: topAnchor, constant: Self.padTop),
+            scrollTop,
             scroll.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -Self.footer),
             attach.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 8),
             attach.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -6),
@@ -404,16 +448,97 @@ final class ComposerBox: NSView {
             action.heightAnchor.constraint(equalToConstant: 28),
         ])
         textView.onTextChange = { [weak self] in self?.onHeightChange?() }
+        textView.onAttach = { [weak self] content in self?.attach(content) ?? false }
+        textView.onDeleteBackwardWhenEmpty = { [weak self] in
+            guard let self, let last = self.attachments.last else { return false }
+            self.remove(last.id)
+            return true
+        }
+        strip.onRemove = { [weak self] id in
+            guard let self else { return }
+            self.remove(id)
+            self.window?.makeFirstResponder(self.textView)
+        }
         attach.target = self
         attach.action = #selector(addFiles)
         updateColors()
     }
     required init?(coder: NSCoder) { fatalError() }
 
-    /// The box's height for the current text.
+    /// The width the chips wrap in.
+    private var stripWidth: CGFloat {
+        let w = (bounds.width > 0 ? bounds.width : ReaderModeController.columnWidth) - Self.stripInset * 2
+        return max(w, 120)
+    }
+
+    /// The chips' height, up to `AttachmentStrip.maxRows` rows; 0 with no attachments.
+    var stripVisibleHeight: CGFloat {
+        guard !attachments.isEmpty else { return 0 }
+        let cap = ChipStyle.height * CGFloat(AttachmentStrip.maxRows) + ChipStyle.gap * CGFloat(AttachmentStrip.maxRows - 1)
+        return min(strip.contentHeight(width: stripWidth), cap)
+    }
+
+    /// The box's height for the current text and attachments.
     var preferredHeight: CGFloat {
         let lines = min(max(textView.contentHeight, ComposerStyle.lineHeight * Self.minLines), ComposerStyle.lineHeight * ComposerStyle.maxLines)
-        return Self.padTop + lines + Self.footer
+        let chips = stripVisibleHeight
+        let top = chips > 0 ? Self.stripTop + chips + Self.stripGap : Self.padTop
+        return top + lines + Self.footer
+    }
+
+    // MARK: Attachments
+
+    /// Replaces the attachments, for switching chats.
+    func setAttachments(_ list: [ComposerAttachment]) {
+        attachments = list
+        attachmentsChanged()
+    }
+
+    func add(_ list: [ComposerAttachment]) {
+        guard !list.isEmpty else { return }
+        // The same file twice is one attachment.
+        let have = Set(attachments.map { $0.url.standardizedFileURL.path })
+        attachments += list.filter { !have.contains($0.url.standardizedFileURL.path) }
+        attachmentsChanged()
+    }
+
+    func remove(_ id: ComposerAttachment.ID) {
+        attachments.removeAll { $0.id == id }
+        attachmentsChanged()
+    }
+
+    /// Files become attachments as they are; pictures without a file are saved first.
+    @discardableResult
+    func attach(_ content: ComposerPasteboard.Content) -> Bool {
+        let list = ComposerAttachment.make(from: content, existing: attachments)
+        guard !list.isEmpty else {
+            NSSound.beep()
+            return false
+        }
+        add(list)
+        return true
+    }
+
+    private func attachmentsChanged() {
+        strip.show(attachments)
+        let h = stripVisibleHeight
+        stripScroll.isHidden = attachments.isEmpty
+        stripHeight.constant = h
+        scrollTop.constant = h > 0 ? Self.stripTop + h + Self.stripGap : Self.padTop
+        strip.frame = NSRect(x: 0, y: 0, width: stripWidth, height: strip.contentHeight(width: stripWidth))
+        strip.needsLayout = true
+        onAttachmentsChange?()
+        onHeightChange?()
+    }
+
+    override func layout() {
+        super.layout()
+        // The chips rewrap when the box changes width.
+        let w = stripWidth, h = strip.contentHeight(width: w)
+        if strip.frame.width != w || strip.frame.height != h {
+            strip.frame = NSRect(x: 0, y: 0, width: w, height: h)
+            if stripHeight.constant != stripVisibleHeight { attachmentsChanged() }
+        }
     }
 
     func updateColors() {
@@ -446,10 +571,10 @@ final class ComposerBox: NSView {
         panel.canChooseDirectories = true
         panel.allowsMultipleSelection = true
         panel.prompt = "Add"
-        panel.message = "The files' paths go into your message."
+        panel.message = "The files go with your next message."
         let done: (NSApplication.ModalResponse) -> Void = { [weak self] r in
             guard let self, r == .OK else { return }
-            self.textView.insertPaths(panel.urls)
+            self.attach(.files(panel.urls))
             self.window?.makeFirstResponder(self.textView)
         }
         if let w = window { panel.beginSheetModal(for: w, completionHandler: done) } else { done(panel.runModal()) }
