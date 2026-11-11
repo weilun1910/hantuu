@@ -42,20 +42,22 @@ final class ReaderController {
     func reload() {
         let chat = model.selectedChat
         shownChatID = chat?.id
-        let empty: String
-        if let chat {
-            if chat.agent.transcript == nil {
-                empty = "\(chat.agent.name) doesn't keep a transcript hantuu can read yet. The terminal has the whole conversation."
-            } else if chat.follower == nil {
-                empty = "The conversation shows up here once you send \(chat.agent.name) your first message."
-            } else {
-                empty = "Nothing to show yet."
-            }
-        } else {
-            empty = "Pick a chat to read it here."
-        }
-        page.call("reset", ReaderPayload(chatID: chat?.id.uuidString, entries: chat?.allEntries ?? [], emptyText: empty,
+        page.call("reset", ReaderPayload(chatID: chat?.id.uuidString, entries: chat?.allEntries ?? [], emptyText: Self.emptyText(for: chat),
                                          base: chat.map { model.workingDirectory(of: $0) }))
+    }
+
+    /// What the reader says while a chat has nothing to show.
+    static func emptyText(for chat: Chat?) -> String {
+        guard let chat else { return "Pick a chat to read it here." }
+        if chat.agent.transcript == nil {
+            return "\(chat.agent.name) doesn't keep a transcript hantuu can read yet. The terminal has the whole conversation."
+        }
+        // Claude Code writes the transcript with the first message, so a new chat or one just
+        // cleared with /clear has a follower waiting on a file that doesn't exist yet.
+        if chat.follower.map({ !FileManager.default.fileExists(atPath: $0.url.path) }) ?? true {
+            return "The conversation shows up here once you send \(chat.agent.name) your first message."
+        }
+        return "Nothing to show yet."
     }
 
     private func handle(_ msg: [String: Any]) {

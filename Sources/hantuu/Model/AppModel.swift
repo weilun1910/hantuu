@@ -629,6 +629,32 @@ final class AppModel: ObservableObject, TerminalEvents {
 
     // MARK: Transcripts
 
+    /// Hooks follow the agent's active conversation, including an in-terminal resume or clear.
+    func followSession(_ chat: Chat, session: HookLineParser.Session) {
+        guard chat.agentID == "claude" else { return }
+        let changedID = session.id != nil && session.id != chat.sessionID
+        var path = session.path ?? (changedID ? nil : chat.transcriptPath)
+        if path == nil, let id = session.id ?? chat.sessionID {
+            path = ClaudeTranscriptParser.locate(sessionID: id, cwd: workingDirectory(of: chat))?.path
+        }
+        guard changedID || path != chat.transcriptPath || (path != nil && chat.follower == nil) else { return }
+        chat.discoveryTimer?.invalidate()
+        chat.follower?.stop()
+        chat.follower = nil
+        chat.earlierEntries = []
+        chat.liveEntries = []
+        chat.firstPrompt = nil
+        if let id = session.id { chat.sessionID = id }
+        chat.transcriptPath = path
+        if let path {
+            attachFollower(chat, url: URL(fileURLWithPath: path), kind: .claude, live: chat.status != .ended)
+        } else if chat.status != .ended {
+            beginTranscriptDiscovery(chat, cwd: workingDirectory(of: chat))
+        }
+        readerReload.send(chat.id)
+        scheduleSave()
+    }
+
     private func beginTranscriptDiscovery(_ chat: Chat, cwd: String) {
         guard let kind = chat.agent.transcript else { return }
         chat.discoveryTimer?.invalidate()
