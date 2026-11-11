@@ -1,5 +1,6 @@
 import AppKit
 import WebKit
+import SwiftUI
 
 /// Self test for the Overview, Changes and Files tabs: git parsing, the comment message,
 /// context and plan extraction, port matching, file listing, a real fixture repository,
@@ -16,6 +17,7 @@ extension SelfTest {
         let repo = makeFixtureRepo(dir)
         reviewRepo(repo)
         reviewWatcher(dir)
+        reviewNestedRepositories(dir)
         reviewPanel(dir, repo: makeFixtureRepo(dir.appendingPathComponent("panel"), forPanel: true))
         if let live = ProcessInfo.processInfo.environment["HANTUU_LIVE_REVIEW_TEST"], !live.isEmpty {
             reviewLiveAgent(makeLiveScratch(URL(fileURLWithPath: live)), dir: dir)
@@ -306,6 +308,195 @@ extension SelfTest {
         let err = ChangeScanner.revert(by["Sources/Parser.swift"]!, repo: info)
         let restored = (try? String(contentsOf: repo.appendingPathComponent("Sources/Parser.swift"), encoding: .utf8)) ?? ""
         check("repo: revert restores a tracked file from HEAD", err == nil && restored == parserV1 && !ChangeScanner.uncommitted(info).contains { $0.path == "Sources/Parser.swift" }, err ?? "")
+    }
+
+    /// A parent folder holding three repositories (one with uncommitted work, one with work
+    /// committed on a branch, one clean) and a worktree. Git writes here only touch these
+    /// synthetic repositories in the self-test folder.
+    static func reviewNestedRepositories(_ dir: URL) {
+        // The fixtures live inside hantuu's own checkout. Stop git at the test folder so a
+        // synthetic parent without .git can't resolve to the real repository.
+        let oldCeiling = ProcessInfo.processInfo.environment["GIT_CEILING_DIRECTORIES"]
+        setenv("GIT_CEILING_DIRECTORIES", dir.resolvingSymlinksInPath().path, 1)
+        defer {
+            if let oldCeiling { setenv("GIT_CEILING_DIRECTORIES", oldCeiling, 1) } else { unsetenv("GIT_CEILING_DIRECTORIES") }
+        }
+        let parent = dir.appendingPathComponent("nested-projects")
+        Paths.ensure(parent)
+        func makeRepo(_ path: String) -> URL {
+            let repo = parent.appendingPathComponent(path)
+            Paths.ensure(repo)
+            fixtureGit(["init", "-q"], repo)
+            write(repo, "source.txt", "first line\n")
+            fixtureGit(["add", "-A"], repo)
+            fixtureGit(["commit", "-q", "-m", "Add the first line."], repo)
+            return repo
+        }
+        let clean = makeRepo("alpha-clean")
+        let second = makeRepo("Studio/second")
+        let primary = makeRepo("Studio/primary/app.nosync")
+        let linked = parent.appendingPathComponent("linked-worktree")
+        let added = fixtureGit(["worktree", "add", "-q", "-b", "review-copy", linked.path], primary)
+        check("nested: the synthetic worktree was created", added.ok, added.err)
+        write(primary, "source.txt", "first line\nprimary change\n")
+        // Second's work is all committed, on a branch.
+        fixtureGit(["checkout", "-q", "-b", "notes"], second)
+        write(second, "source.txt", "first line\nsecond change\n")
+        fixtureGit(["commit", "-q", "-am", "Add the second line."], second)
+        for skipped in RepositoryDiscovery.skipped.union([".hidden"]) {
+            _ = makeRepo("\(skipped)/ignored")
+        }
+        _ = makeRepo("one/two/three/four/too-deep")
+        _ = makeRepo("Studio/primary/app.nosync/nested-repo")
+        // Keep the embedded repository out of primary's own changes, so each repo has one file.
+        write(primary, ".git/info/exclude", "nested-repo/\n.claude/\n")
+        let indexBefore = try? Data(contentsOf: primary.appendingPathComponent(".git/index"))
+        let result = RepositoryDiscovery.discover(folder: parent.path)
+        check("nested: discovers three repositories and groups the linked worktree", result.repositories.count == 3,
+              "\(result.repositories.map(\.relativePath))")
+        check("nested: skips dependencies, hidden folders, deep repositories and repositories inside a repository",
+              Set(result.repositories.map(\.relativePath)) == ["alpha-clean", "Studio/second", "Studio/primary/app.nosync"])
+        check("nested: a linked worktree counts under its main repository",
+              result.repositories.first { $0.root == primary.path }?.worktreeCount == 1)
+        check("nested: a worktree's own folder, with a .git file, is a repository on its own",
+              RepoInfo.load(folder: linked.path)?.isLinkedWorktree == true)
+        let depthParent = dir.appendingPathComponent("nested-depth-limit")
+        let atLimit = depthParent.appendingPathComponent("one/two/three/four")
+        let pastLimit = depthParent.appendingPathComponent("one/two/three/other/five")
+        Paths.ensure(atLimit)
+        Paths.ensure(pastLimit)
+        fixtureGit(["init", "-q"], atLimit)
+        fixtureGit(["init", "-q"], pastLimit)
+        check("nested: includes repositories four folders down and not five",
+              RepositoryDiscovery.discover(folder: depthParent.path).repositories.map(\.root) == [atLimit.path])
+        let empty = dir.appendingPathComponent("nested-empty")
+        Paths.ensure(empty)
+        check("nested: an empty folder has no repositories", RepositoryDiscovery.discover(folder: empty.path).repositories.isEmpty)
+        let hidden = primary.appendingPathComponent(".claude/worktrees/review-copy")
+        Paths.ensure(hidden.deletingLastPathComponent())
+        let moved = fixtureGit(["worktree", "move", linked.path, hidden.path], primary)
+        let hiddenResult = RepositoryDiscovery.discover(folder: parent.path)
+        check("nested: worktrees in hidden folders are counted without walking hidden folders",
+              moved.ok && hiddenResult.repositories.first { $0.root == primary.path }?.worktreeCount == 1)
+        let cache = RepositoryDiscoveryCache()
+        _ = cache.result(folder: parent.path)
+        let extra = makeRepo("new-repository")
+        check("nested: discovery is cached per working folder", cache.result(folder: parent.path).repositories.count == 3)
+        cache.invalidate(parent.path)
+        check("nested: invalidating finds a newly added repository", cache.result(folder: parent.path).repositories.count == 4)
+        try? FileManager.default.removeItem(at: extra)
+        check("nested: discovery leaves the repository's index untouched", indexBefore == (try? Data(contentsOf: primary.appendingPathComponent(".git/index"))))
+
+        let model = AppModel()
+        let project = model.addProject(path: parent.path)
+        let chat = Chat(projectID: project.id, agentID: "claude")
+        model.chats = [chat]
+        model.selectedChatID = chat.id
+        let center = ReviewCenter()
+        center.fixtureMode = true
+        center.configure(model: model)
+        center.setActiveTab(.changes)
+        defer {
+            // Let queued git work finish while the ceiling still holds.
+            center.setActiveTab(nil)
+            var drained = false
+            center.refreshGit { drained = true }
+            _ = waitUntil(10) { drained }
+        }
+        check("nested: the chat's Changes loads every repository", waitUntil(15) { center.changesLoaded && center.repositories.count == 3 },
+              "loaded=\(center.changesLoaded) repo=\(center.repo?.root ?? "none") repos=\(center.repositories.map(\.repository.relativePath))")
+        check("nested: repositories with changes sort before the clean one",
+              center.repositories.last?.repository.root == clean.path && center.repositories.prefix(2).allSatisfy(\.hasChanges))
+        check("nested: repositories with changes start open and the clean one stays folded",
+              center.expandedRepositories == Set([primary.path, second.path]) && !center.showCleanRepositories)
+        check("nested: Files dots use paths relative to the chat's folder",
+              center.changedInFolder == ["Studio/primary/app.nosync/source.txt": "M"], "\(center.changedInFolder)")
+        check("nested: Overview counts the same repositories", center.overviewSummary?.files == 2 && center.hasRepositories)
+        guard let first = center.repositoryCenters[primary.path], let other = center.repositoryCenters[second.path] else {
+            check("nested: each repository has its own diff", false)
+            return
+        }
+        check("nested: a repository with only committed work opens on Branch, the others on Uncommitted",
+              first.base == .uncommitted && other.base == .branch && other.changes.map(\.path) == ["source.txt"])
+        check("nested: the first open repository's selected file shows its diff below the list",
+              center.focusedRepository == primary.path && first.activeTab == .changes && other.activeTab == nil && first.showsSelection && !other.showsSelection)
+        other.select("source.txt")
+        check("nested: picking a file in another repository moves the diff to it",
+              center.focusedRepository == second.path && other.activeTab == .changes && first.activeTab == nil && !first.showsSelection)
+        first.select("source.txt")
+        other.base = .uncommitted
+        check("nested: each repository keeps its own comparison", other.changes.isEmpty && first.base == .uncommitted && first.changes.count == 1)
+        other.base = .branch
+        first.select("source.txt")
+        first.addComment(path: "source.txt", side: "new", start: 2, end: 2, quoted: ["primary change"], body: "Keep this change.")
+        other.addComment(path: "source.txt", side: "new", start: 2, end: 2, quoted: ["second change"], body: "Explain this change.")
+        let message = CommentMessage.build(center.currentComments, folder: parent.path)
+        check("nested: comments name each file by its path from the chat's folder",
+              center.currentComments.count == 2 && message.contains("Studio/primary/app.nosync/source.txt:2") && message.contains("Studio/second/source.txt:2"), message)
+        center.clearComments()
+        check("nested: clearing comments clears every repository's", first.currentComments.isEmpty && other.currentComments.isEmpty)
+
+        // The panel's own bar on top, as in the app. A plain container, as in the panel test,
+        // so the diff pages' snapshots land where they are on screen.
+        let host = NSHostingView(rootView: VStack(spacing: 0) {
+            ChangesBar().frame(height: 31).padding(.horizontal, 8)
+            Rectangle().fill(Color.hDivider).frame(height: 1)
+            ChangesView()
+        }.background(Color.hChrome).environmentObject(model).environmentObject(center))
+        let frame = NSRect(x: 0, y: 0, width: 560, height: 860)
+        let container = NSView(frame: frame)
+        host.frame = frame
+        host.autoresizingMask = [.width, .height]
+        container.addSubview(host)
+        let window = NSWindow(contentRect: frame, styleMask: [.borderless], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.setFrameOrigin(NSPoint(x: -4000, y: -4000))
+        window.contentView = container
+        window.orderFrontRegardless()
+        defer { window.orderOut(nil) }
+        let shots = snapshotDir(dir)
+        for (name, appearance) in [("dark", NSAppearance.Name.darkAqua), ("light", .aqua)] {
+            window.appearance = NSAppearance(named: appearance)
+            _ = waitUntil(8) { first.diffPage.page.ready }
+            RunLoop.main.run(until: Date().addingTimeInterval(0.6))
+            check("snapshot: nested repositories in \(name) mode", render(container, to: shots.appendingPathComponent("nested-repositories-\(name).png")))
+        }
+        window.appearance = NSAppearance(named: .darkAqua)
+        center.toggleRepository(primary.path)
+        center.showCleanRepositories = true
+        check("nested: closing the section whose diff shows moves the diff to the next open one", center.focusedRepository == second.path && other.activeTab == .changes)
+        _ = waitUntil(8) { other.diffPage.page.ready }
+        RunLoop.main.run(until: Date().addingTimeInterval(0.6))
+        check("snapshot: nested repositories with one folded and the clean one listed",
+              render(container, to: shots.appendingPathComponent("nested-repositories-folded.png")))
+        center.toggleRepository(primary.path)
+        center.showCleanRepositories = false
+        write(second, "another.txt", "new change\n")
+        check("nested: the folder watcher picks up a new file in a repository", waitUntil(8) { center.changedInFolder["Studio/second/another.txt"] == "?" })
+        let addedLater = makeRepo("added-on-refresh")
+        center.refreshNow()
+        check("nested: Refresh finds a repository added since the last look", waitUntil(10) { center.repositories.contains { $0.id == addedLater.path } })
+        try? FileManager.default.removeItem(at: addedLater)
+        center.refreshNow()
+        check("nested: a repository that's gone loses its section", waitUntil(10) { !center.repositories.contains { $0.id == addedLater.path } && center.repositoryCenters[addedLater.path] == nil })
+
+        weak var closedPage: WebPage?
+        do {
+            let page = DiffPage()
+            closedPage = page.page
+            page.close()
+        }
+        check("nested: a closed section's diff page lets its web view go", waitUntil(3) { closedPage == nil })
+
+        let soloModel = AppModel()
+        soloModel.addProject(path: primary.path)
+        let solo = ReviewCenter()
+        solo.fixtureMode = true
+        solo.configure(model: soloModel)
+        solo.setActiveTab(.changes)
+        check("nested: a folder that is a repository keeps the single-repository Changes",
+              waitUntil(10) { solo.changesLoaded } && solo.repo?.root == primary.path && solo.repositories.isEmpty && solo.changes.map(\.path) == ["source.txt"])
+        solo.setActiveTab(nil)
     }
 
     static func reviewWatcher(_ dir: URL) {
