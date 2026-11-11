@@ -36,8 +36,13 @@ enum PDFThumbnails {
     }
 
     private static func size(_ page: PDFPage) -> CGSize? {
-        var box = page.bounds(for: .cropBox).size
-        if page.rotation % 180 != 0 { box = CGSize(width: box.height, height: box.width) }
+        guard let ref = page.pageRef else { return nil }
+        // Match getDrawingTransform's effective box, including PDFs whose crop box
+        // extends beyond their media box. Otherwise the bitmap can contain white bands.
+        let bounds = ref.getBoxRect(.cropBox).intersection(ref.getBoxRect(.mediaBox))
+        guard !bounds.isNull, !bounds.isEmpty else { return nil }
+        var box = bounds.size
+        if ref.rotationAngle % 180 != 0 { box = CGSize(width: box.height, height: box.width) }
         guard box.width.isFinite, box.height.isFinite, box.width > 0, box.height > 0 else { return nil }
         return box
     }
@@ -81,8 +86,12 @@ enum PDFThumbnails {
             ctx.setFillColor(CGColor(gray: 1, alpha: 1))
             ctx.fill(rect)
             ctx.interpolationQuality = .high
-            // Core Graphics handles crop-box offsets and page rotation in this transform.
-            ctx.concatenate(ref.getDrawingTransform(.cropBox, rect: rect, rotate: 0, preserveAspectRatio: true))
+            // getDrawingTransform only scales pages down. Scale the bitmap explicitly,
+            // then ask it to handle crop offsets and rotation at the page's own size.
+            // Passing the pixel rectangle directly leaves small pages centered in white.
+            ctx.scaleBy(x: CGFloat(w) / box.width, y: CGFloat(h) / box.height)
+            let pageRect = CGRect(origin: .zero, size: box)
+            ctx.concatenate(ref.getDrawingTransform(.cropBox, rect: pageRect, rotate: 0, preserveAspectRatio: true))
             ctx.drawPDFPage(ref)
             guard let cg = ctx.makeImage(), let png = NSBitmapImageRep(cgImage: cg).representation(using: .png, properties: [:]) else { return nil }
             cache.setObject(png as NSData, forKey: cacheKey, cost: w * h * 4)

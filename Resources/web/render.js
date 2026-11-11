@@ -266,10 +266,39 @@
     if (slots[0]) sharpenPDFPage(fig, slots[0]);
   }
 
-  function preparePDF(fig) {
+  // Compact cards keep only page one. Metadata is cheap to retain without page nodes
+  // or observers, and gives expansion its final layout before any sharper pixels arrive.
+  function prefetchPDFInfo(fig) {
     if (!fig.dataset.mediaID) {
       fig.dataset.mediaID = 'pdf-' + (++mediaSequence);
-      const state = { fig, width: 0, pending: new Map(), visible: new Set(), requested: false };
+      pdfFigures.set(fig.dataset.mediaID, {
+        fig, width: 0, pending: new Map(), visible: new Set(), requested: false,
+        pages: null, pagesBuilt: false, intersections: null, resize: null
+      });
+    }
+    const state = pdfFigures.get(fig.dataset.mediaID);
+    if (!state.requested) {
+      state.requested = true;
+      post({ type: 'pdfInfo', id: fig.dataset.mediaID, path: fig.dataset.path });
+    }
+    return state;
+  }
+
+  function buildPDFPages(state) {
+    if (state.pagesBuilt || !state.pages || !state.fig.classList.contains('expanded')) return;
+    const body = state.fig.querySelector('.mbody');
+    state.pages.forEach((size, index) => {
+      if (!index) body.firstElementChild.style.setProperty('--page-ratio', size.width + ' / ' + size.height);
+      else body.appendChild(pdfPage(state.fig, index + 1, size));
+    });
+    state.pagesBuilt = true;
+  }
+
+  function preparePDF(fig) {
+    const state = prefetchPDFInfo(fig);
+    if (!fig.classList.contains('expanded')) return;
+    buildPDFPages(state);
+    if (!state.intersections) {
       state.intersections = new IntersectionObserver((entries) => {
         for (const entry of entries) {
           if (entry.isIntersecting) {
@@ -279,16 +308,10 @@
         }
       }, { rootMargin: '300px 0px' });
       state.resize = new ResizeObserver(() => updatePDFWidth(fig));
-      state.resize.observe(fig.querySelector('.mbody'));
-      pdfFigures.set(fig.dataset.mediaID, state);
     }
-    const state = pdfFigures.get(fig.dataset.mediaID);
+    state.resize.observe(fig.querySelector('.mbody'));
     updatePDFWidth(fig);
     observePDFPages(fig);
-    if (!state.requested) {
-      state.requested = true;
-      post({ type: 'pdfInfo', id: fig.dataset.mediaID, path: fig.dataset.path });
-    }
   }
 
   // Metadata comes through Swift's bridge rather than a cross-origin custom-scheme fetch.
@@ -296,24 +319,24 @@
     const state = pdfFigures.get(payload.id);
     if (!state || !state.fig.isConnected || state.fig.dataset.path !== payload.path) return;
     const fig = state.fig;
-    if (!Array.isArray(payload.pages) || !payload.pages.length) {
+    if (!Array.isArray(payload.pages) || !payload.pages.length
+        || !payload.pages.every(size => size && Number.isFinite(size.width) && size.width > 0
+          && Number.isFinite(size.height) && size.height > 0)) {
       state.requested = false;
       return;
     }
-    const body = fig.querySelector('.mbody');
-    payload.pages.forEach((size, index) => {
-      if (!(size.width > 0 && size.height > 0)) return;
-      if (!index) body.firstElementChild.style.setProperty('--page-ratio', size.width + ' / ' + size.height);
-      else body.appendChild(pdfPage(fig, index + 1, size));
-    });
+    state.pages = payload.pages;
+    const first = state.pages[0];
+    fig.querySelector('.pdf-page').style.setProperty('--page-ratio', first.width + ' / ' + first.height);
     fig.dataset.pageCount = payload.pages.length;
+    buildPDFPages(state);
     observePDFPages(fig);
   }
 
   function disposeMedia() {
     for (const state of pdfFigures.values()) {
-      state.resize.disconnect();
-      state.intersections.disconnect();
+      state.resize?.disconnect();
+      state.intersections?.disconnect();
       for (const image of state.pending.values()) {
         image.onload = image.onerror = null;
         image.removeAttribute('src');
@@ -361,6 +384,9 @@
       cap.appendChild(b);
       fig.appendChild(cap);
     }
+    // Read the exact page shapes while the card is compact. This does not request any
+    // additional page pixels, and avoids changing a rounded thumbnail ratio on expansion.
+    if (kind === 'pdf') prefetchPDFInfo(fig);
     return fig;
   }
 
@@ -395,7 +421,8 @@
       else {
         const state = pdfFigures.get(fig.dataset.mediaID);
         if (state) {
-          state.intersections.disconnect();
+          state.intersections?.disconnect();
+          state.resize?.disconnect();
           state.visible.clear();
         }
       }
