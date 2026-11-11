@@ -27,6 +27,9 @@ struct ReaderEntry: Codable, Equatable {
     var links: [DetectedPath] = []
 }
 
+/// Only a subagent's own file includes sidechain lines and successful tool results.
+enum TranscriptScope: Equatable { case chat, subagent }
+
 protocol TranscriptParser {
     /// Parse one JSONL line. May return several entries or none (noise is hidden).
     mutating func parse(line: Data) -> [ReaderEntry]
@@ -38,6 +41,8 @@ protocol TranscriptParser {
 /// Each line is an object with a `type`: user, assistant, system, attachment, plus
 /// bookkeeping lines (summary, custom-title, file-history-snapshot, ...) that are hidden.
 struct ClaudeTranscriptParser: TranscriptParser {
+    private let scope: TranscriptScope
+    init(scope: TranscriptScope = .chat) { self.scope = scope }
     private var lineNo = 0
     private var toolNames: [String: String] = [:]   // tool_use id -> name
 
@@ -52,7 +57,7 @@ struct ClaudeTranscriptParser: TranscriptParser {
               let type = obj["type"] as? String else { return [] }
         let uuid = (obj["uuid"] as? String) ?? "c\(lineNo)"
         let time = obj["timestamp"] as? String
-        if obj["isSidechain"] as? Bool == true { return [] }
+        if scope == .chat, obj["isSidechain"] as? Bool == true { return [] }
 
         switch type {
         case "user":
@@ -157,6 +162,9 @@ struct ClaudeTranscriptParser: TranscriptParser {
                 let first = text.split(whereSeparator: \.isNewline).prefix(6).joined(separator: "\n")
                 out.append(ReaderEntry(id: id, kind: .error, text: "\(name) failed", detail: String(first.prefix(800)), tool: name, time: time))
             }
+        }
+        if scope == .subagent, item["is_error"] as? Bool != true, !text.isEmpty {
+            out.append(ReaderEntry(id: id, kind: .tool, text: "\(name) result", detail: String(text.prefix(12_000)), tool: name, time: time))
         }
         if !images.isEmpty {
             out.append(ReaderEntry(id: id + "-img", kind: .tool, text: "\(name) returned an image", tool: name, images: images, time: time))
@@ -302,6 +310,8 @@ struct ClaudeTranscriptParser: TranscriptParser {
 /// {timestamp, type, payload}. `response_item` carries the conversation (message, reasoning,
 /// function_call, custom_tool_call, ...); `event_msg` duplicates some of it and adds errors.
 struct CodexTranscriptParser: TranscriptParser {
+    private let scope: TranscriptScope
+    init(scope: TranscriptScope = .chat) { self.scope = scope }
     private var lineNo = 0
 
     mutating func parse(line: Data) -> [ReaderEntry] {
@@ -345,6 +355,12 @@ struct CodexTranscriptParser: TranscriptParser {
             if let d = rawInput.data(using: .utf8), let o = (try? JSONSerialization.jsonObject(with: d)) as? [String: Any] { args = o }
             if let action = p["action"] as? [String: Any] { args = action }
             return [Self.toolEntry(name: name, args: args, raw: rawInput, id: id, time: time)]
+
+        case ("response_item", "function_call_output"), ("response_item", "custom_tool_call_output"):
+            guard scope == .subagent else { return [] }
+            let output = CodexWorkParser.outputText(p["output"])
+            guard !output.isEmpty else { return [] }
+            return [ReaderEntry(id: id, kind: .tool, text: "Tool result", detail: String(output.prefix(12_000)), time: time)]
 
         case ("response_item", "web_search_call"):
             let q = ((p["action"] as? [String: Any])?["query"] as? String).map { " for “\($0)”" } ?? ""
@@ -518,6 +534,10 @@ final class TranscriptFollower {
     private var timer: Timer?
     private let baseDir: String?
     private let kind: TranscriptKind
+    private let scope: TranscriptScope
+    private var initialRead = true
+    private var skipToNewline = false
+    static let subagentTailBytes: UInt64 = 2 << 20
     private let queue = DispatchQueue(label: "hantuu.transcript", qos: .userInitiated)
     private var pollPending = false
     private(set) var lastReadDuration: TimeInterval = 0
@@ -525,13 +545,14 @@ final class TranscriptFollower {
     var onAppend: (([ReaderEntry]) -> Void)?
     var onReset: (() -> Void)?
 
-    init(url: URL, kind: TranscriptKind, baseDir: String?) {
+    init(url: URL, kind: TranscriptKind, baseDir: String?, scope: TranscriptScope = .chat) {
         self.url = url
         self.baseDir = baseDir
         self.kind = kind
+        self.scope = scope
         switch kind {
-        case .claude: parser = ClaudeTranscriptParser()
-        case .codex: parser = CodexTranscriptParser()
+        case .claude: parser = ClaudeTranscriptParser(scope: scope)
+        case .codex: parser = CodexTranscriptParser(scope: scope)
         }
     }
 
@@ -590,6 +611,27 @@ final class TranscriptFollower {
         onAppend?(batch.entries)
     }
 
+    private func initialPrompt() -> ReaderEntry? {
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
+        defer { try? handle.close() }
+        let data = (try? handle.read(upToCount: 512 * 1024)) ?? Data()
+        var head: TranscriptParser
+        switch kind {
+        case .claude: head = ClaudeTranscriptParser(scope: scope)
+        case .codex: head = CodexTranscriptParser(scope: scope)
+        }
+        var start = data.startIndex
+        while let newline = data[start...].firstIndex(of: 0x0A) {
+            let entries = head.parse(line: Data(data[start..<newline]))
+            if var prompt = entries.first(where: { $0.kind == .user }) {
+                prompt.id = "head-prompt-" + prompt.id
+                return prompt
+            }
+            start = data.index(after: newline)
+        }
+        return nil
+    }
+
     /// The parser and file cursor belong to queue, including the first full read.
     private func read() -> Batch {
         var batch = Batch()
@@ -600,17 +642,36 @@ final class TranscriptFollower {
             offset = 0
             partial = Data()
             batch.reset = true
+            initialRead = true
+            skipToNewline = false
             switch kind {
-            case .claude: parser = ClaudeTranscriptParser()
-            case .codex: parser = CodexTranscriptParser()
+            case .claude: parser = ClaudeTranscriptParser(scope: scope)
+            case .codex: parser = CodexTranscriptParser(scope: scope)
+            }
+        }
+        if initialRead {
+            initialRead = false
+            if scope == .subagent, size > Self.subagentTailBytes {
+                offset = size - Self.subagentTailBytes
+                skipToNewline = true
+                // Keep the original task when it fits in a small head read.
+                if let prompt = initialPrompt() { batch.entries.append(prompt) }
+                batch.entries.append(ReaderEntry(id: "tail-notice", kind: .notice, text: "Showing the latest part of this subagent's conversation."))
             }
         }
         guard size > offset, let h = try? FileHandle(forReadingFrom: url) else { return batch }
         defer { try? h.close() }
         do { try h.seek(toOffset: offset) } catch { return batch }
-        let data = (try? h.readToEnd()) ?? Data()
+        let data: Data
+        if scope == .subagent { data = (try? h.read(upToCount: 4 << 20)) ?? Data() }
+        else { data = (try? h.readToEnd()) ?? Data() }
         offset += UInt64(data.count)
-        let buf = partial.isEmpty ? data : partial + data
+        var buf = partial.isEmpty ? data : partial + data
+        if skipToNewline {
+            guard let nl = buf.firstIndex(of: 0x0A) else { partial = Data(); return batch }
+            buf = Data(buf[buf.index(after: nl)...])
+            skipToNewline = false
+        }
         var fresh: [ReaderEntry] = []
         var start = buf.startIndex
         while let nl = buf[start...].firstIndex(of: 0x0A) {
@@ -629,7 +690,7 @@ final class TranscriptFollower {
                 }
             }
         }
-        batch.entries = fresh
+        batch.entries += fresh
         return batch
     }
 }

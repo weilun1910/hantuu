@@ -14,17 +14,19 @@ final class ReaderController {
     let page: WebPage
     private let model: AppModel
     private var shownChatID: UUID?
+    private var externalPayload: ReaderPayload?
     private var bag = Set<AnyCancellable>()
     /// Esc shrinks an opened-out image or PDF (FileViewer/ReaderMedia.swift).
     let mediaKeys: ReaderMediaKeys
 
     /// Reader mode makes a second one for the main area, with `layout=main` in the page URL.
-    init(model: AppModel, page: String = "reader.html", identifier: String = "hantuu.reader", focusless: Bool = false) {
+    init(model: AppModel, page: String = "reader.html", identifier: String = "hantuu.reader", focusless: Bool = false, observesSelection: Bool = true) {
         self.page = WebPage(page: page, identifier: identifier, focusless: focusless)
         self.model = model
         mediaKeys = ReaderMediaKeys(page: self.page)
         self.page.onReady = { [weak self] in self?.reload() }
         self.page.onMessage = { [weak self] msg in self?.handle(msg) }
+        guard observesSelection else { return }
         model.$selectedChatID
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in self?.reload() }
@@ -42,7 +44,21 @@ final class ReaderController {
 
     var view: NSView { page.webView }
 
+    func showTranscript(id: String, entries: [ReaderEntry], base: String?, emptyText: String) {
+        externalPayload = ReaderPayload(chatID: id, entries: entries, emptyText: emptyText, base: base)
+        reload()
+    }
+
+    func appendTranscript(_ entries: [ReaderEntry]) {
+        guard var payload = externalPayload else { return }
+        payload.entries += entries
+        externalPayload = payload
+        payload.entries = entries
+        page.call("append", payload)
+    }
+
     func reload() {
+        if let externalPayload { page.call("reset", externalPayload); return }
         let chat = model.selectedChat
         shownChatID = chat?.id
         page.call("reset", ReaderPayload(chatID: chat?.id.uuidString, entries: chat?.allEntries ?? [], emptyText: Self.emptyText(for: chat),

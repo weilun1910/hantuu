@@ -95,7 +95,7 @@ struct ProjectSection: View {
             if project.expanded {
                 let chats = model.unpinnedChats(in: project)
                 ForEach(chats) { chat in
-                    ChatRow(chat: chat, index: model.globalIndex(of: chat))
+                    ChatBranch(chat: chat)
                 }
                 // A project whose only chats are pinned shows nothing here rather than "No chats".
                 if model.chats(in: project).isEmpty {
@@ -152,7 +152,66 @@ struct PinnedSection: View {
 
             if model.pinnedExpanded {
                 ForEach(model.pinnedChats) { chat in
-                    ChatRow(chat: chat, index: model.globalIndex(of: chat), showProject: true)
+                    ChatBranch(chat: chat, showProject: true)
+                }
+            }
+        }
+    }
+}
+
+/// Both project and pinned sections use the same subagent tree.
+struct ChatBranch: View {
+    @EnvironmentObject var model: AppModel
+    @ObservedObject var chat: Chat
+    var showProject = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 1) {
+            ChatRow(chat: chat, index: model.globalIndex(of: chat), showProject: showProject)
+            if model.subagentBrowser.expanded.contains(chat.id) {
+                ForEach(model.subagentBrowser.rows(for: chat.id)) { row in
+                    SubagentRow(chatID: chat.id, agent: row.agent, depth: row.depth)
+                }
+            }
+        }
+    }
+}
+
+struct SubagentRow: View {
+    @EnvironmentObject var model: AppModel
+    let chatID: UUID
+    let agent: SidebarSubagent
+    let depth: Int
+    @State private var hovering = false
+
+    var selected: Bool {
+        model.subagentBrowser.selection?.chatID == chatID && model.subagentBrowser.selection?.agent.id == agent.id
+    }
+
+    var body: some View {
+        Button { model.selectSubagent(agent.id, in: chatID) } label: {
+            HStack(spacing: 9) {
+                ActivityDot(activity: agent.activity).frame(width: 12)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(agent.title).font(.system(size: 12)).foregroundStyle(Color.hText).lineLimit(1)
+                    Text(agent.detail).font(.system(size: 11)).foregroundStyle(Color.hTertiary).lineLimit(1)
+                }
+                Spacer(minLength: 0)
+            }
+            // A direct child's dot occupies its parent's title column.
+            .padding(.leading, CGFloat(31 + depth * 21))
+            .padding(.trailing, 8)
+            .padding(.vertical, 4)
+            .contentShape(Rectangle())
+            .background(RoundedRectangle(cornerRadius: 6).fill(selected ? Color.hSelection : (hovering ? Color.hHover : .clear)))
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering = $0 }
+        .help(agent.title + "\n" + agent.detail)
+        .contextMenu {
+            if let path = agent.transcript {
+                Button("Reveal Transcript in Finder") {
+                    NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)])
                 }
             }
         }
@@ -169,7 +228,7 @@ struct ChatRow: View {
     var showProject = false
     @State private var hovering = false
 
-    var selected: Bool { model.selectedChatID == chat.id }
+    var selected: Bool { model.selectedChatID == chat.id && model.subagentBrowser.selection == nil }
 
     var body: some View {
         HStack(spacing: 9) {
@@ -197,7 +256,26 @@ struct ChatRow: View {
                 }
             }
             Spacer(minLength: 0)
-            if let index, index < 9, hovering || selected {
+            let count = model.subagentBrowser.count(for: chat.id)
+            if count > 0 {
+                Button { model.subagentBrowser.toggle(chat.id) } label: {
+                    HStack(spacing: 4) {
+                        Text("\(count)").font(.system(size: 10.5))
+                        Image(systemName: "chevron.right")
+                            .font(.system(size: 9, weight: .semibold))
+                            .rotationEffect(.degrees(model.subagentBrowser.expanded.contains(chat.id) ? 90 : 0))
+                            .frame(width: 12)
+                    }
+                    .foregroundStyle(Color.hTertiary)
+                    .frame(height: 24)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .fixedSize()
+                .help("\(count) open subagents. Show or hide their chats.")
+                .accessibilityLabel("Subagents for \(chat.displayTitle)")
+                .accessibilityValue("\(count), " + (model.subagentBrowser.expanded.contains(chat.id) ? "Expanded" : "Collapsed"))
+            } else if let index, index < 9, hovering || selected {
                 Text("⌘\(index + 1)")
                     .font(.system(size: 10.5))
                     .foregroundStyle(Color.hTertiary)
@@ -208,7 +286,11 @@ struct ChatRow: View {
         .padding(.vertical, 5)
         .background(RoundedRectangle(cornerRadius: 6).fill(selected ? Color.hSelection : (hovering ? Color.hHover : .clear)))
         .contentShape(Rectangle())
-        .onTapGesture { model.select(chat.id) }
+        .onTapGesture {
+            if NSEvent.modifierFlags.contains(.option), model.subagentBrowser.count(for: chat.id) > 0 {
+                model.subagentBrowser.toggle(chat.id)
+            } else { model.select(chat.id) }
+        }
         .onHover { hovering = $0 }
         .contextMenu {
             Button(chat.pinnedAt == nil ? "Pin Chat" : "Unpin Chat") { model.setPinned(chat, chat.pinnedAt == nil) }

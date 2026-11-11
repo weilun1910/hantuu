@@ -65,7 +65,7 @@ final class ReaderModeMenuTarget: NSObject, NSMenuItemValidation {
     @objc func toggleFace(_ sender: Any?) { toggle(model: AppModel.shared) }
 
     func toggle(model: AppModel, mode: ReaderMode = .shared) {
-        guard let chat = model.selectedChat else { return }
+        guard model.subagentBrowser.selection == nil, let chat = model.selectedChat else { return }
         mode.toggle(chat)
         // Whichever face is up now gets the keyboard (the redirect in MainArea picks the
         // message box for the reader).
@@ -73,7 +73,7 @@ final class ReaderModeMenuTarget: NSObject, NSMenuItemValidation {
     }
 
     func validateMenuItem(_ item: NSMenuItem) -> Bool {
-        guard let chat = AppModel.shared.selectedChat else {
+        guard AppModel.shared.subagentBrowser.selection == nil, let chat = AppModel.shared.selectedChat else {
             item.title = "Show as Reader"
             return false
         }

@@ -183,7 +183,12 @@ final class AppModel: ObservableObject, TerminalEvents {
 
     @Published var projects: [Project] = []
     @Published var chats: [Chat] = []
-    @Published var selectedChatID: UUID?
+    @Published var selectedChatID: UUID? {
+        didSet {
+            if let selection = subagentBrowser.selection, selection.chatID != selectedChatID { subagentBrowser.selection = nil }
+        }
+    }
+    @Published var subagentBrowser = SubagentBrowser()
     @Published var selectedProjectID: UUID?
     @Published var agents: [AgentDefinition] = []
     @Published var agentsLoaded = false
@@ -572,6 +577,7 @@ final class AppModel: ObservableObject, TerminalEvents {
     }
 
     func select(_ id: UUID?) {
+        if subagentBrowser.selection != nil { subagentBrowser.selection = nil }
         selectedChatID = id
         if let c = selectedChat {
             selectedProjectID = c.projectID
@@ -628,6 +634,7 @@ final class AppModel: ObservableObject, TerminalEvents {
     }
 
     private func teardown(_ chat: Chat, then: (() -> Void)? = nil) {
+        subagentBrowser.forget(chat.id)
         chat.discoveryTimer?.invalidate()
         chat.follower?.stop()
         chat.terminal?.destroy()
@@ -647,6 +654,7 @@ final class AppModel: ObservableObject, TerminalEvents {
             closeCodeTab(id)
             return
         }
+        if backFromSubagent() { return }
         if let c = selectedChat { closeChat(c) }
     }
 
