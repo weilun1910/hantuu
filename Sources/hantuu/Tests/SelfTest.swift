@@ -57,7 +57,7 @@ enum SelfTest {
     // MARK: Saved state (the sidebar survives updates)
 
     static func savedState(_ dir: URL) {
-        // The shape builds before 2026-11-11 wrote.
+        // The shape builds before 2026-11-11 wrote: no pins, no pinnedExpanded.
         let p1 = UUID(), p2 = UUID(), c1 = UUID(), c2 = UUID()
         let old = """
         {"projects":[{"id":"\(p1)","path":"/tmp/a","expanded":true},{"id":"\(p2)","path":"/tmp/b","expanded":false}],
@@ -69,6 +69,7 @@ enum SelfTest {
         check("state: an older state.json loads every project and chat",
               s?.projects.map(\.id) == [p1, p2] && s?.chats.map(\.id) == [c1, c2] && s?.defaultAgentID == "codex" && s?.panelTab == .changes && s?.projects[1].expanded == false,
               "\(String(describing: s))")
+        check("state: pins start off for older chats", s?.chats.allSatisfy { $0.pinnedAt == nil } == true && s?.pinnedExpanded == nil)
 
         // A later build's extra field, a missing field, a broken chat and an unknown tab.
         let mixed = """
@@ -80,6 +81,15 @@ enum SelfTest {
         let m = SavedState.read(Data(mixed.utf8))
         check("state: a bad chat is skipped, the rest still load", m?.chats.map(\.id) == [c1] && m?.projects.count == 1, "\(String(describing: m?.chats.map(\.id)))")
         check("state: missing and unknown fields fall back to defaults", m?.defaultAgentID == "claude" && m?.panelTab == .overview && m?.sidebarVisible == true)
+
+        // Pins round-trip.
+        var withPin = SavedState()
+        withPin.projects = [Project(id: p1, path: "/tmp/a")]
+        let when = Date(timeIntervalSince1970: 1_800_000_000)
+        withPin.chats = [SavedChat(id: c1, projectID: p1, agentID: "claude", title: "One", createdAt: when, pinnedAt: when)]
+        withPin.pinnedExpanded = false
+        let back = (try? JSONEncoder.hantuu.encode(withPin)).flatMap(SavedState.read)
+        check("state: a pinned chat stays pinned after a save", back?.chats.first?.pinnedAt == when && back?.pinnedExpanded == false)
 
         // A file that isn't readable at all is moved aside, never left to be saved over.
         let sdir = dir.appendingPathComponent("state-test")

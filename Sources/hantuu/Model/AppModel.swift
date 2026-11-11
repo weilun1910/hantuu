@@ -41,6 +41,8 @@ final class Chat: ObservableObject, Identifiable {
     @Published var activityDetail = ""
     @Published var activitySince = Date()
     @Published var lastTurnEndedAt: Date?
+    /// When the chat was pinned to the top of the sidebar. Nil when it isn't pinned.
+    @Published var pinnedAt: Date?
     var startedAt = Date()
     var terminal: TerminalView?
     var follower: TranscriptFollower?
@@ -114,6 +116,7 @@ struct SavedChat: Codable {
     var transcriptPath: String?
     var createdAt: Date
     var worktree: WorktreeInfo?
+    var pinnedAt: Date?
 }
 
 /// What state.json holds: the sidebar, the chats and the window.
@@ -132,6 +135,7 @@ struct SavedState: Codable {
     var windowFrame: String?
     var sidebarWidth: Double?
     var panelWidth: Double?
+    var pinnedExpanded: Bool?
 
     init() {}
 
@@ -147,6 +151,7 @@ struct SavedState: Codable {
         windowFrame = get(.windowFrame)
         sidebarWidth = get(.sidebarWidth)
         panelWidth = get(.panelWidth)
+        pinnedExpanded = get(.pinnedExpanded)
     }
 
     /// Nil only when the data isn't a JSON object at all.
@@ -181,6 +186,7 @@ final class AppModel: ObservableObject, TerminalEvents {
     @Published var shells: [PanelShell] = []
     @Published var selectedShellID: [UUID: UUID] = [:]
     @Published var codeTabs: [CodeTab] = []
+    @Published var pinnedExpanded = true
     @Published var selectedCodeTabID: UUID?
     let keepAwake = KeepAwake()
 
@@ -216,6 +222,28 @@ final class AppModel: ObservableObject, TerminalEvents {
 
     func project(_ id: UUID) -> Project? { projects.first { $0.id == id } }
     func chats(in project: Project) -> [Chat] { chats.filter { $0.projectID == project.id } }
+
+    /// Pinned chats, from any project, in the order they were pinned.
+    var pinnedChats: [Chat] {
+        chats.filter { $0.pinnedAt != nil }.sorted { ($0.pinnedAt ?? .distantPast) < ($1.pinnedAt ?? .distantPast) }
+    }
+    /// A project's chats that aren't pinned. A pinned chat shows in Pinned instead.
+    func unpinnedChats(in project: Project) -> [Chat] { chats.filter { $0.projectID == project.id && $0.pinnedAt == nil } }
+    /// The sidebar top to bottom: Pinned, then each project's other chats. Cmd-1...9 follow it.
+    var sidebarOrder: [Chat] { pinnedChats + projects.flatMap { unpinnedChats(in: $0) } }
+
+    func setPinned(_ chat: Chat, _ pinned: Bool) {
+        guard (chat.pinnedAt != nil) != pinned else { return }
+        objectWillChange.send()
+        chat.pinnedAt = pinned ? Date() : nil
+        if pinned { pinnedExpanded = true }
+        scheduleSave()
+    }
+
+    func togglePinnedExpanded() {
+        pinnedExpanded.toggle()
+        scheduleSave()
+    }
     func shells(in projectID: UUID?) -> [PanelShell] { shells.filter { $0.projectID == projectID } }
 
     // MARK: Startup
@@ -229,6 +257,7 @@ final class AppModel: ObservableObject, TerminalEvents {
             awayChats = s.chats.filter { sc in awayProjects.contains { $0.id == sc.projectID } }
             if !awayProjects.isEmpty { Log.write("state: kept \(awayProjects.count) project(s) whose folder is missing: \(awayProjects.map(\.path))") }
             defaultAgentID = s.defaultAgentID
+            pinnedExpanded = s.pinnedExpanded ?? true
             sidebarVisible = s.sidebarVisible
             panelVisible = s.panelVisible
             panelTab = s.panelTab
@@ -244,6 +273,7 @@ final class AppModel: ObservableObject, TerminalEvents {
                 c.status = .ended
                 c.transcriptPath = sc.transcriptPath
                 c.worktree = sc.worktree
+                c.pinnedAt = sc.pinnedAt
                 if let p = sc.transcriptPath, FileManager.default.fileExists(atPath: p), let kind = c.agent.transcript {
                     attachFollower(c, url: URL(fileURLWithPath: p), kind: kind, live: false)
                 }
@@ -332,9 +362,10 @@ final class AppModel: ObservableObject, TerminalEvents {
         s.chats = chats.map {
             SavedChat(id: $0.id, projectID: $0.projectID, agentID: $0.agentID, sessionID: $0.sessionID,
                       title: $0.terminalTitle, firstPrompt: $0.firstPrompt, transcriptPath: $0.transcriptPath,
-                      createdAt: $0.createdAt, worktree: $0.worktree)
+                      createdAt: $0.createdAt, worktree: $0.worktree, pinnedAt: $0.pinnedAt)
         } + awayChats.filter { sc in away.contains { $0.id == sc.projectID } }
         s.defaultAgentID = defaultAgentID
+        s.pinnedExpanded = pinnedExpanded
         s.sidebarVisible = sidebarVisible
         s.panelVisible = panelVisible
         s.panelTab = panelTab
@@ -531,8 +562,8 @@ final class AppModel: ObservableObject, TerminalEvents {
     }
 
     func selectChat(index: Int) {
-        // Cmd-1...9 follow the sidebar order: projects top to bottom, chats within each.
-        let ordered = projects.flatMap { p in chats.filter { $0.projectID == p.id } }
+        // Cmd-1...9 follow the sidebar order: Pinned, then projects top to bottom.
+        let ordered = sidebarOrder
         guard index >= 0, index < ordered.count else { return }
         select(ordered[index].id)
     }
@@ -551,7 +582,7 @@ final class AppModel: ObservableObject, TerminalEvents {
             a.addButton(withTitle: "Cancel")
             guard a.runModal() == .alertFirstButtonReturn else { return }
         }
-        let ordered = projects.flatMap { p in chats.filter { $0.projectID == p.id } }
+        let ordered = sidebarOrder
         let idx = ordered.firstIndex(where: { $0.id == chat.id })
         if case .deleteWorktree(let force) = choice, let wt = chat.worktree {
             // Once the agent has stopped, so nothing is still writing into the worktree.
@@ -561,7 +592,7 @@ final class AppModel: ObservableObject, TerminalEvents {
         }
         chats.removeAll { $0.id == chat.id }
         if selectedChatID == chat.id {
-            let rest = projects.flatMap { p in chats.filter { $0.projectID == p.id } }
+            let rest = sidebarOrder
             if let idx, !rest.isEmpty { select(rest[min(idx, rest.count - 1)].id) } else { selectedChatID = nil }
         }
         terminalsChanged.send()

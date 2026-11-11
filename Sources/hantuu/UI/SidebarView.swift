@@ -20,6 +20,9 @@ struct SidebarView: View {
 
             ScrollView {
                 VStack(alignment: .leading, spacing: 10) {
+                    if !model.pinnedChats.isEmpty {
+                        PinnedSection()
+                    }
                     ForEach(model.projects) { project in
                         ProjectSection(project: project)
                     }
@@ -90,11 +93,12 @@ struct ProjectSection: View {
             .help(project.path)
 
             if project.expanded {
-                let chats = model.chats(in: project)
+                let chats = model.unpinnedChats(in: project)
                 ForEach(chats) { chat in
                     ChatRow(chat: chat, index: model.globalIndex(of: chat))
                 }
-                if chats.isEmpty {
+                // A project whose only chats are pinned shows nothing here rather than "No chats".
+                if model.chats(in: project).isEmpty {
                     Text("No chats")
                         .font(.system(size: 12))
                         .foregroundStyle(Color.hTertiary)
@@ -124,12 +128,45 @@ struct ProjectSection: View {
     }
 }
 
+/// Chats pinned from any project, above the projects. Right-click a chat to pin or unpin it.
+struct PinnedSection: View {
+    @EnvironmentObject var model: AppModel
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 1) {
+            HStack(spacing: 4) {
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundStyle(Color.hTertiary)
+                    .rotationEffect(.degrees(model.pinnedExpanded ? 90 : 0))
+                    .frame(width: 12)
+                Text("Pinned")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(Color.hSecondary)
+                Spacer(minLength: 4)
+            }
+            .padding(.horizontal, 6)
+            .frame(height: 24)
+            .contentShape(Rectangle())
+            .onTapGesture { withAnimation(.easeOut(duration: 0.15)) { model.togglePinnedExpanded() } }
+
+            if model.pinnedExpanded {
+                ForEach(model.pinnedChats) { chat in
+                    ChatRow(chat: chat, index: model.globalIndex(of: chat), showProject: true)
+                }
+            }
+        }
+    }
+}
+
 struct ChatRow: View {
     @EnvironmentObject var model: AppModel
     @ObservedObject var chat: Chat
     /// So the menu's Show as Reader / Show Terminal follows the chat's face.
     @ObservedObject private var readerMode = ReaderMode.shared
     let index: Int?
+    /// In Pinned, rows come from every project, so the grey line starts with the project.
+    var showProject = false
     @State private var hovering = false
 
     var selected: Bool { model.selectedChatID == chat.id }
@@ -146,6 +183,13 @@ struct ChatRow: View {
                 // What the agent is doing: "Wants to run Bash: npm test", "Done 2m ago".
                 // A worktree chat's branch comes first (Sessions/).
                 HStack(spacing: 6) {
+                    if showProject, let p = model.project(chat.projectID) {
+                        Text(p.name)
+                            .font(.system(size: 11))
+                            .foregroundStyle(Color.hTertiary)
+                            .lineLimit(1)
+                            .layoutPriority(1)
+                    }
                     WorktreeBranchLabel(chat: chat)
                         .font(.system(size: 11))
                         .foregroundStyle(Color.hTertiary)
@@ -167,6 +211,8 @@ struct ChatRow: View {
         .onTapGesture { model.select(chat.id) }
         .onHover { hovering = $0 }
         .contextMenu {
+            Button(chat.pinnedAt == nil ? "Pin Chat" : "Unpin Chat") { model.setPinned(chat, chat.pinnedAt == nil) }
+            Divider()
             if chat.status == .ended {
                 Button(chat.sessionID != nil && chat.agent.resumeArguments(sessionID: "x") != nil ? "Resume" : "Start Again") { model.resume(chat) }
             }
@@ -185,8 +231,7 @@ struct ChatRow: View {
 
 extension AppModel {
     func globalIndex(of chat: Chat) -> Int? {
-        let ordered = projects.flatMap { p in chats.filter { $0.projectID == p.id } }
-        return ordered.firstIndex(where: { $0.id == chat.id })
+        sidebarOrder.firstIndex(where: { $0.id == chat.id })
     }
 }
 
