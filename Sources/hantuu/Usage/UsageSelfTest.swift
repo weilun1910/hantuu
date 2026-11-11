@@ -12,6 +12,7 @@ extension SelfTest {
         Paths.ensure(work)
         usageParsing()
         usageWords()
+        usageHoverTiming()
         usageCodexFiles(work)
         usageClaudeStatusLine(work)
         usageEngine(work)
@@ -130,6 +131,30 @@ extension SelfTest {
         let ring = UsageReading(windows: [UsageWindow(usedPercent: 10, minutes: 1440, resetsAt: nil)], observedAt: now)
         check("usage: other window lengths get a plain name", tip(.codex, ring) == "Codex: 90% of 1-day left")
 
+        func details(_ source: UsageSource, _ reading: UsageReading?, off: Bool = false) -> [String] {
+            UsageFormat.details(source, reading, now: now, off: off, calendar: cal, locale: en)
+        }
+        check("usage: healthy hover card separates the name from weekly and 5-hour lines",
+              details(.claude, two) == ["73% of weekly left, resets Sat 9:13 AM", "5-hour: 40% left, resets in 2h 10m"])
+        let low = UsageReading(windows: [UsageWindow(usedPercent: 88, minutes: 10080, resetsAt: sat),
+                                        UsageWindow(usedPercent: 97, minutes: 300, resetsAt: now.addingTimeInterval(7800))],
+                               observedAt: now)
+        check("usage: low hover card shows both remaining limits",
+              details(.claude, low) == ["12% of weekly left, resets Sat 9:13 AM", "5-hour: 3% left, resets in 2h 10m"])
+        stale.observedAt = now.addingTimeInterval(-4 * 3600)
+        check("usage: stale hover card keeps the numbers and adds their age",
+              details(.codex, stale) == details(.codex, two) + ["As of 4h ago"])
+        check("usage: off hover card explains the status line and where to enable it",
+              details(.claude, nil, off: true) == [ClaudeUsage.offReason]
+              && details(.claude, nil, off: true)[0].contains("Usage Limits"))
+        check("usage: hover card explains missing readings for both providers",
+              details(.claude, nil) == [UsageSource.claude.noReadingReason]
+              && details(.codex, nil) == [UsageSource.codex.noReadingReason])
+        check("usage: turning collection off preserves the last known reading in the card",
+              details(.claude, two, off: true) == details(.claude, two))
+        check("usage: accessibility labels and hover card use the same words",
+              tip(.claude, two) == UsageSource.claude.displayName + ": " + details(.claude, two).joined(separator: "\n"))
+
         check("usage: colour thresholds",
               UsageLevel.of(leftPercent: 100) == .normal && UsageLevel.of(leftPercent: 15) == .normal
               && UsageLevel.of(leftPercent: 14.9) == .low && UsageLevel.of(leftPercent: 5) == .low
@@ -137,6 +162,59 @@ extension SelfTest {
               && UsageLevel.of(leftPercent: nil) == .unknown)
         check("usage: rings only for agents hantuu can read", UsageSource(agentID: "claude") == .claude && UsageSource(agentID: "codex") == .codex
               && UsageSource(agentID: "gemini") == nil && UsageSource.claude.glyph != UsageSource.codex.glyph)
+    }
+
+    // MARK: Hover timing
+
+    static func usageHoverTiming() {
+        var hover = UsageHoverState()
+        hover.anchorChanged(true, at: 0)
+        check("usage: hover opens after the same short delay as the new chat menu",
+              hover.pending?.open == true && hover.pending?.deadline == NewChatButton.openDelay
+              && NewChatButton.openDelay == 0.08 && !hover.isOpen)
+        hover.fire(at: 0.079)
+        check("usage: passing over the rings does not flash a card", !hover.isOpen)
+        hover.anchorChanged(false, at: 0.079)
+        hover.fire(at: 1)
+        check("usage: leaving before the open delay cancels it", !hover.isOpen && hover.pending == nil)
+
+        hover.anchorChanged(true, at: 1)
+        hover.fire(at: 1 + NewChatButton.openDelay)
+        check("usage: resting on a ring opens the card", hover.isOpen)
+        hover.anchorChanged(false, at: 2)
+        check("usage: leaving the rings gives the same crossing grace as the new chat menu",
+              hover.pending?.deadline == 2 + NewChatButton.leaveButtonDelay && NewChatButton.leaveButtonDelay == 0.9)
+        hover.fire(at: 2.8)
+        check("usage: the card stays open while crossing the gap", hover.isOpen)
+        hover.cardChanged(true, at: 2.8)
+        hover.fire(at: 4)
+        check("usage: entering the card cancels the pending close", hover.isOpen && hover.pending == nil)
+        // A late exit event from the anchor must not close a card the cursor has reached.
+        hover.anchorChanged(false, at: 4)
+        hover.fire(at: 5)
+        check("usage: the card stays open while hovered even after an anchor exit", hover.isOpen)
+        hover.cardChanged(false, at: 6)
+        check("usage: leaving the card uses the new chat menu's shorter close delay",
+              hover.pending?.deadline == 6 + NewChatButton.leaveMenuDelay && NewChatButton.leaveMenuDelay == 0.35)
+        hover.fire(at: 6.34)
+        check("usage: the card does not close before its grace ends", hover.isOpen)
+        hover.anchorChanged(true, at: 6.34)
+        hover.fire(at: 7)
+        check("usage: returning to either ring cancels the close", hover.isOpen && hover.pending == nil)
+        hover.anchorChanged(false, at: 8)
+        hover.fire(at: 8 + NewChatButton.leaveButtonDelay)
+        check("usage: the card closes once the cursor has left both areas", !hover.isOpen)
+
+        hover.openImmediately()
+        hover.cardChanged(true, at: 9)
+        hover.cardChanged(false, at: 10)
+        hover.fire(at: 10 + NewChatButton.leaveMenuDelay)
+        check("usage: leaving the card alone closes it after the shorter grace", !hover.isOpen)
+        hover.anchorChanged(true, at: 11)
+        hover.dismiss()
+        hover.fire(at: 12)
+        check("usage: dismissal or removal cancels a pending open",
+              !hover.isOpen && hover.pending == nil && !hover.overCard && !hover.overAnchor)
     }
 
     // MARK: Codex rollouts on disk
@@ -432,6 +510,16 @@ extension SelfTest {
         ok = render(footer(), size: footerSize, name: "usage-footer-unknown-dark.png", dark: true) && ok
         ok = render(footer(), size: footerSize, name: "usage-footer-unknown-light.png", dark: false) && ok
 
+        // Render the actual card content without needing a pointer or opening a popover.
+        for (label, set, off) in [("healthy", healthy, false), ("low-stale", low, false),
+                                  ("unknown", unknown, false), ("off", unknown, true)] {
+            let card = UsageHoverCard(sources: UsageSource.allCases, readings: set, now: now, claudeOff: off)
+                .frame(maxHeight: .infinity, alignment: .top)
+                .background(Color(nsColor: .windowBackgroundColor))
+            ok = render(card, size: NSSize(width: 320, height: 300), name: "usage-card-\(label)-dark.png", dark: true) && ok
+            ok = render(card, size: NSSize(width: 320, height: 300), name: "usage-card-\(label)-light.png", dark: false) && ok
+        }
+
         // Up close, every level side by side.
         let levels: [(String, Double?)] = [("Cl", 100), ("Co", 73), ("Cl", 40), ("Co", 12), ("Cl", 3), ("Co", nil)]
         func strip() -> some View {
@@ -447,7 +535,7 @@ extension SelfTest {
         let settingsForm = Form { UsageSettingsSection() }.formStyle(.grouped)
         ok = render(settingsForm, size: NSSize(width: 520, height: 170), name: "usage-settings-dark.png", dark: true) && ok
         ok = render(settingsForm, size: NSSize(width: 520, height: 170), name: "usage-settings-light.png", dark: false) && ok
-        check("snapshot: usage footer (light and dark, healthy, low, unknown, narrow) written to \(out.path)", ok)
+        check("snapshot: usage footer and hover cards (light and dark, healthy, low, stale, unknown, off) written to \(out.path)", ok)
 
         // The footer fits the sidebar's 200 pt minimum. Content that doesn't fit is centred and
         // spills past both edges, so compare where the drawing starts and ends with a wide
