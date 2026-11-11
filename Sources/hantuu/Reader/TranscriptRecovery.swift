@@ -42,6 +42,9 @@ struct TranscriptRecoveryPolicy {
 final class TranscriptRecovery {
     var policy = TranscriptRecoveryPolicy()
     var pending = false
+    var processID: Int32?
+    var lastProcessLookup: Date?
+    let processRollouts = CodexRolloutSelection()
     let events: LineTail
     let queue = DispatchQueue(label: "hantuu.transcript-discovery", qos: .utility)
 
@@ -64,17 +67,13 @@ enum TranscriptLookup {
     /// Looks up the saved identity first, then lets newer hook metadata correct it.
     /// A known ID is never replaced by an unrelated chat in the same working folder.
     static func find(_ request: Request, events: [Data]) -> HookLineParser.Session? {
+        if request.kind == .codex { return findCodex(request, events: events) }
         var id = request.sessionID
         var path = existing(request.path)
-        if request.kind == .codex, let saved = path, let id,
-           CodexTranscriptParser.readMeta(URL(fileURLWithPath: saved))?.id != id {
-            path = nil
-        }
         if path == nil, let id { path = locate(id, request: request)?.path }
         var signalled = false
         for line in events {
-            let next = request.kind == .claude ? HookLineParser.session(line) : codexSession(line)
-            guard let next else { continue }
+            guard let next = HookLineParser.session(line) else { continue }
             let changed = next.id != nil && next.id != id
             if changed { path = nil }
             id = next.id ?? id
@@ -82,14 +81,44 @@ enum TranscriptLookup {
             signalled = true
         }
         if path == nil, let id { path = locate(id, request: request)?.path }
-        if path == nil, id == nil, request.kind == .codex,
-           let found = CodexTranscriptParser.locate(cwd: request.cwd, after: request.startedAt,
-                                                    excluding: request.excluded, root: request.roots.codex) {
-            id = found.1.id
-            path = found.0.path
-        }
         guard path != nil || signalled else { return nil }
         return HookLineParser.Session(id: id, path: path)
+    }
+
+    private static func findCodex(_ request: Request, events: [Data]) -> HookLineParser.Session? {
+        // Keep the attached history when an ID cannot be resolved. Completion notifications
+        // can name a subagent, and a failed lookup is not evidence that the reader is wrong.
+        var result: HookLineParser.Session?
+        if let path = existing(request.path) {
+            let meta = CodexTranscriptParser.readMeta(URL(fileURLWithPath: path))
+            result = HookLineParser.Session(id: meta?.id ?? request.sessionID, path: path)
+        }
+        if let id = request.sessionID, result?.id != id || result == nil,
+           let resolved = validatedCodexSession(.init(id: id, path: nil), root: request.roots.codex) {
+            result = resolved
+        }
+        // Only a fully validated main-agent transcript may replace a working attachment.
+        for line in events.reversed() {
+            guard let next = codexSession(line),
+                  let resolved = validatedCodexSession(next, root: request.roots.codex) else { continue }
+            result = resolved
+            break
+        }
+        if result == nil, request.sessionID == nil,
+           let found = CodexTranscriptParser.locate(cwd: request.cwd, after: request.startedAt,
+                                                    excluding: request.excluded, root: request.roots.codex) {
+            result = HookLineParser.Session(id: found.1.id, path: found.0.path)
+        }
+        return result
+    }
+
+    static func validatedCodexSession(_ session: HookLineParser.Session, root: URL) -> HookLineParser.Session? {
+        if let path = session.path, let meta = CodexTranscriptParser.readMeta(URL(fileURLWithPath: path)),
+           session.id == nil || session.id == meta.id {
+            return HookLineParser.Session(id: meta.id, path: path)
+        }
+        guard let id = session.id, let url = codex(sessionID: id, root: root) else { return nil }
+        return HookLineParser.Session(id: id, path: url.path)
     }
 
     static func codexSession(_ line: Data) -> HookLineParser.Session? {
