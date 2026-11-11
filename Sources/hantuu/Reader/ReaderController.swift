@@ -82,6 +82,16 @@ final class ReaderController {
             ReaderPopout.open(msg, model: model)
         case "mediaExpanded":
             mediaKeys.update(expanded: msg["count"] as? Int ?? 0)
+        case "pdfInfo":
+            guard let id = msg["id"] as? String, let path = msg["path"] as? String else { return }
+            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                let data = PDFThumbnails.info(path: path)
+                let info = data.flatMap { try? JSONSerialization.jsonObject(with: $0) } as? [String: Any]
+                let pages = info?["pages"] as? [[String: Any]] ?? []
+                DispatchQueue.main.async { [weak self] in
+                    self?.page.call("pdfInfo", ["id": id, "path": path, "pages": pages] as [String: Any])
+                }
+            }
         case "copy":
             // Reader mode's copy buttons on messages and code blocks.
             guard let text = msg["text"] as? String, !text.isEmpty else { return }

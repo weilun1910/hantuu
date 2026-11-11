@@ -265,7 +265,7 @@ pre.full {
    open it out to full width, click again to shrink it. */
 .media { display: flex; flex-direction: row; flex-wrap: wrap; align-items: flex-start; gap: 10px; margin: 8px 0 4px; }
 .media figure { margin: 0; position: relative; max-width: 100%; }
-.media .mbody { cursor: zoom-in; }
+.media .mbody { cursor: zoom-in; position: relative; }
 .media figure.expanded { flex: 0 0 100%; }
 .media figure.expanded .mbody { cursor: zoom-out; }
 .media .mbody img {
@@ -277,20 +277,42 @@ pre.full {
 /* An image keeps its shape and is never blown up past its own size. */
 .media img.inline-image, .media img.attached-image { width: auto; height: auto; max-height: 180px; }
 .media figure.expanded img.inline-image, .media figure.expanded img.attached-image { max-height: 520px; }
-/* A PDF: its first page, then the live document when opened out. */
-.media img.pdf-thumb { height: 180px; width: auto; background: #fff; border-radius: 4px; }
-.media figure.pdf.nothumb .mbody { width: 136px; height: 180px; border: 1px solid var(--rule); border-radius: 4px; background: var(--fill); }
-.media figure.pdf.nothumb .mbody::after { content: "PDF"; display: flex; height: 100%; align-items: center; justify-content: center; font-size: 12px; color: var(--tertiary); }
-.media figure.pdf.nothumb img.pdf-thumb { display: none; }
-.media figure.pdf.expanded img.pdf-thumb { display: none; }
-.media figure.pdf.expanded .mbody { cursor: default; }
-.media figure.pdf iframe {
+/* A PDF is a stack of page images. Collapsed figures only show page one. */
+.media .pdf-page { position: relative; max-width: 100%; }
+.media figure.pdf:not(.expanded) .pdf-page:not(:first-child) { display: none; }
+.media img.pdf-thumb { height: auto; width: auto; max-height: 180px; object-fit: contain; background: #fff; border-radius: 4px; }
+.media .pdf-page-label { display: none; }
+.media figure.pdf.nothumb:not(.expanded) .mbody { width: 136px; height: 180px; border: 1px solid var(--rule); border-radius: 4px; background: var(--fill); }
+.media figure.pdf.nothumb:not(.expanded) .mbody::after { content: "PDF"; display: flex; height: 100%; align-items: center; justify-content: center; font-size: 12px; color: var(--tertiary); }
+.media figure.pdf.nothumb:not(.expanded) img.pdf-thumb { display: none; }
+.media figure.pdf.expanded .mbody { width: 100%; padding-top: 34px; }
+.media figure.pdf.expanded .pdf-page {
+  width: 100%;
+  aspect-ratio: var(--page-ratio, 0.773);
+  background: var(--fill);
+  border-radius: 4px;
+  overflow: hidden;
+}
+.media figure.pdf.expanded .pdf-page + .pdf-page { margin-top: 10px; }
+.media figure.pdf.expanded .pdf-page-image {
   display: block;
   width: 100%;
-  height: 560px;
-  border: 1px solid var(--rule);
-  border-radius: 6px;
+  height: 100%;
+  position: absolute;
+  inset: 0;
+  max-height: none;
+  object-fit: contain;
   background: #fff;
+}
+.media figure.pdf.expanded .pdf-page:not(.loaded) img { visibility: hidden; }
+.media figure.pdf.expanded .pdf-page:not(.loaded) .pdf-page-label {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  color: var(--tertiary);
 }
 /* The caption never makes a preview wider than its picture. */
 .media figcaption {
@@ -303,10 +325,24 @@ pre.full {
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.media figcaption a.path { color: var(--tertiary); border-bottom: 0; }
-.media figcaption a.path:hover { color: var(--link); text-decoration: none; }
-.media button.popout {
+.media button.media-caption {
+  display: block;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--tertiary);
+  font: inherit;
+  text-align: left;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: pointer;
+}
+.media button.media-caption:hover { color: var(--link); }
+.media button.popout, .media button.shrink {
   position: absolute;
+  z-index: 1;
   top: 6px;
   right: 6px;
   width: 24px;
@@ -325,9 +361,12 @@ pre.full {
   opacity: 0;
   transition: opacity 0.15s ease;
 }
+.media button.shrink { right: 36px; display: none; }
+.media figure.expanded button.shrink { display: flex; }
+.media figure.expanded button.popout, .media figure.expanded button.shrink { opacity: 1; transition: none; }
 .media figure:hover button.popout, .media button.popout:focus-visible { opacity: 1; }
-.media button.popout:hover { background: var(--popout-hover); }
-.media button.popout svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.3; stroke-linecap: round; stroke-linejoin: round; }
+.media button.popout:hover, .media button.shrink:hover { background: var(--popout-hover); }
+.media button.popout svg, .media button.shrink svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.3; stroke-linecap: round; stroke-linejoin: round; }
 .entry.tool .media { margin-left: 14px; }
 
 /* ---- Code tab: the editor and the previews ---- */

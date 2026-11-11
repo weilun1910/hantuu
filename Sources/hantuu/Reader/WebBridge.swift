@@ -5,9 +5,10 @@ import WebKit
 /// Serves the reader and code viewer without any network access:
 ///   hantuu://app/<file>        bundled pages, CSS, JS libraries, KaTeX fonts
 ///   hantuu://file/<abs path>   local files the chat points at (images, PDFs), read-only
-///   hantuu://thumb/<abs path>  a PDF's first page as a PNG, for the reader's previews
+///   hantuu://thumb/<abs path>  PDF page images, or page sizes with ?info=1
 final class HantuuSchemeHandler: NSObject, WKURLSchemeHandler {
     private var stopped = Set<ObjectIdentifier>()
+    private static let thumbnailQueue = DispatchQueue(label: "local.hantuu.thumbnail-requests", qos: .userInitiated)
 
     func webView(_ webView: WKWebView, start task: WKURLSchemeTask) {
         guard let url = task.request.url, let host = url.host else {
@@ -17,13 +18,17 @@ final class HantuuSchemeHandler: NSObject, WKURLSchemeHandler {
         if host == "thumb" {
             // Drawn off the main thread; the task may be stopped by then.
             let path = url.path.removingPercentEncoding ?? url.path
-            let h = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?.first { $0.name == "h" }?.value.flatMap(Int.init) ?? 400
+            let items = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
+            let h = items.first { $0.name == "h" }?.value.flatMap(Int.init) ?? 400
+            let width = items.first { $0.name == "w" }?.value.flatMap(Int.init)
+            let page = items.first { $0.name == "page" }?.value.flatMap(Int.init) ?? 1
+            let info = items.first { $0.name == "info" }?.value == "1"
             let id = ObjectIdentifier(task)
-            DispatchQueue.global(qos: .userInitiated).async {
-                let png = PDFThumbnails.png(path: path, height: h)
+            Self.thumbnailQueue.async {
+                let data = info ? PDFThumbnails.info(path: path) : PDFThumbnails.png(path: path, page: page, width: width, height: h)
                 DispatchQueue.main.async {
                     guard self.stopped.remove(id) == nil else { return }
-                    self.respond(task, url: url, data: png, mime: "image/png")
+                    self.respond(task, url: url, data: data, mime: info ? "application/json" : "image/png")
                 }
             }
             return

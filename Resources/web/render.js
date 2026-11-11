@@ -153,16 +153,174 @@
     return b;
   }
 
-  // Media in a message: compact previews about 180 pt tall that sit side by side and wrap.
-  // Clicking one opens it out to the reader's width (a PDF becomes the live, scrollable
-  // document), and clicking again, or Esc, shrinks it back. The pop-out button opens the file
-  // as a tab in the Code tab, and the caption opens it the way a file link does.
-  //
-  // A small PDF is a picture of its first page, made by Swift with PDFKit (hantuu://thumb),
-  // so it's crisp, light, and never catches the scroll wheel. The live PDF only loads when
-  // it's opened out.
-  function thumbURL(path) {
-    return 'hantuu://thumb' + path.split('/').map(encodeURIComponent).join('/') + '?h=400';
+  const SHRINK_ICON = '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2.5 2.5l4 4M3 6.5h3.5V3M13.5 13.5l-4-4M13 9.5H9.5V13"/></svg>';
+  function shrinkButton(fig) {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'shrink';
+    b.title = 'Shrink preview (Esc)';
+    b.setAttribute('aria-label', 'Shrink preview');
+    b.innerHTML = SHRINK_ICON;
+    b.addEventListener('mousedown', (e) => e.preventDefault());
+    b.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      toggleMedia(fig, false);
+    });
+    return b;
+  }
+
+  // A PDF uses the same first-page image in both sizes. Additional pages have measured
+  // placeholders and only request pixels when they approach the viewport.
+  function thumbURL(path, page, width) {
+    const base = 'hantuu://thumb' + path.split('/').map(encodeURIComponent).join('/');
+    return base + (width ? '?page=' + page + '&w=' + width : '?h=400');
+  }
+
+  let mediaSequence = 0;
+  const pdfFigures = new Map();
+
+  function pdfPage(fig, number, size, firstImage) {
+    const slot = document.createElement('div');
+    slot.className = 'pdf-page';
+    slot.dataset.page = number;
+    if (size) slot.style.setProperty('--page-ratio', size.width + ' / ' + size.height);
+    const label = document.createElement('span');
+    label.className = 'pdf-page-label';
+    label.textContent = 'Page ' + number;
+    const img = firstImage || document.createElement('img');
+    img.classList.add('pdf-page-image');
+    img.draggable = false;
+    img.alt = (fig.dataset.path || 'PDF').split('/').pop() + ', page ' + number;
+    if (!firstImage) img.loading = 'lazy';
+    img.addEventListener('load', () => {
+      if (!img.naturalWidth) return;
+      if (number === 1) fig.classList.remove('nothumb');
+      slot.classList.add('loaded');
+      if (!slot.style.getPropertyValue('--page-ratio')) {
+        slot.style.setProperty('--page-ratio', img.naturalWidth + ' / ' + img.naturalHeight);
+      }
+    });
+    slot.append(img, label);
+    if (img.complete && img.naturalWidth) {
+      slot.classList.add('loaded');
+      slot.style.setProperty('--page-ratio', img.naturalWidth + ' / ' + img.naturalHeight);
+    }
+    return slot;
+  }
+
+  function sharpenPDFPage(fig, slot) {
+    const state = pdfFigures.get(fig.dataset.mediaID);
+    if (!state || !fig.isConnected || !fig.classList.contains('expanded')) return;
+    const img = slot.querySelector('img');
+    const width = state.width;
+    const loaded = +(img.dataset.renderWidth || 0);
+    if (!width || (loaded && width < loaded * 1.25) || state.pending.has(slot)) return;
+    // Decode offscreen before replacing the visible source, so page one never disappears.
+    const sharp = new Image();
+    sharp.className = img.className;
+    sharp.alt = img.alt;
+    sharp.draggable = false;
+    state.pending.set(slot, sharp);
+    sharp.onload = async () => {
+      try { await sharp.decode(); } catch (_) {
+        state.pending.delete(slot);
+        return;
+      }
+      if (state.pending.get(slot) !== sharp) return;
+      state.pending.delete(slot);
+      if (!fig.isConnected || !sharp.naturalWidth) return;
+      sharp.onload = sharp.onerror = null;
+      sharp.dataset.renderWidth = width;
+      // Insert the decoded element itself. Assigning its URL to another image could issue
+      // another no-store request and clear that image before the replacement arrives.
+      img.replaceWith(sharp);
+      slot.classList.add('loaded');
+      if (slot.dataset.page === '1') fig.classList.remove('nothumb');
+      // The reader might have grown again while this raster was being produced.
+      if (state.visible.has(slot)) sharpenPDFPage(fig, slot);
+    };
+    sharp.onerror = () => {
+      state.pending.delete(slot);
+      slot.querySelector('.pdf-page-label').textContent = 'Page ' + slot.dataset.page + ' unavailable. Open in a tab.';
+    };
+    sharp.src = thumbURL(fig.dataset.path, slot.dataset.page, width);
+  }
+
+  function updatePDFWidth(fig) {
+    const state = pdfFigures.get(fig.dataset.mediaID);
+    if (!state || !fig.classList.contains('expanded')) return;
+    const pixels = fig.querySelector('.mbody').clientWidth * (window.devicePixelRatio || 1);
+    const width = Math.min(3200, Math.max(256, Math.ceil(pixels / 256) * 256));
+    if (state.width && width < state.width * 1.25) return;
+    state.width = width;
+    state.visible.forEach((slot) => sharpenPDFPage(fig, slot));
+  }
+
+  function observePDFPages(fig) {
+    const state = pdfFigures.get(fig.dataset.mediaID);
+    if (!state || !fig.classList.contains('expanded')) return;
+    const slots = fig.querySelectorAll('.pdf-page');
+    slots.forEach((slot) => state.intersections.observe(slot));
+    // Page one already has its compact image. Request the sharper version immediately.
+    if (slots[0]) sharpenPDFPage(fig, slots[0]);
+  }
+
+  function preparePDF(fig) {
+    if (!fig.dataset.mediaID) {
+      fig.dataset.mediaID = 'pdf-' + (++mediaSequence);
+      const state = { fig, width: 0, pending: new Map(), visible: new Set(), requested: false };
+      state.intersections = new IntersectionObserver((entries) => {
+        for (const entry of entries) {
+          if (entry.isIntersecting) {
+            state.visible.add(entry.target);
+            sharpenPDFPage(fig, entry.target);
+          } else state.visible.delete(entry.target);
+        }
+      }, { rootMargin: '300px 0px' });
+      state.resize = new ResizeObserver(() => updatePDFWidth(fig));
+      state.resize.observe(fig.querySelector('.mbody'));
+      pdfFigures.set(fig.dataset.mediaID, state);
+    }
+    const state = pdfFigures.get(fig.dataset.mediaID);
+    updatePDFWidth(fig);
+    observePDFPages(fig);
+    if (!state.requested) {
+      state.requested = true;
+      post({ type: 'pdfInfo', id: fig.dataset.mediaID, path: fig.dataset.path });
+    }
+  }
+
+  // Metadata comes through Swift's bridge rather than a cross-origin custom-scheme fetch.
+  function pdfInfo(payload) {
+    const state = pdfFigures.get(payload.id);
+    if (!state || !state.fig.isConnected || state.fig.dataset.path !== payload.path) return;
+    const fig = state.fig;
+    if (!Array.isArray(payload.pages) || !payload.pages.length) {
+      state.requested = false;
+      return;
+    }
+    const body = fig.querySelector('.mbody');
+    payload.pages.forEach((size, index) => {
+      if (!(size.width > 0 && size.height > 0)) return;
+      if (!index) body.firstElementChild.style.setProperty('--page-ratio', size.width + ' / ' + size.height);
+      else body.appendChild(pdfPage(fig, index + 1, size));
+    });
+    fig.dataset.pageCount = payload.pages.length;
+    observePDFPages(fig);
+  }
+
+  function disposeMedia() {
+    for (const state of pdfFigures.values()) {
+      state.resize.disconnect();
+      state.intersections.disconnect();
+      for (const image of state.pending.values()) {
+        image.onload = image.onerror = null;
+        image.removeAttribute('src');
+      }
+      state.pending.clear();
+    }
+    pdfFigures.clear();
   }
 
   // `attached` marks images that came with the message itself (pasted, or a tool's result)
@@ -188,17 +346,19 @@
       img.src = src;
       if (path) img.dataset.path = path;
     }
-    body.appendChild(img);
+    body.appendChild(kind === 'pdf' ? pdfPage(fig, 1, null, img) : img);
     fig.appendChild(body);
     fig.appendChild(popoutButton(path || src));
+    fig.appendChild(shrinkButton(fig));
     if (path) {
       const cap = document.createElement('figcaption');
-      const a = document.createElement('a');
-      a.className = 'path';
-      a.dataset.path = path;
-      a.textContent = path.split('/').pop();
-      a.title = path;
-      cap.appendChild(a);
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'media-caption';
+      b.textContent = path.split('/').pop();
+      b.title = path;
+      b.setAttribute('aria-expanded', 'false');
+      cap.appendChild(b);
       fig.appendChild(cap);
     }
     return fig;
@@ -217,8 +377,6 @@
     return box.childNodes.length ? box : null;
   }
 
-  const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
-
   function expandedCount() { return document.querySelectorAll('figure.mfig.expanded').length; }
 
   // Opens a preview out to full width, or shrinks it back, keeping the figure where it was
@@ -227,30 +385,23 @@
     const want = open === undefined ? !fig.classList.contains('expanded') : open;
     if (want === fig.classList.contains('expanded')) return;
     const body = fig.querySelector('.mbody');
-    const before = body.getBoundingClientRect();
     const top = fig.getBoundingClientRect().top;
     fig.classList.toggle('expanded', want);
     body.title = want ? 'Click to shrink' : 'Click to enlarge';
+    const caption = fig.querySelector('.media-caption');
+    if (caption) caption.setAttribute('aria-expanded', String(want));
     if (fig.classList.contains('pdf')) {
-      const live = body.querySelector('iframe');
-      if (want && !live) {
-        const frame = document.createElement('iframe');
-        frame.src = fig.dataset.src;
-        frame.title = fig.dataset.path ? fig.dataset.path.split('/').pop() : 'PDF';
-        body.appendChild(frame);
-      } else if (!want && live) {
-        live.remove();
+      if (want) preparePDF(fig);
+      else {
+        const state = pdfFigures.get(fig.dataset.mediaID);
+        if (state) {
+          state.intersections.disconnect();
+          state.visible.clear();
+        }
       }
     }
     const scroller = document.scrollingElement;
     scroller.scrollTop += fig.getBoundingClientRect().top - top;
-    const after = body.getBoundingClientRect();
-    if (!reducedMotion.matches && document.visibilityState === 'visible' && body.animate) {
-      body.animate([
-        { width: before.width + 'px', height: before.height + 'px' },
-        { width: after.width + 'px', height: after.height + 'px' },
-      ], { duration: 150, easing: 'cubic-bezier(0.2, 0, 0, 1)' });
-    }
     post({ type: 'mediaExpanded', count: expandedCount() });
   }
 
@@ -269,6 +420,12 @@
   // One click handler for every link: file paths go to Swift's router, web links to the
   // browser, relative Markdown links are resolved by Swift against the base folder.
   document.addEventListener('click', (e) => {
+    const fig = e.target.closest('figure.mfig');
+    if (fig && !e.target.closest('button.popout, button.shrink')) {
+      e.preventDefault();
+      toggleMedia(fig);
+      return;
+    }
     const a = e.target.closest('a');
     if (a) {
       e.preventDefault();
@@ -279,12 +436,7 @@
       }
       return;
     }
-    const body = e.target.closest('figure.mfig .mbody');
-    if (body) {
-      e.preventDefault();
-      toggleMedia(body.parentElement);
-    }
   });
 
-  window.hantuuRender = { renderMarkdown, linkifyPaths, mediaFor, mediaFigure, toggleMedia, collapseMedia, popoutButton, escapeHTML, fileURL, highlightBlock, post };
+  window.hantuuRender = { renderMarkdown, linkifyPaths, mediaFor, mediaFigure, toggleMedia, collapseMedia, pdfInfo, disposeMedia, popoutButton, escapeHTML, fileURL, highlightBlock, post };
 })();

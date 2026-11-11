@@ -96,9 +96,13 @@ final class ComposerTextView: NSTextView {
         }
     }
 
-    // Esc would otherwise open the completion list.
+    // Esc would otherwise open the completion list. AppKit can deliver it through the
+    // responder action instead of keyDown, so both paths must reach the stop callback.
     override func complete(_ sender: Any?) {}
-    override func cancelOperation(_ sender: Any?) {}
+    override func cancelOperation(_ sender: Any?) {
+        if hasMarkedText() { super.cancelOperation(sender) }
+        else { _ = onEscape?() }
+    }
 
     override func didChangeText() {
         super.didChangeText()

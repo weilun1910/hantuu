@@ -149,10 +149,12 @@
   window.hantuu = {
     // Esc while the message box has the keyboard: shrink an opened-out preview first.
     collapseMedia() { return R.collapseMedia(); },
+    pdfInfo(payload) { R.pdfInfo(payload); },
     // Show a chat from scratch. Restores where you were last time you read it.
     reset(payload) {
       chatID = payload.chatID || null;
       seen.clear();
+      R.disposeMedia();
       list.textContent = '';
       R.post({ type: 'mediaExpanded', count: 0 });
       empty.textContent = payload.emptyText || '';
