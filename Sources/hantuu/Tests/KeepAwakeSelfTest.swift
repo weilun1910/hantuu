@@ -480,7 +480,7 @@ extension SelfTest {
               rules == ["tester ALL = (root) NOPASSWD: /usr/bin/pmset -a disablesleep 0"])
         check("keep awake: no sudoers line has a quote that could break out of printf", !KeepAwakeFiles.sudoersLines(user: kaUser).joined().contains("'"))
         check("keep awake: only plain account names are used",
-              KeepAwakeFiles.isPlainUserName("weilun1910") && KeepAwakeFiles.isPlainUserName("first.last_2")
+              KeepAwakeFiles.isPlainUserName("jappleseed") && KeepAwakeFiles.isPlainUserName("first.last_2")
               && !KeepAwakeFiles.isPlainUserName("") && !KeepAwakeFiles.isPlainUserName("a b") && !KeepAwakeFiles.isPlainUserName("x;rm")
               && !KeepAwakeFiles.isPlainUserName("-n") && !KeepAwakeFiles.isPlainUserName("x'y") && !KeepAwakeFiles.isPlainUserName("\u{00E9}mile"))
 
