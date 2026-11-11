@@ -367,7 +367,13 @@ struct SidebarFooter: View {
 
     var body: some View {
         HStack(spacing: 4) {
-            Spacer()
+            // How much of each agent's weekly limit is left (Usage/). The inset before the
+            // rings gives way first, so at the narrowest sidebar everything still fits.
+            HStack(spacing: 0) {
+                Color.clear.frame(minWidth: 0, idealWidth: 0, maxWidth: 5, maxHeight: 1)
+                UsageRings().fixedSize()
+            }
+            Spacer(minLength: 0)
             // No icon here: at the narrowest sidebar width an icon pushed the footer past the edge.
             HStack(spacing: 7) {
                 Text("Keep awake")

@@ -14,7 +14,9 @@ enum AgentHooks {
     /// The environment a chat's terminal starts with, on top of the inherited one.
     static func environment(for chatID: UUID) -> [String: String] {
         Paths.ensure(eventsDir)
-        return [envKey: eventsFile(for: chatID).path]
+        Paths.ensure(ClaudeUsage.dir)
+        // HANTUU_USAGE: where Claude's status line saves its usage limits (Usage/).
+        return [envKey: eventsFile(for: chatID).path, ClaudeUsage.envKey: ClaudeUsage.file(for: chatID).path]
     }
 
     // MARK: Claude Code
@@ -43,13 +45,18 @@ enum AgentHooks {
     }
 
     /// The JSON for `claude --settings`. Hooks from it are added to the user's own hooks
-    /// rather than replacing them.
-    static var claudeSettingsJSON: String {
+    /// rather than replacing them. When it's on, the status line saves Claude's usage limits
+    /// for the sidebar's rings and then runs the user's own status line (Usage/UsageLimits.swift).
+    static var claudeSettingsJSON: String { claudeSettingsJSON(statusLine: ClaudeUsage.statusLineEnabled) }
+
+    static func claudeSettingsJSON(statusLine: Bool) -> String {
         var hooks: [String: Any] = [:]
         for event in claudeEvents {
             hooks[event] = [["hooks": [["type": "command", "command": claudeCommand(for: event), "timeout": 10]]]]
         }
-        let data = (try? JSONSerialization.data(withJSONObject: ["hooks": hooks], options: [.sortedKeys, .withoutEscapingSlashes])) ?? Data("{}".utf8)
+        var settings: [String: Any] = ["hooks": hooks]
+        if statusLine { settings["statusLine"] = ClaudeUsage.statusLineSettings }
+        let data = (try? JSONSerialization.data(withJSONObject: settings, options: [.sortedKeys, .withoutEscapingSlashes])) ?? Data("{}".utf8)
         return String(decoding: data, as: UTF8.self)
     }
 

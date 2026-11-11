@@ -36,6 +36,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // Agent states, the needs-you list, the Dock badge and notifications. Asks for
         // notification permission only when the first notification is due.
         StatusCenter.shared.start(model: model)
+        // The usage rings in the sidebar footer (Usage/).
+        UsageCenter.shared.start(model: model)
         buildMenu()
         windowController = MainWindowController(model: model)
         windowController.showWindow(nil)
@@ -273,6 +275,7 @@ struct SettingsView: View {
             ChatSettingsSection()
             SessionSettingsSection()
             NotificationSettingsSection()
+            UsageSettingsSection()
             TerminalSettingsSection()
             Section("Data") {
                 LabeledContent("Folder") {
