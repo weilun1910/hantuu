@@ -104,6 +104,18 @@ enum SelfTest {
         check("state: a readable state.json is copied to state.previous.json at launch",
               (try? Data(contentsOf: sdir.appendingPathComponent("state.previous.json"))) == Data(old.utf8))
 
+        // Keep awake: idle sleep is held while agents work, and let go a minute after.
+        let ka = KeepAwake()
+        let t0 = Date()
+        ka.agentsWorking(false, now: t0)
+        check("keep awake: nothing held while no agent works", !ka.preventingIdleSleep)
+        ka.agentsWorking(true, now: t0)
+        check("keep awake: idle sleep held while an agent works", ka.preventingIdleSleep)
+        ka.agentsWorking(false, now: t0.addingTimeInterval(30))
+        check("keep awake: still held just after the agent stops", ka.preventingIdleSleep)
+        ka.agentsWorking(false, now: t0.addingTimeInterval(KeepAwake.workGrace + 1))
+        check("keep awake: let go a minute after the last agent stops", !ka.preventingIdleSleep)
+
         // Felix's own saved sidebar, read only: this build must load all of it.
         let mine = Paths.home.appendingPathComponent("Library/Application Support/hantuu/state.json")
         if let data = try? Data(contentsOf: mine),

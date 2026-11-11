@@ -1,6 +1,12 @@
 import AppKit
 import IOKit.pwr_mgt
 
+/// Two ways hantuu keeps the Mac awake.
+///
+/// Automatic, always on: while any chat's agent is working, hantuu holds an idle-sleep
+/// assertion, so the Mac doesn't doze off mid-task with the lid open. It needs no password and
+/// lets go a minute after the last agent stops. Closing the lid still sleeps the Mac.
+///
 /// The global "keep the Mac awake" switch. It keeps the Mac running with the lid shut via
 /// `sudo pmset -a disablesleep 1` (and undoes it with `disablesleep 0`). Turning this on
 /// runs that through macOS's standard administrator prompt and also holds an IOKit
@@ -11,6 +17,15 @@ final class KeepAwake: ObservableObject {
     @Published private(set) var busy = false
     @Published private(set) var lastError: String?
     private var assertion: IOPMAssertionID = 0
+
+    /// True while the automatic idle-sleep assertion is held for working agents.
+    @Published private(set) var preventingIdleSleep = false
+    private var workAssertion: IOPMAssertionID = 0
+    private var workTimer: Timer?
+    private var lastWorkingAt: Date?
+    /// How long the assertion outlives the last working agent, so the gap between one turn
+    /// and the next (a background task reporting back, a quick reply) doesn't let the Mac sleep.
+    static let workGrace: TimeInterval = 60
 
     /// Test launches set HANTUU_NO_PMSET=1 so the app never calls pmset at all.
     static var systemAccessDisabled: Bool {
@@ -52,6 +67,32 @@ final class KeepAwake: ObservableObject {
                     self.lastError = (err?[NSAppleScript.errorMessage] as? String) ?? "pmset failed"
                 }
             }
+        }
+    }
+
+    /// Checks every few seconds whether any agent is working. `isWorking` reads the chats.
+    func watchAgents(_ isWorking: @escaping () -> Bool) {
+        workTimer?.invalidate()
+        workTimer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
+            self?.agentsWorking(isWorking())
+        }
+        agentsWorking(isWorking())
+    }
+
+    func agentsWorking(_ working: Bool, now: Date = Date()) {
+        if working { lastWorkingAt = now }
+        let hold = working || (lastWorkingAt.map { now.timeIntervalSince($0) < Self.workGrace } ?? false)
+        guard hold != preventingIdleSleep else { return }
+        preventingIdleSleep = hold
+        // Test launches track the state but never touch the real power settings.
+        guard !Self.systemAccessDisabled else { return }
+        if hold {
+            IOPMAssertionCreateWithName(kIOPMAssertionTypePreventUserIdleSystemSleep as CFString,
+                                        IOPMAssertionLevel(kIOPMAssertionLevelOn),
+                                        "hantuu: agents are working" as CFString, &workAssertion)
+        } else if workAssertion != 0 {
+            IOPMAssertionRelease(workAssertion)
+            workAssertion = 0
         }
     }
 

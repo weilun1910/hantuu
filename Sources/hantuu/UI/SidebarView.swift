@@ -383,7 +383,7 @@ struct SidebarFooter: View {
             }
             .help(keepAwake.lastError ?? (keepAwake.isOn
                 ? "On: sleep is disabled (pmset disablesleep 1), even with the lid shut"
-                : "Keep the Mac running with the lid shut. Asks for your password."))
+                : "Keep the Mac running with the lid shut. Asks for your password. With the lid open, hantuu already stops idle sleep while agents work."))
             IconButton(symbol: "gearshape", help: "Settings  ⌘,") { AppDelegate.shared?.showSettings() }
         }
         .padding(.horizontal, 8)
