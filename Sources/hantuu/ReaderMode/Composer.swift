@@ -13,6 +13,69 @@ final class ComposerTextView: NSTextView {
     /// Page Up and Page Down scroll the reader, so reading never needs the mouse.
     var onPage: ((_ down: Bool) -> Void)?
     var onTextChange: (() -> Void)?
+    var commandCatalog: [ReaderCommand] = [] { didSet { updateCommands() } }
+    var allowsSkillMentions = false
+    var onCommandQuery: (() -> Void)?
+    var onCommandMenuChange: (() -> Void)?
+    private(set) var commandSuggestions: [ReaderCommand] = []
+    private(set) var commandSelection = 0
+    private var dismissedCommandText: String?
+    private var commandQuery: ReaderCommandLogic.Query?
+    var commandMenuVisible: Bool { !commandSuggestions.isEmpty }
+
+    func updateCommands() {
+        let query = hasMarkedText() ? nil : ReaderCommandLogic.query(string, selection: selectedRange(), skills: allowsSkillMentions)
+        let previous = commandSuggestions.indices.contains(commandSelection) ? commandSuggestions[commandSelection].token : nil
+        let changed = query != commandQuery
+        commandQuery = query
+        commandSuggestions = query.flatMap { dismissedCommandText == string ? nil : ReaderCommandLogic.ranked(commandCatalog, query: $0) } ?? []
+        commandSelection = changed ? 0 : (commandSuggestions.firstIndex { $0.token == previous } ?? 0)
+        onCommandMenuChange?()
+        if query != nil && changed && dismissedCommandText != string { onCommandQuery?() }
+    }
+
+    func dismissCommands() {
+        dismissedCommandText = string
+        commandSuggestions = []
+        onCommandMenuChange?()
+    }
+
+    func completeCommand(at index: Int) {
+        guard let query = commandQuery, commandSuggestions.indices.contains(index) else { return }
+        let replacement = commandSuggestions[index].token + " "
+        guard shouldChangeText(in: query.range, replacementString: replacement) else { return }
+        textStorage?.replaceCharacters(in: query.range, with: NSAttributedString(string: replacement, attributes: typingAttributes))
+        setSelectedRange(NSRange(location: query.range.location + (replacement as NSString).length, length: 0))
+        didChangeText()
+    }
+
+    private func commandKey(_ code: UInt16) -> Bool {
+        guard commandMenuVisible else { return false }
+        switch code {
+        case 53: dismissCommands()
+        case 125, 126:
+            commandSelection = (commandSelection + (code == 125 ? 1 : commandSuggestions.count - 1)) % commandSuggestions.count
+            onCommandMenuChange?()
+        case 48: completeCommand(at: commandSelection)
+        case 36, 76:
+            if let query = commandQuery, ReaderCommandLogic.shouldSend(query: query, selected: commandSuggestions[commandSelection]) {
+                dismissCommands()
+                onSend?()
+            } else { completeCommand(at: commandSelection) }
+        default: return false
+        }
+        return true
+    }
+
+    override func setSelectedRange(_ charRange: NSRange) {
+        super.setSelectedRange(charRange)
+        updateCommands()
+    }
+
+    override func setSelectedRange(_ charRange: NSRange, affinity: NSSelectionAffinity, stillSelecting flag: Bool) {
+        super.setSelectedRange(charRange, affinity: affinity, stillSelecting: flag)
+        updateCommands()
+    }
     /// Files or pictures from a paste or a drop. Returns false if there was nothing to attach.
     var onAttach: ((ComposerPasteboard.Content) -> Bool)?
     /// Backspace in an empty box takes out the last attachment. Returns true if it did.
@@ -76,6 +139,7 @@ final class ComposerTextView: NSTextView {
         // An input method that's composing (Japanese, Chinese, ...) gets Return and Esc first.
         if hasMarkedText() { return super.keyDown(with: event) }
         let mods = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        if mods.isDisjoint(with: [.command, .control, .option, .shift]), commandKey(event.keyCode) { return }
         switch event.keyCode {
         case 36, 76:   // Return, keypad Enter
             if mods.contains(.shift) || mods.contains(.option) {
@@ -101,12 +165,15 @@ final class ComposerTextView: NSTextView {
     override func complete(_ sender: Any?) {}
     override func cancelOperation(_ sender: Any?) {
         if hasMarkedText() { super.cancelOperation(sender) }
+        else if commandMenuVisible { dismissCommands() }
         else { _ = onEscape?() }
     }
 
     override func didChangeText() {
         super.didChangeText()
         needsDisplay = true
+        if dismissedCommandText != string { dismissedCommandText = nil }
+        updateCommands()
         onTextChange?()
     }
 

@@ -21,6 +21,14 @@ final class ReaderModeController: NSObject {
     let root = FillView(color: Theme.background)
     let bottom = NSView()
     let composer = ComposerBox()
+    let commandMenu = CommandMenu()
+    private let commandCatalog: ReaderCommandCatalog
+    private var commandContext: ReaderCommandCatalog.Context?
+    private var commandLoadAt = Date.distantPast
+    private var commandLoading = false
+    private var commandSentAt: [UUID: Date] = [:]
+    private var commandPeekAt: [UUID: Date] = [:]
+    private var commandMenuHeight: NSLayoutConstraint!
     let status = ReaderModeStatusModel()
     private(set) var statusHost: NSView!
     private(set) var peekBar: NSView!
@@ -32,7 +40,7 @@ final class ReaderModeController: NSObject {
     private var drafts: [UUID: String] = [:]
     private var draftFiles: [UUID: [ComposerAttachment]] = [:]
     /// Messages waiting to be typed, one at a time, so two sends never interleave.
-    private var outbox: [(terminal: TerminalView, steps: [SendStep], files: [URL])] = []
+    private var outbox: [(terminal: TerminalView, steps: [SendStep], files: [URL], command: String?)] = []
     private var typing = false
     /// How long to wait for the agent to show a pasted image before going on anyway.
     var imageWait: TimeInterval = 3
@@ -61,9 +69,10 @@ final class ReaderModeController: NSObject {
     static let columnWidth: CGFloat = 720
     static let sideMargin: CGFloat = 32
 
-    init(model: AppModel, mode: ReaderMode = .shared) {
+    init(model: AppModel, mode: ReaderMode = .shared, commandCatalog: ReaderCommandCatalog = ReaderCommandCatalog()) {
         self.model = model
         self.mode = mode
+        self.commandCatalog = commandCatalog
         super.init()
         status.stop = { [weak self] in _ = self?.stop() }
         status.showTerminal = { [weak self] in self?.showTerminal() }
@@ -75,6 +84,12 @@ final class ReaderModeController: NSObject {
         tv.onEscape = { [weak self] in self?.stop() ?? false }
         tv.onCopyWithoutSelection = { [weak self] in self?.copyReaderSelection() }
         tv.onPage = { [weak self] down in self?.page(down: down) }
+        tv.onCommandQuery = { [weak self] in self?.loadCommands() }
+        tv.onCommandMenuChange = { [weak self] in self?.updateCommandMenu() }
+        commandMenu.choose = { [weak self] index in
+            self?.composer.textView.completeCommand(at: index)
+            self?.focusComposer()
+        }
         composer.onHeightChange = { [weak self] in self?.textChanged() }
         composer.onAttachmentsChange = { [weak self] in self?.textChanged() }
         PastedImages.cleanUpOnce()
@@ -122,6 +137,15 @@ final class ReaderModeController: NSObject {
             ]
         }
         NSLayoutConstraint.activate(cs)
+        commandMenu.translatesAutoresizingMaskIntoConstraints = false
+        root.addSubview(commandMenu)
+        commandMenuHeight = commandMenu.heightAnchor.constraint(equalToConstant: 0)
+        NSLayoutConstraint.activate([
+            commandMenu.leadingAnchor.constraint(equalTo: composer.leadingAnchor),
+            commandMenu.trailingAnchor.constraint(equalTo: composer.trailingAnchor),
+            commandMenu.bottomAnchor.constraint(equalTo: composer.topAnchor, constant: -6),
+            commandMenuHeight,
+        ])
     }
 
     /// Puts the reader face over `sibling` (the terminals) below `top`, and the peek bar at
@@ -219,7 +243,14 @@ final class ReaderModeController: NSObject {
             draftFiles[old] = composer.attachments.isEmpty ? nil : composer.attachments
         }
         shownChatID = chat.id
+        commandContext = ReaderCommandCatalog.Context(agent: chat.agent.id, folder: model.workingDirectory(of: chat), transcript: chat.transcriptPath)
+        commandLoadAt = .distantPast
+        commandLoading = false
+        composer.textView.dismissCommands()
+        composer.textView.allowsSkillMentions = chat.agent.id == "codex"
+        composer.textView.commandCatalog = ReaderCommandCatalog.builtins(agent: chat.agent.id)
         composer.textView.text = drafts[chat.id] ?? ""
+        composer.textView.setSelectedRange(NSRange(location: (composer.textView.string as NSString).length, length: 0))
         composer.setAttachments(draftFiles[chat.id] ?? [])
         composer.textView.placeholder = "Message \(chat.agent.name)"
         composer.action.agentName = chat.agent.name
@@ -282,16 +313,25 @@ final class ReaderModeController: NSObject {
             ready: ready, screenMenu: screen.menu)
         apply(ComposerMode.resolve(input), chat: chat)
 
+        if ReaderCommandLogic.autoPeek(sentAt: commandSentAt[chat.id], now: Date(), menu: screen.menu),
+           mode.showsReader(chat) {
+            commandPeekAt[chat.id] = Date()
+            showTerminal()
+        }
+        if composer.textView.commandMenuVisible { loadCommands() }
+
         // A peek ends once nothing has waited in the terminal for two checks in a row.
         if mode.isPeeking(chat) {
-            if composerMode.isBlocked || !live {
+            let commandWaiting = commandPeekAt[chat.id].map { Date().timeIntervalSince($0) < 2 || !screen.ready || screen.busy } ?? false
+            if composerMode.isBlocked || !live || commandWaiting {
                 calmChecks = 0
             } else {
                 calmChecks += 1
                 if calmChecks >= 2 {
                     calmChecks = 0
-                    mode.endPeek(chat)
-                    if let t = chat.terminal { model.focusRequest.send(t) }
+                    commandPeekAt[chat.id] = nil
+                    commandSentAt[chat.id] = nil
+                    finishPeek(chat)
                 }
             }
         }
@@ -336,6 +376,26 @@ final class ReaderModeController: NSObject {
         updateHeights()
     }
 
+    private func updateCommandMenu() {
+        let tv = composer.textView
+        commandMenu.show(tv.commandSuggestions, selection: tv.commandSelection)
+        commandMenuHeight?.constant = CGFloat(min(tv.commandSuggestions.count, 6)) * 42
+    }
+
+    private func loadCommands() {
+        guard let chat = model.selectedChat, chat.id == shownChatID else { return }
+        let context = ReaderCommandCatalog.Context(agent: chat.agent.id, folder: model.workingDirectory(of: chat), transcript: chat.transcriptPath)
+        if context != commandContext { commandContext = context; commandLoadAt = .distantPast; commandLoading = false }
+        guard !commandLoading, Date().timeIntervalSince(commandLoadAt) >= 5 else { return }
+        commandLoading = true
+        commandLoadAt = Date()
+        commandCatalog.load(context) { [weak self] commands in
+            guard let self, self.commandContext == context else { return }
+            self.commandLoading = false
+            self.composer.textView.commandCatalog = commands
+        }
+    }
+
     // MARK: Actions
 
     @objc private func actionPressed() {
@@ -361,7 +421,7 @@ final class ReaderModeController: NSObject {
         if !composerMode.isWorking { sentThisTurn[chat.id] = [] }
         for step in steps {
             switch step {
-            case .paste(let s): sentThisTurn[chat.id, default: []].append(s)
+            case .paste(let s), .command(let s): sentThisTurn[chat.id, default: []].append(s)
             case .image: sentThisTurn[chat.id, default: []].append("[Image #")
             case .pressReturn: break
             }
@@ -384,7 +444,10 @@ final class ReaderModeController: NSObject {
     /// waits for any of `files` still being converted (PastedImages).
     private func type(_ steps: [SendStep], into t: TerminalView, after files: [URL] = []) {
         guard !steps.isEmpty else { return }
-        outbox.append((t, steps, files))
+        let command = steps.compactMap { step -> String? in
+            if case .command(let text) = step { return text }; return nil
+        }.first
+        outbox.append((t, steps, files, command))
         if !typing { typeNext() }
     }
 
@@ -404,6 +467,22 @@ final class ReaderModeController: NSObject {
             DispatchQueue.main.asyncAfter(deadline: .now() + delay) { self?.typeNext() }
         }
         switch step {
+        case .command(let text):
+            if let invocation = ReaderCommandLogic.invocation(text) {
+                // Keep the entire name outside any paste burst. Codex expands pasted
+                // argument placeholders only after recognizing this literal command token.
+                let hasArguments = !invocation.arguments.isEmpty
+                t.typeCommandText("/" + invocation.name + (hasArguments ? " " : ""))
+                if hasArguments {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                        t.pasteText(invocation.arguments)
+                        next(0.15)
+                    }
+                } else { next(0.15) }
+            } else {
+                t.pasteText(text)
+                next(0.15)
+            }
         case .paste(let text):
             t.pasteText(text)
             next(0.15)
@@ -421,9 +500,11 @@ final class ReaderModeController: NSObject {
             }
             check()
         case .pressReturn:
+            let command = outbox[0].command
             // The same pause TerminalView.submit leaves, so the agent has taken the paste in.
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
                 t.pressReturn()
+                if let command { self?.didSendCommand(command, terminal: t) }
                 self?.typeNext()
             }
         }
@@ -431,6 +512,18 @@ final class ReaderModeController: NSObject {
 
     /// True while a message is still being typed into a terminal.
     var isTyping: Bool { typing }
+
+    private func didSendCommand(_ text: String, terminal: TerminalView) {
+        guard let chat = model.chats.first(where: { $0.terminal === terminal }),
+              let invocation = ReaderCommandLogic.invocation(text) else { return }
+        commandSentAt[chat.id] = Date()
+        let commands = ReaderCommandCatalog.builtins(agent: chat.agent.id)
+        let opens = commands.first { $0.name == invocation.name }?.opensTerminal(arguments: invocation.arguments) ?? false
+        if opens, model.selectedChat?.id == chat.id, mode.showsReader(chat) {
+            commandPeekAt[chat.id] = Date()
+            showTerminal()
+        }
+    }
 
     /// Esc in the agent's terminal, which stops the running turn. Only while it's working, so
     /// it can never decline a prompt on your behalf.
@@ -464,8 +557,20 @@ final class ReaderModeController: NSObject {
 
     func backToReader() {
         guard let chat = model.selectedChat else { return }
+        commandPeekAt[chat.id] = nil
+        commandSentAt[chat.id] = nil
+        finishPeek(chat)
+    }
+
+    private func finishPeek(_ chat: Chat) {
         mode.endPeek(chat)
         if let t = chat.terminal { model.focusRequest.send(t) }
+        // The face change schedules layout through Combine. Focus again after that layout,
+        // when the message box's ancestors are visible and AppKit can accept the responder.
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.model.selectedChat?.id == chat.id, self.mode.showsReader(chat) else { return }
+            self.focusComposer()
+        }
     }
 
     /// Where the keyboard goes when something asks for the selected chat's terminal: the

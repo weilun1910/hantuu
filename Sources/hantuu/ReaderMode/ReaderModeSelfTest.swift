@@ -518,7 +518,7 @@ extension SelfTest {
         w.contentView = host
         tv.frame = host.bounds
         host.addSubview(tv)
-        let rm = ReaderModeController(model: model, mode: mode)
+        let rm = ReaderModeController(model: model, mode: mode, commandCatalog: ReaderCommandCatalog(home: dir))
         var statusOverride: StatusState?
         rm.statusProvider = { _ in statusOverride }
         rm.install(in: host, top: host.topAnchor, above: tv)
@@ -567,6 +567,30 @@ extension SelfTest {
         if let e = keyEvent(36, "\r", window: w) { rm.composer.textView.keyDown(with: e) }
         _ = waitUntil(5) { String(decoding: bytes(), as: UTF8.self).hasSuffix("second message\u{1b}[201~\r") }
         check("send: Return in the message box sends it", String(decoding: bytes(), as: UTF8.self).hasSuffix("\u{1b}[200~second message\u{1b}[201~\r"), String(decoding: bytes(), as: UTF8.self).debugDescription)
+
+        // Commands use literal key text. All discovery roots here are in the fixture folder.
+        let commandMark = bytes().count
+        rm.composer.textView.text = "/model example-model"
+        let commandSent = rm.send()
+        let commandArrived = waitUntil(5) { !rm.isTyping && bytes().count > commandMark && bytes().last == 0x0D }
+        check("commands transport: the command token stays outside the argument paste", commandSent && commandArrived && String(decoding: bytes().suffix(from: commandMark), as: UTF8.self) == "/model \u{1b}[200~example-model\u{1b}[201~\r")
+        check("commands peek: an inline model argument keeps the reader", !mode.isPeeking(chat))
+        rm.composer.textView.text = "/model"
+        _ = rm.send()
+        check("commands peek: a known picker opens the terminal after submission", waitUntil(5) { mode.isPeeking(chat) })
+        _ = rm.sync(selected: chat)
+        w.makeFirstResponder(rm.focusTarget(for: tv))
+        check("commands peek: the visible terminal gets keyboard focus", w.firstResponder === tv)
+        check("commands peek: a calm prompt returns after the opening grace period", waitUntil(5) { rm.refresh(); return !mode.isPeeking(chat) })
+        _ = rm.sync(selected: chat)
+        w.makeFirstResponder(rm.focusTarget(for: tv))
+        check("commands peek: focus returns to the message box", w.firstResponder === rm.composer.textView)
+        let longMark = bytes().count
+        let arguments = String(repeating: "context ", count: 200).trimmingCharacters(in: .whitespaces)
+        rm.composer.textView.text = "/compact " + arguments
+        _ = rm.send()
+        let longArrived = waitUntil(5) { !rm.isTyping && bytes().count > longMark && bytes().last == 0x0D }
+        check("commands transport: long arguments cannot swallow the command name", longArrived && String(decoding: bytes().suffix(from: longMark), as: UTF8.self) == "/compact \u{1b}[200~" + arguments + "\u{1b}[201~\r")
 
         // Attachments: the image's path as its own paste, then the text with the PDF's path.
         // The fake agent never draws "[Image #1]", so don't wait long for it.

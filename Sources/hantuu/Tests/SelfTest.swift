@@ -51,6 +51,7 @@ enum SelfTest {
         review(workdir)
         status(workdir)   // agent states, hooks, notifications, snapshots (Status/StatusSelfTest.swift)
         readerMode(workdir) // settings, the message box, Stop, the banner, snapshots (ReaderMode/ReaderModeSelfTest.swift)
+        readerCommands(workdir)
         agentWork(workdir)  // subagents, background tasks, the status they hold up, snapshots (Tests/AgentWorkSelfTest.swift)
         projectPanels(workdir)
         subagentBrowser(workdir) // sidebar navigation and read-only child transcripts
@@ -182,7 +183,7 @@ enum SelfTest {
         check("claude: declined permission stays visible", all.contains { $0.kind == .attention })
         check("claude: pasted image kept with the prompt", all.contains { $0.kind == .user && $0.images.count == 1 })
         check("claude: slash command becomes a notice", all.contains { $0.kind == .notice && $0.text == "Ran /model opus" })
-        check("claude: command output hidden", !all.contains { $0.text.contains("Set model") })
+        check("claude: command output is a notice", all.contains { $0.kind == .notice && $0.text.contains("Set model") })
         check("claude: interruption noted", all.contains { $0.kind == .notice && $0.text == "Interrupted" })
         check("claude: API errors stand out", all.filter { $0.kind == .error }.count == 3, "kinds \(kinds)")
         check("claude: sidechain hidden", !all.contains { $0.text.contains("subagent chatter") })
