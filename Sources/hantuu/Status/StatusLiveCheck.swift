@@ -55,11 +55,11 @@ extension SelfTest {
         if which == "claude" { chat.sessionID = UUID().uuidString.lowercased() }
         let def = AgentCatalog.definition(which)
         var argv = def.launchArguments(sessionID: chat.sessionID)
-        // Felix runs Claude in auto mode, where a harmless command never prompts. The check
+        // Claude's auto mode lets harmless commands run without prompting. The check
         // asks for the stricter default mode so a prompt appears (and is then declined).
         if which == "claude" { argv += ["--permission-mode", "default"] }
         // Same for Codex: a read-only sandbox makes a write ask for approval.
-        // Felix's own SessionStart hook in ~/.codex/hooks.json waits for review at startup.
+        // The local SessionStart hook in ~/.codex/hooks.json waits for review at startup.
         // The check must neither trust nor disable it, so this run turns hooks off for itself
         // only (hantuu's Codex signals don't use hooks).
         if which == "codex" {

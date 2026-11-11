@@ -250,6 +250,8 @@ struct NewChatButton: View {
     @State private var pending: DispatchWorkItem?
     /// How long the cursor rests on the plus before the agent list opens. Was 0.35s.
     static let openDelay = 0.08
+    static let leaveButtonDelay = 0.9
+    static let leaveMenuDelay = 0.35
 
     var defaultName: String { model.agents.first(where: { $0.id == model.defaultAgentID })?.name ?? "the default agent" }
 
@@ -271,14 +273,14 @@ struct NewChatButton: View {
         .onHover { h in
             hoverButton = h
             if h { if !showMenu { schedule(open: true, after: NewChatButton.openDelay) } else { cancel() } }
-            else { schedule(open: false, after: showMenu ? 0.9 : 0) }
+            else { schedule(open: false, after: showMenu ? Self.leaveButtonDelay : 0) }
         }
         .popover(isPresented: $showMenu, arrowEdge: .bottom) {
             AgentPicker(projectID: projectID) { showMenu = false }
                 .environmentObject(model)
                 .onHover { h in
                     hoverMenu = h
-                    if h { cancel() } else { schedule(open: false, after: 0.35) }
+                    if h { cancel() } else { schedule(open: false, after: Self.leaveMenuDelay) }
                 }
         }
         .onChange(of: showMenu) { _, open in

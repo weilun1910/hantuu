@@ -170,23 +170,29 @@ enum UsageFormat {
     ///     As of 3h ago
     static func tooltip(_ source: UsageSource, _ reading: UsageReading?, now: Date, off: Bool = false,
                         calendar: Calendar = .current, locale: Locale = .current) -> String {
-        let name = source.displayName
+        source.displayName + ": " + details(source, reading, now: now, off: off, calendar: calendar, locale: locale)
+            .joined(separator: "\n")
+    }
+
+    /// The hover card and accessibility label share the same detail lines.
+    static func details(_ source: UsageSource, _ reading: UsageReading?, now: Date, off: Bool = false,
+                        calendar: Calendar = .current, locale: Locale = .current) -> [String] {
         guard let reading, let ring = reading.ringWindow else {
-            return "\(name): \(off && source == .claude ? ClaudeUsage.offReason : source.noReadingReason)"
+            return [off && source == .claude ? ClaudeUsage.offReason : source.noReadingReason]
         }
         func line(_ w: UsageWindow, head: String) -> String {
             var s = head
             if let r = reset(w.resetsAt, now: now, calendar: calendar, locale: locale) { s += ", \(r)" }
             return s
         }
-        var lines = [line(ring, head: "\(name): \(percent(ring.leftPercent(at: now))) of \(ring.name) left")]
+        var lines = [line(ring, head: "\(percent(ring.leftPercent(at: now))) of \(ring.name) left")]
         for w in reading.otherWindows {
             let label = w.name.prefix(1).uppercased() + w.name.dropFirst()
             lines.append(line(w, head: "\(label): \(percent(w.leftPercent(at: now))) left"))
         }
         let old = now.timeIntervalSince(reading.observedAt)
         if old >= staleAfter { lines.append("As of \(age(old))") }
-        return lines.joined(separator: "\n")
+        return lines
     }
 }
 

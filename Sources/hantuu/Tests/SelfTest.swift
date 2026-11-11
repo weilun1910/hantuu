@@ -127,7 +127,7 @@ enum SelfTest {
         let asks = AgentActivity.allCases.filter { a in quiet.activity = a; return AppModel.closingInterrupts(quiet) }
         check("close: asks only while the agent works or waits on you", Set(asks) == [.working, .background, .needsPermission, .needsAnswer], "\(asks)")
 
-        // Felix's own saved sidebar, read only: this build must load all of it.
+        // The installed hantuu's own saved sidebar, read only: this build must load all of it.
         let mine = Paths.home.appendingPathComponent("Library/Application Support/hantuu/state.json")
         if let data = try? Data(contentsOf: mine),
            let raw = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] {
