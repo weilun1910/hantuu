@@ -191,8 +191,9 @@ extension AppModel {
 }
 
 /// Click: a new chat with the default agent. Hover: a dropdown of every installed agent.
-/// The dropdown waits a moment after the cursor leaves the button, so there's time to reach it,
-/// and stays open while the cursor is on it.
+/// The dropdown opens almost at once (a short wait so a cursor passing over doesn't flash it),
+/// waits a moment after the cursor leaves the button so there's time to reach it, and stays
+/// open while the cursor is on it.
 struct NewChatButton: View {
     @EnvironmentObject var model: AppModel
     let projectID: UUID?
@@ -202,6 +203,8 @@ struct NewChatButton: View {
     @State private var hoverMenu = false
     @State private var showMenu = false
     @State private var pending: DispatchWorkItem?
+    /// How long the cursor rests on the plus before the agent list opens. Was 0.35s.
+    static let openDelay = 0.08
 
     var defaultName: String { model.agents.first(where: { $0.id == model.defaultAgentID })?.name ?? "the default agent" }
 
@@ -222,7 +225,7 @@ struct NewChatButton: View {
         .help("New chat with \(defaultName)  ⌘N")
         .onHover { h in
             hoverButton = h
-            if h { if !showMenu { schedule(open: true, after: 0.35) } else { cancel() } }
+            if h { if !showMenu { schedule(open: true, after: NewChatButton.openDelay) } else { cancel() } }
             else { schedule(open: false, after: showMenu ? 0.9 : 0) }
         }
         .popover(isPresented: $showMenu, arrowEdge: .bottom) {
@@ -308,7 +311,6 @@ struct AgentPickerRow: View {
         }
         .buttonStyle(.plain)
         .onHover { hovering = $0 }
-        .help(agent.path ?? agent.id)
     }
 }
 
