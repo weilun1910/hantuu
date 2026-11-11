@@ -404,6 +404,8 @@ struct CodexTranscriptParser: TranscriptParser {
     static func isContextBlock(_ t: String) -> Bool {
         let s = t.trimmingCharacters(in: .whitespacesAndNewlines)
         if s.hasPrefix("# AGENTS.md instructions") { return true }
+        // Codex wraps each attached image in <image name=[Image #1] path="..."> and </image>.
+        if s == "</image>" || s.range(of: #"^<image\b[^>]*>$"#, options: .regularExpression) != nil { return true }
         if s.range(of: #"^<([a-z_ \-]+)>[\s\S]*</\1>$"#, options: .regularExpression) != nil { return true }
         for tag in ["<environment_context>", "<user_instructions>", "<permissions", "<collaboration_mode>", "<skills_instructions>", "<turn_aborted>"] where s.hasPrefix(tag) {
             return true
