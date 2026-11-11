@@ -108,6 +108,8 @@ final class StatusCenter: ObservableObject {
         let file = AgentHooks.eventsFile(for: chat.id)
         if chat.status == .ended {
             t.state.ended = true
+            // It may have moved to another conversation before it ended, with hantuu closed.
+            if t.kind == .claude { followSession(t, LineTail(url: file, from: .lastBytes(256 * 1024)).read()) }
         } else if initial {
             // Already running when hantuu started (a session that outlived the app): replay
             // the end of its events file to get back to where it was, without notifying.
@@ -157,7 +159,12 @@ final class StatusCenter: ObservableObject {
     }
 
     private func attachTranscript(_ t: Tracker, path: String?) {
-        guard let path, !t.state.ended, path != t.transcriptPath || t.transcript == nil else { return }
+        guard let path else {
+            t.transcriptPath = nil
+            t.transcript = nil
+            return
+        }
+        guard !t.state.ended, path != t.transcriptPath || t.transcript == nil else { return }
         t.transcriptPath = path
         let url = URL(fileURLWithPath: path)
         // A file this chat created is read from the top; an older one (a resumed Claude
@@ -177,13 +184,9 @@ final class StatusCenter: ObservableObject {
         let cwd = model?.project(t.chat.projectID)?.path
         var signals: [OriginSignal] = []
         if let e = t.events {
-            for line in e.read() {
-                signals += HookLineParser.parse(line, cwd: cwd)
-                // /clear and /resume move Claude to another transcript; SessionStart says which.
-                if t.kind == .claude, let path = HookLineParser.sessionTranscript(line), path != t.transcriptPath {
-                    attachTranscript(t, path: path)
-                }
-            }
+            let lines = e.read()
+            for line in lines { signals += HookLineParser.parse(line, cwd: cwd) }
+            followSession(t, lines)
         }
         if let tr = t.transcript {
             for line in tr.read() {
@@ -196,6 +199,22 @@ final class StatusCenter: ObservableObject {
         }
         guard !signals.isEmpty else { return }
         apply(t, signals, notify: notify)
+    }
+
+    /// /resume and /clear move Claude Code to another conversation, and every main-agent hook
+    /// names the one it is in. Only the latest one counts, so a replay never loads old histories.
+    /// It re-points the chat's reader and saved resume ID, then this status tail.
+    private func followSession(_ t: Tracker, _ lines: [Data]) {
+        guard t.kind == .claude, let model else { return }
+        var session: HookLineParser.Session?
+        for line in lines {
+            guard let next = HookLineParser.session(line) else { continue }
+            let changedID = next.id != nil && next.id != (session?.id ?? t.chat.sessionID)
+            session = HookLineParser.Session(id: next.id ?? session?.id, path: next.path ?? (changedID ? nil : session?.path))
+        }
+        guard let session else { return }
+        model.followSession(t.chat, session: session)
+        attachTranscript(t, path: t.chat.transcriptPath)
     }
 
     private func context(_ t: Tracker) -> StatusContext {

@@ -43,6 +43,22 @@ struct OriginSignal: Equatable {
 /// PostToolUse and PostToolUseFailure lines are cut down to the event name and tool_use_id
 /// by the hook itself, because their tool_response can be megabytes.
 enum HookLineParser {
+    struct Session: Equatable {
+        var id: String?
+        var path: String?
+    }
+
+    /// Main-agent hooks identify the conversation even if its startup hook was missed.
+    static func session(_ line: Data) -> Session? {
+        guard let obj = (try? JSONSerialization.jsonObject(with: line)) as? [String: Any],
+              obj["hook_event_name"] is String,
+              (obj["agent_id"] as? String).map({ $0.isEmpty }) ?? true else { return nil }
+        let id = (obj["session_id"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+        let path = (obj["transcript_path"] as? String).flatMap { $0.isEmpty ? nil : ($0 as NSString).expandingTildeInPath }
+        guard id != nil || path != nil else { return nil }
+        return Session(id: id, path: path)
+    }
+
     static func parse(_ line: Data, cwd: String?) -> [OriginSignal] {
         guard let obj = (try? JSONSerialization.jsonObject(with: line)) as? [String: Any] else { return [] }
         if let event = obj["hook_event_name"] as? String {
@@ -54,15 +70,6 @@ enum HookLineParser {
             return [OriginSignal(origin: .notify, signal: .codexTurnComplete(id: turn, lastMessage: last))]
         }
         return []
-    }
-
-    /// The transcript a SessionStart line points at, if it is one.
-    static func sessionTranscript(_ line: Data) -> String? {
-        guard line.range(of: Data(#""SessionStart""#.utf8)) != nil,
-              let obj = (try? JSONSerialization.jsonObject(with: line)) as? [String: Any],
-              obj["hook_event_name"] as? String == "SessionStart",
-              let path = obj["transcript_path"] as? String, !path.isEmpty else { return nil }
-        return (path as NSString).expandingTildeInPath
     }
 
     static func claude(_ event: String, _ obj: [String: Any], cwd fallbackCwd: String?) -> [StatusSignal] {

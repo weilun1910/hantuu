@@ -40,6 +40,8 @@ enum SelfTest {
         savedState(workdir)
         discovery(workdir)
         follower(workdir)
+        sessionFollowing(workdir)
+        transcriptTiming(workdir)
         paths(workdir)
         misc()
         agentDetection()
@@ -287,6 +289,185 @@ enum SelfTest {
         let more = f.poll()
         check("follower: picks up the appended line only", more.count == 1 && more.first?.kind == .tool && f.entries.count == 3)
         check("follower: nothing new means nothing emitted", f.poll().isEmpty)
+    }
+
+    static func sessionFollowing(_ dir: URL) {
+        let folder = dir.appendingPathComponent("session-switches")
+        Paths.ensure(folder)
+        let model = AppModel()
+        let project = Project(path: folder.path)
+        model.projects = [project]
+        let chat = Chat(projectID: project.id, agentID: "claude")
+        chat.sessionID = "launched-session"
+        model.chats = [chat]
+        model.selectedChatID = chat.id
+        let center = StatusCenter()
+        center.notifier = NoticeRecorder()
+        center.start(model: model, live: false)
+        var reloads = 0
+        let subscription = model.readerReload.sink { if $0 == chat.id { reloads += 1 } }
+        defer {
+            subscription.cancel()
+            chat.discoveryTimer?.invalidate()
+            chat.follower?.stop()
+        }
+        func transcript(_ name: String, text: String) -> URL {
+            let url = folder.appendingPathComponent(name + ".jsonl")
+            let obj: [String: Any] = ["type": "user", "uuid": name,
+                                      "message": ["role": "user", "content": text]]
+            var data = try! JSONSerialization.data(withJSONObject: obj)
+            data.append(0x0A)
+            try! data.write(to: url)
+            return url
+        }
+        func hook(_ id: String?, path: URL, event: String = "SessionStart", source: String = "resume") -> Data {
+            var obj: [String: Any] = ["hook_event_name": event, "source": source, "transcript_path": path.path]
+            if let id { obj["session_id"] = id }
+            return try! JSONSerialization.data(withJSONObject: obj)
+        }
+        let events = AgentHooks.eventsFile(for: chat.id)
+        func emit(_ data: Data) {
+            if !FileManager.default.fileExists(atPath: events.path) { try! Data().write(to: events) }
+            let h = try! FileHandle(forWritingTo: events)
+            h.seekToEndOfFile()
+            h.write(data + Data([0x0A]))
+            try! h.close()
+            center.poll()
+        }
+        let resumed = transcript("resumed", text: "Earlier conversation history")
+        emit(hook("resumed-session", path: resumed))
+        check("reader session: SessionStart resume updates both saved identifiers",
+              chat.sessionID == "resumed-session" && chat.transcriptPath == resumed.path)
+        check("reader session: resume loads the earlier conversation without switching chats",
+              waitUntil(5) { chat.allEntries.first?.text == "Earlier conversation history" } && reloads == 1)
+        let first = chat.follower
+        emit(hook("resumed-session", path: resumed, event: "UserPromptSubmit"))
+        check("reader session: unchanged hooks keep the follower and its history", chat.follower === first && reloads == 1)
+
+        let cleared = transcript("cleared", text: "Fresh conversation")
+        chat.liveEntries = [ReaderEntry(id: "old-notice", kind: .notice, text: "Old notice")]
+        emit(hook("cleared-session", path: cleared, source: "clear"))
+        check("reader session: clear changes the session and replaces the old history",
+              waitUntil(5) { chat.allEntries.map(\.text) == ["Fresh conversation"] }
+              && chat.sessionID == "cleared-session" && chat.transcriptPath == cleared.path)
+
+        let moved = transcript("moved", text: "History at the new path")
+        emit(hook("cleared-session", path: moved, event: "UserPromptSubmit"))
+        check("reader session: a transcript path change reloads even with the same session ID",
+              waitUntil(5) { chat.allEntries.first?.text == "History at the new path" } && chat.transcriptPath == moved.path)
+        let pathOnly = transcript("path-only", text: "Path without an ID")
+        emit(hook(nil, path: pathOnly, event: "Stop"))
+        check("reader session: a path-only hook preserves the resume ID",
+              waitUntil(5) { chat.allEntries.first?.text == "Path without an ID" } && chat.sessionID == "cleared-session")
+        model.save()
+        let saved = (try? Data(contentsOf: Paths.stateFile)).flatMap(SavedState.read)
+        check("reader session: state persists the active ID and path for Resume Chat",
+              saved?.chats.first?.sessionID == "cleared-session" && saved?.chats.first?.transcriptPath == pathOnly.path
+              && chat.agent.resumeArguments(sessionID: chat.sessionID!)?.contains("cleared-session") == true)
+
+        // Replaying old hooks after a relaunch must settle on the last conversation.
+        let restored = Chat(id: chat.id, projectID: project.id, agentID: "claude")
+        restored.sessionID = "launched-session"
+        let restoredModel = AppModel()
+        restoredModel.projects = [project]
+        restoredModel.chats = [restored]
+        let restoredCenter = StatusCenter()
+        restoredCenter.notifier = NoticeRecorder()
+        restoredCenter.start(model: restoredModel, live: false)
+        check("reader session: relaunch replay follows the latest session without reopening old histories",
+              restored.sessionID == "cleared-session" && restored.transcriptPath == pathOnly.path
+              && waitUntil(5) { restored.allEntries.first?.text == "Path without an ID" })
+        restored.follower?.stop()
+
+        // The same, for a chat whose agent ended while hantuu was closed.
+        let ended = Chat(id: chat.id, projectID: project.id, agentID: "claude")
+        ended.sessionID = "launched-session"
+        ended.status = .ended
+        let endedModel = AppModel()
+        endedModel.projects = [project]
+        endedModel.chats = [ended]
+        let endedCenter = StatusCenter()
+        endedCenter.notifier = NoticeRecorder()
+        endedCenter.start(model: endedModel, live: false)
+        check("reader session: an ended chat comes back on the conversation its agent ended in",
+              ended.sessionID == "cleared-session" && ended.transcriptPath == pathOnly.path
+              && waitUntil(5) { ended.allEntries.first?.text == "Path without an ID" })
+        ended.follower?.stop()
+
+        // A stale worker must never append its history to the new conversation, even late.
+        emit(hook("resumed-session", path: resumed))
+        emit(hook("cleared-session", path: cleared, source: "clear"))
+        check("reader session: a rapid switch ignores the old follower's pending delivery",
+              waitUntil(5) { chat.allEntries.map(\.text) == ["Fresh conversation"] }
+              && !waitUntil(0.5) { chat.allEntries.map(\.text) != ["Fresh conversation"] })
+
+        // /clear before the next message: Claude Code hasn't written the new transcript yet.
+        let unwritten = folder.appendingPathComponent("unwritten.jsonl")
+        emit(hook("unwritten-session", path: unwritten, source: "clear"))
+        RunLoop.main.run(until: Date().addingTimeInterval(0.3))
+        check("reader session: clear before the next message empties the reader and waits for the file",
+              chat.allEntries.isEmpty && chat.follower?.url.path == unwritten.path && chat.sessionID == "unwritten-session"
+              && ReaderController.emptyText(for: chat).contains("first message"),
+              ReaderController.emptyText(for: chat))
+        _ = transcript("unwritten", text: "First message after clear")
+        check("reader session: the cleared conversation shows up once Claude Code writes it",
+              waitUntil(5) { chat.allEntries.map(\.text) == ["First message after clear"] })
+        check("reader session: malformed and subagent hooks cannot redirect the main conversation",
+              HookLineParser.session(Data("not JSON".utf8)) == nil
+              && HookLineParser.session(Data(#"{"hook_event_name":"SessionStart","agent_id":"child","session_id":"child-session","transcript_path":"/child.jsonl"}"#.utf8)) == nil)
+    }
+
+    /// Times a synthetic history on every run, and a real one when HANTUU_BENCHMARK_TRANSCRIPT
+    /// names it. The real one is copied into the throwaway folder first and never changed.
+    static func transcriptTiming(_ dir: URL) {
+        let url = dir.appendingPathComponent("large-transcript.jsonl")
+        let line = Data((#"{"type":"assistant","message":{"role":"assistant","content":""#
+                         + String(repeating: "Conversation text. ", count: 900) + #""}}"# + "\n").utf8)
+        FileManager.default.createFile(atPath: url.path, contents: nil)
+        let h = try! FileHandle(forWritingTo: url)
+        var bytes = 0
+        while bytes < 4_000_000 { h.write(line); bytes += line.count }
+        try! h.close()
+        timeTranscript(url, label: "synthetic 4 MB")
+        try? FileManager.default.removeItem(at: url)
+        if let path = ProcessInfo.processInfo.environment["HANTUU_BENCHMARK_TRANSCRIPT"], !path.isEmpty {
+            let copy = dir.appendingPathComponent("real-transcript-copy.jsonl")
+            do {
+                try FileManager.default.copyItem(at: URL(fileURLWithPath: path), to: copy)
+                defer { try? FileManager.default.removeItem(at: copy) }
+                timeTranscript(copy, label: "real transcript copy")
+            } catch {
+                check("follower timing: copies the requested transcript", false, error.localizedDescription)
+            }
+        }
+    }
+
+    private static func timeTranscript(_ url: URL, label: String) {
+        let f = TranscriptFollower(url: url, kind: .claude, baseDir: url.deletingLastPathComponent().path)
+        var delivered = false
+        var onMain = false
+        f.onAppend = { _ in delivered = true; onMain = Thread.isMainThread }
+        // A heartbeat on main: its longest gap is the longest the app would have stopped responding.
+        var last = Date()
+        var stall: TimeInterval = 0
+        let beat = Timer(timeInterval: 0.005, repeats: true) { _ in
+            stall = max(stall, Date().timeIntervalSince(last))
+            last = Date()
+        }
+        RunLoop.main.add(beat, forMode: .common)
+        let start = Date()
+        last = start
+        f.start(follow: false)
+        let attachTime = Date().timeIntervalSince(start)
+        let finished = waitUntil(60) { delivered }
+        let shown = Date().timeIntervalSince(start)
+        RunLoop.main.run(until: Date().addingTimeInterval(0.02))
+        beat.invalidate()
+        check("follower timing: \(label) attaches without blocking main for 300 ms", attachTime < 0.3)
+        check("follower timing: \(label) reads and parses off main, then delivers on main", finished && onMain && !f.lastReadWasOnMain)
+        print(String(format: "      %@: %llu bytes, attach %.2f ms, read and parse %.0f ms off main, longest main stall %.0f ms, entries after %.0f ms, %d entries",
+                     label, LineTail.size(of: url), attachTime * 1000, f.lastReadDuration * 1000, stall * 1000,
+                     shown * 1000, f.entries.count))
     }
 
     // MARK: Paths and routing

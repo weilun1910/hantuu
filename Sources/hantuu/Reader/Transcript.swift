@@ -517,21 +517,33 @@ final class TranscriptFollower {
     private(set) var entries: [ReaderEntry] = []
     private var timer: Timer?
     private let baseDir: String?
+    private let kind: TranscriptKind
+    private let queue = DispatchQueue(label: "hantuu.transcript", qos: .userInitiated)
+    private var pollPending = false
+    private(set) var lastReadDuration: TimeInterval = 0
+    private(set) var lastReadWasOnMain = true
     var onAppend: (([ReaderEntry]) -> Void)?
+    var onReset: (() -> Void)?
 
     init(url: URL, kind: TranscriptKind, baseDir: String?) {
         self.url = url
         self.baseDir = baseDir
+        self.kind = kind
         switch kind {
         case .claude: parser = ClaudeTranscriptParser()
         case .codex: parser = CodexTranscriptParser()
         }
     }
 
-    func start(interval: TimeInterval = 0.5) {
-        poll()
+    deinit { timer?.invalidate() }
+
+    func start(interval: TimeInterval = 0.5, follow: Bool = true) {
         timer?.invalidate()
-        timer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in self?.poll() }
+        timer = nil
+        requestPoll()
+        if follow {
+            timer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in self?.requestPoll() }
+        }
     }
 
     func stop() {
@@ -539,32 +551,76 @@ final class TranscriptFollower {
         timer = nil
     }
 
-    /// Reads whatever was appended since the last call. Returns the new entries.
+    /// Reads and parses on a serial worker. Only delivery touches the reader on main.
+    private func requestPoll() {
+        guard !pollPending else { return }
+        pollPending = true
+        queue.async { [self] in
+            let start = Date()
+            let batch = read()
+            let elapsed = Date().timeIntervalSince(start)
+            let onMain = Thread.isMainThread
+            DispatchQueue.main.async { [self] in
+                pollPending = false
+                lastReadDuration = elapsed
+                lastReadWasOnMain = onMain
+                deliver(batch)
+            }
+        }
+    }
+
+    /// Synchronous polling is for small fixtures. App attachments always use start().
     @discardableResult
     func poll() -> [ReaderEntry] {
+        guard !pollPending else { return [] }
+        let batch = queue.sync { read() }
+        deliver(batch)
+        return batch.entries
+    }
+
+    private struct Batch {
+        var entries: [ReaderEntry] = []
+        var reset = false
+    }
+
+    private func deliver(_ batch: Batch) {
+        if batch.reset { entries = []; onReset?() }
+        guard !batch.entries.isEmpty else { return }
+        entries += batch.entries
+        onAppend?(batch.entries)
+    }
+
+    /// The parser and file cursor belong to queue, including the first full read.
+    private func read() -> Batch {
+        var batch = Batch()
         guard let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
-              let size = (attrs[.size] as? NSNumber)?.uint64Value else { return [] }
+              let size = (attrs[.size] as? NSNumber)?.uint64Value else { return batch }
         if size < offset {
             // File was replaced or truncated: start over.
             offset = 0
             partial = Data()
-            entries = []
+            batch.reset = true
+            switch kind {
+            case .claude: parser = ClaudeTranscriptParser()
+            case .codex: parser = CodexTranscriptParser()
+            }
         }
-        guard size > offset, let h = try? FileHandle(forReadingFrom: url) else { return [] }
+        guard size > offset, let h = try? FileHandle(forReadingFrom: url) else { return batch }
         defer { try? h.close() }
-        do { try h.seek(toOffset: offset) } catch { return [] }
+        do { try h.seek(toOffset: offset) } catch { return batch }
         let data = (try? h.readToEnd()) ?? Data()
         offset += UInt64(data.count)
-        var buf = partial + data
+        let buf = partial.isEmpty ? data : partial + data
         var fresh: [ReaderEntry] = []
-        while let nl = buf.firstIndex(of: 0x0A) {
-            let line = buf[buf.startIndex..<nl]
-            buf = Data(buf[buf.index(after: nl)...])
+        var start = buf.startIndex
+        while let nl = buf[start...].firstIndex(of: 0x0A) {
+            let line = buf[start..<nl]
+            start = buf.index(after: nl)
             if line.isEmpty { continue }
             fresh += parser.parse(line: Data(line))
         }
-        partial = buf
-        if fresh.isEmpty { return [] }
+        partial = Data(buf[start...])
+        if fresh.isEmpty { return batch }
         for i in fresh.indices {
             fresh[i].links = PathDetector.detect(in: fresh[i].text + "\n" + (fresh[i].detail ?? ""), base: baseDir)
             for f in fresh[i].files {
@@ -573,8 +629,7 @@ final class TranscriptFollower {
                 }
             }
         }
-        entries += fresh
-        onAppend?(fresh)
-        return fresh
+        batch.entries = fresh
+        return batch
     }
 }
