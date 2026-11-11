@@ -207,22 +207,23 @@ struct ClaudeWorkParser {
         case "user":
             guard let msg = obj["message"] as? [String: Any] else { return }
             if let s = msg["content"] as? String {
-                notes(s, time)
+                notes(s, time, delivered: true)
             } else if let items = msg["content"] as? [[String: Any]] {
                 for item in items {
                     switch item["type"] as? String {
                     case "tool_result": toolResult(item, result: obj["toolUseResult"], time)
-                    case "text": if let t = item["text"] as? String { notes(t, time) }
+                    case "text": if let t = item["text"] as? String { notes(t, time, delivered: true) }
                     default: break
                     }
                 }
             }
         case "queue-operation":
-            if obj["operation"] as? String == "enqueue", let c = obj["content"] as? String { notes(c, time) }
+            // The queue is the whole session's, so it also carries subagents' notifications.
+            if obj["operation"] as? String == "enqueue", let c = obj["content"] as? String { notes(c, time, delivered: false) }
         case "attachment":
             guard let a = obj["attachment"] as? [String: Any], a["type"] as? String == "queued_command" else { return }
-            if let p = a["prompt"] as? String { notes(p, time) }
-            else if let ps = a["prompt"] as? [[String: Any]] { for p in ps { if let t = p["text"] as? String { notes(t, time) } } }
+            if let p = a["prompt"] as? String { notes(p, time, delivered: true) }
+            else if let ps = a["prompt"] as? [[String: Any]] { for p in ps { if let t = p["text"] as? String { notes(t, time, delivered: true) } } }
         default:
             break
         }
@@ -346,39 +347,48 @@ struct ClaudeWorkParser {
 
     // MARK: Notifications
 
-    private mutating func notes(_ text: String, _ time: Date?) {
+    /// `delivered` is false for the session-wide queue, which also carries notifications meant
+    /// for subagents; those only count for work this chat started.
+    private mutating func notes(_ text: String, _ time: Date?, delivered: Bool) {
         guard text.contains(TaskNotification.marker) else { return }
         // The same notification is written up to three times (queued, dequeued, delivered).
-        guard seenNotes.insert(text.hashValue).inserted else { return }
-        for n in TaskNotification.parse(text) { apply(n, time) }
+        let key = text.hashValue
+        guard !seenNotes.contains(key) else { return }
+        var used = true
+        for n in TaskNotification.parse(text) where !apply(n, time, delivered: delivered) { used = false }
+        if used { seenNotes.insert(key) }
     }
 
-    private mutating func apply(_ n: TaskNotification, _ time: Date?) {
+    /// False when the notification is for work this transcript doesn't know and it wasn't
+    /// handed to this chat's agent, so a later delivered copy can still add it.
+    @discardableResult
+    private mutating func apply(_ n: TaskNotification, _ time: Date?, delivered: Bool) -> Bool {
         if let i = subagents.firstIndex(where: { ($0.agentID != nil && $0.agentID == n.taskID) || $0.id == n.toolUseID }) {
-            guard let state = n.state else { return }
+            guard let state = n.state else { return true }
             if subagents[i].agentID == nil { subagents[i].agentID = n.taskID }
             subagents[i].state = state
-            if state == .waiting { return }
+            if state == .waiting { return true }
             subagents[i].endedAt = time
             if let ms = n.durationMs { subagents[i].duration = Double(ms) / 1000 }
             if let r = n.report { subagents[i].result = r }
-            return
+            return true
         }
         if let i = n.taskID.flatMap({ taskIndex[$0] }) ?? n.toolUseID.flatMap({ taskIndex[$0] }) {
             if let ev = n.event, n.status == nil {
                 tasks[i].lastEvent = ev
-                return
+                return true
             }
-            guard let state = n.state else { return }
+            guard let state = n.state else { return true }
             tasks[i].state = state
             tasks[i].endedAt = time
             tasks[i].exitCode = n.exitCode
             if let ev = n.event { tasks[i].lastEvent = ev }
             if tasks[i].outputFile == nil { tasks[i].outputFile = n.outputFile }
-            return
+            return true
         }
         // Work this transcript didn't see start, such as an agent from before a resume.
-        guard let state = n.state, let tid = n.taskID else { return }
+        guard delivered else { return false }
+        guard let state = n.state, let tid = n.taskID else { return true }
         if n.isAgent {
             var a = SubagentInfo(id: n.toolUseID ?? tid, agentID: tid, title: n.quotedName ?? "Agent")
             a.state = state
@@ -397,6 +407,7 @@ struct ClaudeWorkParser {
             t.lastEvent = n.event
             addTask(t)
         }
+        return true
     }
 
     // MARK: Helpers

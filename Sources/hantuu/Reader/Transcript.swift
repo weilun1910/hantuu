@@ -463,6 +463,8 @@ struct CodexTranscriptParser: TranscriptParser {
               obj["type"] as? String == "session_meta",
               let p = obj["payload"] as? [String: Any],
               let id = p["id"] as? String, let cwd = p["cwd"] as? String else { return nil }
+        // A subagent's or a reviewer's rollout shares its parent's folder; it's never a chat's own.
+        if p["parent_thread_id"] != nil || ["subagent", "guardian_review"].contains(p["thread_source"] as? String ?? "") { return nil }
         let start = (p["timestamp"] as? String).flatMap(Self.parseDate)
         return SessionMeta(id: id, cwd: cwd, start: start)
     }

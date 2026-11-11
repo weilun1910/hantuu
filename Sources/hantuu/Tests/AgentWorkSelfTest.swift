@@ -20,6 +20,33 @@ extension SelfTest {
         agentWorkReducer()
         agentWorkEngine(fx)
         agentWorkSnapshots(dir, fx)
+        if let probe = ProcessInfo.processInfo.environment["HANTUU_WORK_PROBE"], !probe.isEmpty {
+            for p in probe.split(separator: ":") { agentWorkProbe(URL(fileURLWithPath: String(p))) }
+        }
+    }
+
+    /// HANTUU_WORK_PROBE=<transcripts or rollouts, colon separated>: prints what the Overview and the sidebar would
+    /// show for a real session. Only reads; checks nothing.
+    static func agentWorkProbe(_ url: URL) {
+        let kind: TranscriptKind = url.lastPathComponent.hasPrefix("rollout-") ? .codex : .claude
+        let started = Date()
+        let quick = WorkFollower(url: url, kind: kind).poll()
+        let quickTime = Date().timeIntervalSince(started)
+        let t2 = Date()
+        let base = InsightsFollower(url: url, kind: kind).poll().work
+        let fullTime = Date().timeIntervalSince(t2)
+        let start = (try? FileManager.default.attributesOfItem(atPath: url.path))?[.creationDate] as? Date
+        let work = AgentWorkTracker().update(base, transcript: url, kind: kind, processStart: start)
+        print(String(format: "probe: %@ quick %.2fs, full %.2fs, agree: %@", url.lastPathComponent, quickTime, fullTime, quick == base ? "yes" : "no"))
+        for a in work.subagents {
+            print("probe agent: [\(a.state.rawValue)] \(a.parentID == nil ? "" : "  ")\(a.title) | \(WorkText.meta(type: a.type, model: a.model) ?? "-") | step: \(a.step ?? "-") | report: \(WorkText.firstLine(a.result) ?? "-")")
+        }
+        for t in work.tasks {
+            print("probe task: [\(t.state.rawValue)] \(t.kind.rawValue) \(t.title) | exit \(t.exitCode.map(String.init) ?? "-") | output \(t.outputFile.map { FileManager.default.fileExists(atPath: $0) ? "exists" : "gone" } ?? "-") | event \(t.lastEvent ?? "-")")
+        }
+        var settled = quick
+        BackgroundRules.settle(&settled, transcript: url, processStart: start)
+        print("probe sidebar: \(BackgroundSummary.of(settled).detail)")
     }
 
     // MARK: Fixture
@@ -155,6 +182,10 @@ extension SelfTest {
                          output: fx.tasks.appendingPathComponent("bb3.output").path)]]),
                 fx.queued(note("aaa111", toolUse: a1, status: "completed", summary: "Agent \"Research agent terminal security\" is waiting on its own background work"), at: 200),
                 fx.queued(note("mm1", toolUse: nil, status: nil, summary: "Monitor event: \"Watch the build log for errors\"", event: "error: expected '}' in Parser.swift"), at: 100),
+                // A subagent's own background command: the session-wide queue carries its notification too.
+                fx.queued(note("bsub9", toolUse: "toolu_SUB", status: "completed", summary: "Background command \"Build in the subagent\" completed (exit code 0)"), at: 90),
+                // Delivered to this chat's agent, from before a resume: shown, though its start isn't in this transcript.
+                fx.attachment(note("aold1", toolUse: "toolu_OLD", status: "stopped", summary: "Background agent \"Map the old code\" didn't finish before the previous session ended"), at: 2990),
                 // Claude Code keeps request copies with every result in them again. They're not news.
                 line(["type": "api-request-blob", "message": ["role": "user", "content":
                     note("bb1", toolUse: "toolu_B1", status: "completed", summary: "Background command \"Build and run the hantuu self test\" completed (exit code 0)")]]),
@@ -234,8 +265,9 @@ extension SelfTest {
         }
         let w = parser.work
         let byID = Dictionary(uniqueKeysWithValues: w.subagents.map { ($0.id, $0) })
-        check("work: five agents from the Agent tool, in launch order", w.subagents.map(\.id) == [WorkFixture.a1, WorkFixture.a2, WorkFixture.a3, WorkFixture.a4, WorkFixture.a5],
-              "\(w.subagents.map(\.id))")
+        check("work: five agents from the Agent tool, in launch order, and one from before a resume", w.subagents.map(\.id) == [WorkFixture.a1, WorkFixture.a2, WorkFixture.a3, WorkFixture.a4, WorkFixture.a5, "toolu_OLD"]
+              && w.subagents.last?.state == .stopped && w.subagents.last?.title == "Map the old code", "\(w.subagents.map(\.id))")
+        check("work: a subagent's own task in the session queue isn't the chat's", !w.tasks.contains { $0.taskID == "bsub9" })
         let a1 = byID[WorkFixture.a1], a3 = byID[WorkFixture.a3], a4 = byID[WorkFixture.a4], a5 = byID[WorkFixture.a5]
         check("work: a background agent with its description, type, model, prompt and id", a1?.title == "Research agent terminal security" && a1?.type == "general-purpose"
               && a1?.model == "opus" && a1?.background == true && a1?.agentID == "aaa111" && a1?.prompt?.hasPrefix("Find out how cmux") == true, "\(String(describing: a1))")
@@ -397,6 +429,18 @@ extension SelfTest {
               && w.subagents[0].type == "Volta", "\(w.subagents[0])")
         check("codex tracker: a finished subagent's last message is its report", w.subagents[1].state == .done && w.subagents[1].result?.contains("gpt-6.1-sol") == true
               && w.subagents[1].duration == 93.195, "\(w.subagents[1])")
+
+        // A new Codex chat in the same folder must find its own rollout, not a subagent's that started first.
+        let today = Calendar.current.dateComponents([.year, .month, .day], from: Date())
+        let now = root.appendingPathComponent(String(format: "%04d/%02d/%02d", today.year!, today.month!, today.day!))
+        let chatStart = Date().addingTimeInterval(-30)
+        WorkFixture.write(now.appendingPathComponent("rollout-2026-11-11T11-00-00-01cc-sub.jsonl"), [WorkFixture.line(["type": "session_meta", "payload": [
+            "id": "01cc-sub", "cwd": "/Users/test/hantuu", "timestamp": WorkFixture.iso.string(from: chatStart.addingTimeInterval(5)),
+            "parent_thread_id": "01aa-parent", "thread_source": "subagent"]])])
+        WorkFixture.write(now.appendingPathComponent("rollout-2026-11-11T11-00-09-01dd-chat.jsonl"), [WorkFixture.line(["type": "session_meta", "payload": [
+            "id": "01dd-chat", "cwd": "/Users/test/hantuu", "timestamp": WorkFixture.iso.string(from: chatStart.addingTimeInterval(9)), "thread_source": "user"]])])
+        let found = CodexTranscriptParser.locate(cwd: "/Users/test/hantuu", after: chatStart, excluding: [], root: root)
+        check("codex: a chat finds its own rollout, never a subagent's", found?.1.id == "01dd-chat", "\(String(describing: found?.1.id))")
     }
 
     // MARK: What still counts as running
