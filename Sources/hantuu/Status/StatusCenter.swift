@@ -26,6 +26,10 @@ final class StatusCenter: ObservableObject {
 
     private weak var model: AppModel?
     private var trackers: [UUID: Tracker] = [:]
+    /// Subagents and background tasks each live chat still has running (Status/BackgroundWork.swift).
+    let background = BackgroundWatch()
+    /// On when BackgroundWatch runs (the app, or a self test that drives it by hand).
+    var watchingBackground = false
     private var timer: Timer?
     private var bag = Set<AnyCancellable>()
 
@@ -74,6 +78,16 @@ final class StatusCenter: ObservableObject {
         let t = Timer(timeInterval: 0.25, repeats: true) { [weak self] _ in self?.poll() }
         RunLoop.main.add(t, forMode: .common)
         timer = t
+        background.deliver = { [weak self] id, s in self?.backgroundChanged(id, s) }
+        background.start(model: model)
+        watchingBackground = true
+    }
+
+    /// A chat's background work, every couple of seconds: running subagents and tasks keep it
+    /// from reading Done, and the last one finishing is when it's done.
+    func backgroundChanged(_ id: UUID, _ summary: BackgroundSummary) {
+        guard let t = trackers[id], !t.state.ended else { return }
+        apply(t, [OriginSignal(origin: .transcript, signal: .background(summary))], notify: true)
     }
 
     private func sync(_ chats: [Chat], initial: Bool) {
@@ -185,7 +199,8 @@ final class StatusCenter: ObservableObject {
     }
 
     private func context(_ t: Tracker) -> StatusContext {
-        StatusContext(agent: t.kind, focused: isFocused(t.chat), now: Date())
+        StatusContext(agent: t.kind, focused: isFocused(t.chat), now: Date(),
+                      watchesBackground: watchingBackground && t.kind != .other && t.chat.transcriptPath != nil)
     }
 
     private func isFocused(_ chat: Chat) -> Bool {

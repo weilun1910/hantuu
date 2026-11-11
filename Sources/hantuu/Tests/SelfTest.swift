@@ -49,6 +49,7 @@ enum SelfTest {
         review(workdir)
         status(workdir)   // agent states, hooks, notifications, snapshots (Status/StatusSelfTest.swift)
         readerMode(workdir) // settings, the message box, Stop, the banner, snapshots (ReaderMode/ReaderModeSelfTest.swift)
+        agentWork(workdir)  // subagents, background tasks, the status they hold up, snapshots (Tests/AgentWorkSelfTest.swift)
 
         print("\n\(passes) passed, \(failures) failed")
         return failures == 0 ? 0 : 1

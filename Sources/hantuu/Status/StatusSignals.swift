@@ -28,6 +28,8 @@ enum StatusSignal: Equatable {
     /// A terminal notification's text, or nil for a bell.
     case terminalNotice(text: String?)
     case progress(active: Bool)
+    /// Subagents and background tasks still running, from BackgroundWatch.
+    case background(BackgroundSummary)
 }
 
 struct OriginSignal: Equatable {

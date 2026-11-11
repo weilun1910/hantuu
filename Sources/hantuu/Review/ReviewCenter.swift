@@ -28,6 +28,8 @@ final class ReviewCenter: ObservableObject {
 
     // Overview
     @Published private(set) var insights: SessionInsights?
+    /// The selected chat's subagents and background tasks, with what their own files add.
+    @Published private(set) var work = AgentWork()
     @Published private(set) var pr: PullRequestInfo?
     @Published private(set) var ports: [ListeningPort] = []
 
@@ -46,6 +48,7 @@ final class ReviewCenter: ObservableObject {
     private var watcher: FolderWatcher?
     private var timers: [Timer] = []
     private var insightsFollower: InsightsFollower?
+    private var workTracker = AgentWorkTracker()
     private var forcedLarge: Set<String> = []
     private var lastDiffKey = ""
     private var saveWork: DispatchWorkItem?
@@ -84,6 +87,8 @@ final class ReviewCenter: ObservableObject {
         generation += 1
         insightsFollower = nil
         insights = nil
+        workTracker = AgentWorkTracker()
+        work = AgentWork()
         if folderChanged {
             repo = nil
             repoChecked = false
@@ -429,17 +434,24 @@ final class ReviewCenter: ObservableObject {
     func refreshInsights(completion: (() -> Void)? = nil) {
         guard let chat = selectedChat, let path = chat.transcriptPath, let kind = chat.agent.transcript else {
             insights = nil
+            if !work.isEmpty { work = AgentWork() }
             completion?()
             return
         }
+        // The transcript can change during a chat's life (Claude Code's /resume and /clear),
+        // so the follower, and the subagents folder next to it, come from the current path.
         if insightsFollower?.url.path != path { insightsFollower = InsightsFollower(url: URL(fileURLWithPath: path), kind: kind) }
         guard let f = insightsFollower else { return }
         let gen = generation
+        let tracker = workTracker
+        let processStart: Date? = chat.status == .ended ? nil : chat.startedAt
         queue.async {
             let i = f.poll()
+            let w = tracker.update(i.work, transcript: f.url, kind: kind, processStart: processStart)
             DispatchQueue.main.async {
                 guard gen == self.generation else { return }
                 if i != self.insights { self.insights = i }
+                if w != self.work { self.work = w }
                 completion?()
             }
         }

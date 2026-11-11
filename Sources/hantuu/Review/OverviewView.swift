@@ -95,6 +95,8 @@ struct OverviewCards: View {
         ScrollView {
             VStack(spacing: 10) {
                 session
+                if !review.work.subagents.isEmpty { AgentsCard(agents: review.work.subagents).id(chat.id) }
+                if !review.work.tasks.isEmpty { BackgroundTasksCard(tasks: review.work.tasks).id(chat.id) }
                 if let s = review.branchSummary, s.files > 0, review.repo != nil { changes(s) }
                 if let pr = review.pr { PullRequestCard(pr: pr) }
                 if let i = review.insights, let used = i.contextUsed, let window = i.contextWindow { context(used: used, window: window, guess: i.windowIsGuess) }

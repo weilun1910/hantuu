@@ -4,6 +4,7 @@ import Foundation
 /// the process is alive; this says whether it needs you.
 enum AgentActivity: String, Codable, CaseIterable {
     case working           // running a turn
+    case background        // its turn ended, but subagents or background tasks it started are still running
     case needsPermission   // wants approval to run a tool
     case needsAnswer       // asking you something (AskUserQuestion, a plan, a final question)
     case doneUnseen        // finished a turn while you weren't looking at the chat
@@ -19,6 +20,7 @@ enum AgentActivity: String, Codable, CaseIterable {
     var label: String {
         switch self {
         case .working: return "Working"
+        case .background: return "Running in background"
         case .needsPermission: return "Needs permission"
         case .needsAnswer: return "Needs answer"
         case .doneUnseen: return "Done"

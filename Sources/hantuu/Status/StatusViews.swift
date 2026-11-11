@@ -11,12 +11,18 @@ struct ActivityDot: View {
     /// A fixed point in the pulse, for offscreen snapshots (animations don't render there).
     var pulsePhase: Double? = ActivityDot.fixedPhase
     static var fixedPhase: Double?
+    /// Running in background pulses like Working when true. Only the snapshots compare both.
+    static var backgroundPulses = false
 
     var body: some View {
         ZStack {
             switch activity {
             case .working:
                 PulseRing(color: Color(nsColor: Theme.running), phase: pulsePhase)
+                Circle().fill(Color(nsColor: Theme.running)).frame(width: 7, height: 7)
+            case .background:
+                // Still going, but nothing for the main agent to do: the working dot without its pulse.
+                if ActivityDot.backgroundPulses { PulseRing(color: Color(nsColor: Theme.running), phase: pulsePhase) }
                 Circle().fill(Color(nsColor: Theme.running)).frame(width: 7, height: 7)
             case .needsPermission, .needsAnswer:
                 Circle().fill(Color(nsColor: Theme.needsYou)).frame(width: 7, height: 7)
