@@ -51,7 +51,7 @@ The states come from Claude Code's own hooks and Codex's own notifications, whic
 
 ![The sidebar showing one chat working in its own worktree, with the Overview tab on the right](docs/screenshots/status-and-overview.jpg)
 
-Small rings at the bottom of the sidebar show how much of each agent's weekly limit is left. Hover for the numbers and reset times. Codex reads its limits from session logs. Claude's ring uses a status line, which hides Claude's usual footer hints, so it's off by default. Turn it on in Settings > Usage Limits. If you already use a Claude status line, it's on already. hantuu never reads your agent logins or calls a usage API.
+Small rings at the bottom of the sidebar show how much of each agent's weekly limit is left. Hover for a card with every agent's weekly limit left, reset time, 5-hour window where there is one, and how old the reading is. Codex reads its limits from session logs. Claude's ring uses a status line, which hides Claude's usual footer hints, so it's off by default. Turn it on in Settings > Usage Limits. If you already use a Claude status line, it's on already. hantuu never reads your agent logins or calls a usage API.
 
 <img src="docs/screenshots/usage-rings.png" width="260" alt="Claude Code and Codex usage rings at the left of the sidebar footer, beside Keep awake">
 
@@ -105,11 +105,11 @@ The reader follows the conversation as it happens. Your messages sit on the righ
 
 It follows Claude Code when you use /resume or /clear, and Resume Chat picks up that conversation after a relaunch. Long conversations load in the background so they don't freeze the window.
 
-Images and PDFs that come up in the chat appear inline instead of as paths, as small previews side by side. Click one to open it out to full width, and click again or press Esc to shrink it. The button in its corner opens it as a tab in the Code tab. LaTeX is rendered with KaTeX, and code blocks are highlighted with a Copy button. That's what makes it usable for studying.
+Images and PDFs in a message show as compact previews side by side. Click one to expand it to full width. Click again, use the shrink button or press Esc to shrink it. The pop-out button opens the file in the Code tab. LaTeX is rendered with KaTeX, and code blocks are highlighted with a Copy button. That's what makes it usable for studying.
 
 - Return sends and Shift-Return adds a line.
 - Paste a screenshot with Cmd-V, drop files on the box or pick them with the paperclip. They show as small chips above your message, and pictures reach the agent as real image attachments.
-- While the agent works, a line above the box says what it's doing. Esc or the Stop button stops it.
+- While the agent works, a line above the box says what it's doing. **Esc** in the message box or the Stop button stops it.
 - When it wants your permission or asks a question with options, a banner says so. Show Terminal brings up the terminal so you can answer there, and the reader comes back once the agent carries on.
 
 ![The reader's message box with a pasted image and several file attachments shown as compact chips](docs/screenshots/message-box-attachments.png)
