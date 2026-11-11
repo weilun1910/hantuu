@@ -8,28 +8,34 @@ struct AgentsCard: View {
     var now: Date? = nil
     @State private var expanded: Set<String> = []
     @State private var showAll = false
+    var savedExpanded: Binding<Set<String>>?
+    var savedShowAll: Binding<Bool>?
     static let finishedShown = 3
 
-    init(agents: [SubagentInfo], now: Date? = nil, expanded: Set<String> = []) {
+    init(agents: [SubagentInfo], now: Date? = nil, expanded: Set<String> = [], savedExpanded: Binding<Set<String>>? = nil, savedShowAll: Binding<Bool>? = nil) {
         self.agents = agents
         self.now = now
         _expanded = State(initialValue: expanded)
+        self.savedExpanded = savedExpanded
+        self.savedShowAll = savedShowAll
     }
 
     var body: some View {
+        let expanded = savedExpanded ?? $expanded
+        let showAll = savedShowAll ?? $showAll
         let ids = Set(agents.map(\.id))
         let top = agents.filter { a in a.parentID.map { !ids.contains($0) } ?? true }
         let running = top.filter { $0.state.isActive }.sorted { WorkOrder.started($0) < WorkOrder.started($1) }
         let finished = top.filter { !$0.state.isActive }.sorted { WorkOrder.ended($0) > WorkOrder.ended($1) }
-        let shown = showAll ? finished : Array(finished.prefix(Self.finishedShown))
+        let shown = showAll.wrappedValue ? finished : Array(finished.prefix(Self.finishedShown))
         let active = agents.filter { $0.state.isActive }.count
         ReviewCard(title: "Agents", trailing: active > 0 ? "\(active) running" : "\(top.count) finished") {
             VStack(alignment: .leading, spacing: 1) {
-                ForEach(running) { a in AgentTree(agent: a, all: agents, depth: 0, expanded: $expanded, now: now) }
+                ForEach(running) { a in AgentTree(agent: a, all: agents, depth: 0, expanded: expanded, now: now) }
                 if !running.isEmpty && !shown.isEmpty { Spacer().frame(height: 5) }
-                ForEach(shown) { a in AgentTree(agent: a, all: agents, depth: 0, expanded: $expanded, now: now) }
+                ForEach(shown) { a in AgentTree(agent: a, all: agents, depth: 0, expanded: expanded, now: now) }
                 if finished.count > Self.finishedShown {
-                    MoreToggle(more: finished.count - Self.finishedShown, showingAll: $showAll)
+                    MoreToggle(more: finished.count - Self.finishedShown, showingAll: showAll)
                 }
             }
         }
@@ -168,18 +174,20 @@ struct BackgroundTasksCard: View {
     let tasks: [BackgroundTaskInfo]
     var now: Date? = nil
     @State private var showAll = false
+    var savedShowAll: Binding<Bool>? = nil
 
     var body: some View {
+        let showAll = savedShowAll ?? $showAll
         let running = tasks.filter { $0.state.isActive }.sorted { WorkOrder.started($0) < WorkOrder.started($1) }
         let finished = tasks.filter { !$0.state.isActive }.sorted { WorkOrder.ended($0) > WorkOrder.ended($1) }
-        let shown = showAll ? finished : Array(finished.prefix(AgentsCard.finishedShown))
+        let shown = showAll.wrappedValue ? finished : Array(finished.prefix(AgentsCard.finishedShown))
         ReviewCard(title: "Background tasks", trailing: running.isEmpty ? "\(finished.count) finished" : "\(running.count) running") {
             VStack(alignment: .leading, spacing: 1) {
                 ForEach(running) { t in TaskRow(task: t, now: now) }
                 if !running.isEmpty && !shown.isEmpty { Spacer().frame(height: 5) }
                 ForEach(shown) { t in TaskRow(task: t, now: now) }
                 if finished.count > AgentsCard.finishedShown {
-                    MoreToggle(more: finished.count - AgentsCard.finishedShown, showingAll: $showAll)
+                    MoreToggle(more: finished.count - AgentsCard.finishedShown, showingAll: showAll)
                 }
             }
         }

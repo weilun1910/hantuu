@@ -18,6 +18,7 @@ struct EditorPayload: Encodable {
     var line: Int?
     var base: String
     var links: [DetectedPath]
+    var position: EditorPosition?
 }
 
 /// One open tab's file, as the viewer keeps it.
@@ -165,8 +166,16 @@ final class FileViewerController: NSObject, ObservableObject {
         render()
     }
 
+    func projectDidChange() {
+        // WebKit paints asynchronously. Keep the previous project's pixels hidden until
+        // the page confirms that it is showing the selected document.
+        page.webView.alphaValue = 0
+        shownKey = ""
+        render()
+    }
+
     func render() {
-        let open = Set(model.codeTabs.map(\.id))
+        let open = Set(model.allCodeTabs.map(\.id))
         for (id, d) in docs where !open.contains(id) { drop(d) }
         guard let tab = selectedTab else {
             showPane(nil)
@@ -269,7 +278,7 @@ final class FileViewerController: NSObject, ObservableObject {
         return EditorPayload(id: d.id.uuidString, path: d.path, name: d.name, text: load.text, preview: preview,
                              mode: tab.preview && preview != nil ? "preview" : "source", readOnly: load.readOnly != nil,
                              wrap: Self.wraps(d.path), eol: load.eol, line: tab.line, base: (d.path as NSString).deletingLastPathComponent,
-                             links: d.links)
+                             links: d.links, position: tab.editorPosition)
     }
 
     private func makePane(_ d: FileDoc) -> FileViewerPane {
@@ -371,6 +380,14 @@ final class FileViewerController: NSObject, ObservableObject {
     private func handle(_ msg: [String: Any]) {
         let base = msg["base"] as? String
         switch msg["type"] as? String {
+        case "shown":
+            let id = (msg["id"] as? String).flatMap(UUID.init)
+            if id == model.selectedCodeTabID { page.webView.alphaValue = 1 }
+        case "position":
+            guard let id = (msg["id"] as? String).flatMap(UUID.init),
+                  let raw = msg["position"], let data = try? JSONSerialization.data(withJSONObject: raw),
+                  let position = try? JSONDecoder().decode(EditorPosition.self, from: data) else { return }
+            model.setEditorPosition(id, position)
         case "dirty":
             guard let id = (msg["id"] as? String).flatMap(UUID.init), let d = docs[id] else { return }
             setDirty(d, msg["dirty"] as? Bool ?? false)
@@ -562,7 +579,7 @@ final class FileViewerController: NSObject, ObservableObject {
 
     // MARK: Unsaved changes
 
-    var unsavedTabs: [CodeTab] { model.codeTabs.filter { $0.dirty } }
+    var unsavedTabs: [CodeTab] { model.allCodeTabs.filter { $0.dirty } }
 
     func ask(_ tabs: [CodeTab]) -> SaveChoice {
         if let promptOverride { return promptOverride(tabs) }

@@ -57,16 +57,14 @@ struct ChangedFileList: View {
     @EnvironmentObject var review: ReviewCenter
 
     var body: some View {
-        ScrollViewReader { proxy in
-            ScrollView {
-                LazyVStack(spacing: 0) {
-                    ForEach(review.changes) { f in
-                        ChangedFileRow(file: f, selected: f.path == review.selectedPath, viewed: review.isViewed(f)).id(f.path)
-                    }
+        ScrollView {
+            LazyVStack(spacing: 0) {
+                ForEach(review.changes) { f in
+                    ChangedFileRow(file: f, selected: f.path == review.selectedPath, viewed: review.isViewed(f)).id(f.path)
                 }
-                .padding(.vertical, 5)
             }
-            .onChange(of: review.selectedPath) { _, p in if let p { proxy.scrollTo(p) } }
+            .padding(.vertical, 5)
+            .rememberPanelScroll(review)
         }
     }
 }
@@ -325,6 +323,7 @@ struct NestedChangesView: View {
                         .padding(12)
                 }
             }
+            .rememberPanelScroll(review)
         }
     }
 

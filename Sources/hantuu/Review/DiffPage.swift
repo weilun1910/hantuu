@@ -17,6 +17,8 @@ struct DiffPayload: Encodable {
     var keepScroll: Bool
     var notice: String? = nil
     var large: Int? = nil
+    var context: String? = nil
+    var scrollTop: Double? = nil
 }
 
 /// The diff web page (diff.html): one file's unified diff with highlighting, line numbers and
@@ -37,7 +39,10 @@ final class DiffPage {
 
     var view: NSView { page.webView }
 
-    func show(_ p: DiffPayload) {
+    func show(_ payload: DiffPayload) {
+        var p = payload
+        p.context = center?.panelContextKey
+        p.scrollTop = center?.diffScroll[p.key]
         lastShown = p
         cleared = nil
         page.call("show", p)
@@ -64,6 +69,10 @@ final class DiffPage {
     private func handle(_ msg: [String: Any]) {
         guard let center else { return }
         switch msg["type"] as? String {
+        case "scroll":
+            guard let key = msg["key"] as? String, let top = msg["top"] as? Double,
+                  msg["context"] as? String == center.panelContextKey else { return }
+            center.recordDiffScroll(key: key, top: top)
         case "addComment":
             guard let path = msg["path"] as? String, let start = msg["start"] as? Int, let end = msg["end"] as? Int,
                   let body = msg["body"] as? String else { return }

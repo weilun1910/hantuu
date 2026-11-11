@@ -259,6 +259,28 @@
   let viewID = null;
   let token = 0;
 
+  let positionTimer = null;
+  function schedulePosition() {
+    clearTimeout(positionTimer);
+    positionTimer = setTimeout(reportPosition, 120);
+  }
+  function reportPosition() {
+    clearTimeout(positionTimer);
+    const d = docs.get(currentID);
+    const st = stateOf(currentID);
+    if (!d || !st) return;
+    const previous = d.savedPosition || d.meta.position || {};
+    const position = {
+      ranges: st.selection.ranges.map((r) => ({ anchor: r.anchor, head: r.head })),
+      mainIndex: st.selection.mainIndex,
+      top: viewID === currentID && !host.hidden ? view.scrollDOM.scrollTop : previous.top || 0,
+      left: viewID === currentID && !host.hidden ? view.scrollDOM.scrollLeft : previous.left || 0,
+      previewTop: d.previewScroll || 0,
+    };
+    d.savedPosition = position;
+    R.post({ type: 'position', id: currentID, position });
+  }
+
   function detectIndent(text) {
     const lines = text.split('\n', 400);
     let tabs = 0;
@@ -314,6 +336,7 @@
   // Reports unsaved changes to Swift whenever they come or go. Undoing back to the saved text
   // counts as no changes.
   const changes = V.EditorView.updateListener.of((u) => {
+    if (u.selectionSet || u.docChanged) schedulePosition();
     if (!u.docChanged || viewID == null) return;
     const d = docs.get(viewID);
     if (!d) return;
@@ -334,6 +357,7 @@
 
   // Keeps the editor's state (and where it was scrolled) with its tab before the view moves on.
   function park() {
+    reportPosition();
     if (viewID == null || !view) return;
     const d = docs.get(viewID);
     if (d) {
@@ -345,6 +369,7 @@
   function ensureView(id, d) {
     if (!view) {
       view = new V.EditorView({ state: d.state, parent: host });
+      view.scrollDOM.addEventListener('scroll', schedulePosition);
     } else if (viewID !== id || view.state !== d.state) {
       view.setState(d.state);
     }
@@ -368,6 +393,7 @@
       host.hidden = true;
       previewEl.hidden = false;
       showPreview(d, stateOf(id).doc.toString());
+      R.post({ type: 'shown', id });
       return;
     }
     previewEl.hidden = true;
@@ -383,6 +409,12 @@
     d.scroll = null;
     settle();
     if (effects.length) { settle(); view.dispatch({ effects: V.EditorView.scrollIntoView(view.state.selection.main.head, { y: 'center' }) }); settle(); }
+    else if (d.position) {
+      view.scrollDOM.scrollTop = d.position.top || 0;
+      view.scrollDOM.scrollLeft = d.position.left || 0;
+    }
+    d.position = null;
+    R.post({ type: 'shown', id });
   }
 
   // ---- Previews ----
@@ -501,7 +533,7 @@
 
   previewEl.addEventListener('scroll', () => {
     const d = docs.get(currentID);
-    if (d && d.mode === 'preview') d.previewScroll = previewEl.scrollTop;
+    if (d && d.mode === 'preview') { d.previewScroll = previewEl.scrollTop; schedulePosition(); }
   });
 
   // ---- Swift's API ----
@@ -523,8 +555,13 @@
     open(p) {
       park();
       const old = docs.get(p.id);
-      const state = makeState(p, p.text);
-      const d = { meta: p, state, baseline: state.doc, dirty: false, mode: p.mode || 'source', saves: new Map(), previewScroll: 0 };
+      let state = makeState(p, p.text);
+      if (p.position && p.position.ranges && p.position.ranges.length) {
+        const clamp = (n) => Math.max(0, Math.min(state.doc.length, n || 0));
+        const ranges = p.position.ranges.map((r) => S.EditorSelection.range(clamp(r.anchor), clamp(r.head)));
+        state = state.update({ selection: S.EditorSelection.create(ranges, Math.max(0, Math.min(p.position.mainIndex || 0, ranges.length - 1))) }).state;
+      }
+      const d = { meta: p, state, baseline: state.doc, dirty: false, mode: p.mode || 'source', saves: new Map(), previewScroll: p.position ? p.position.previewTop || 0 : 0, position: p.position };
       docs.set(p.id, d);
       if (old && old.dirty) R.post({ type: 'dirty', id: p.id, dirty: false });
       if (viewID === p.id) viewID = null;
@@ -622,6 +659,7 @@
       document.body.classList.remove('previewing');
       empty.textContent = EMPTY;
       empty.hidden = false;
+      R.post({ type: 'shown', id: null });
     },
     // Native viewers cover the page for images, PDFs and the rest. This keeps it quiet
     // underneath them.

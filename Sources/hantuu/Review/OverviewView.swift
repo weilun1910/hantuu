@@ -95,8 +95,8 @@ struct OverviewCards: View {
         ScrollView {
             VStack(spacing: 10) {
                 session
-                if !review.work.subagents.isEmpty { AgentsCard(agents: review.work.subagents).id(chat.id) }
-                if !review.work.tasks.isEmpty { BackgroundTasksCard(tasks: review.work.tasks).id(chat.id) }
+                if !review.work.subagents.isEmpty { AgentsCard(agents: review.work.subagents, savedExpanded: overviewBinding(\.expandedAgents, fallback: []), savedShowAll: overviewBinding(\.allAgents, fallback: false)).id(chat.projectID) }
+                if !review.work.tasks.isEmpty { BackgroundTasksCard(tasks: review.work.tasks, savedShowAll: overviewBinding(\.allTasks, fallback: false)).id(chat.projectID) }
                 if let s = review.overviewSummary, s.files > 0, review.hasRepositories { changes(s) }
                 if let pr = review.pr { PullRequestCard(pr: pr) }
                 if let i = review.insights, let used = i.contextUsed, let window = i.contextWindow { context(used: used, window: window, guess: i.windowIsGuess) }
@@ -104,9 +104,21 @@ struct OverviewCards: View {
                 if !review.ports.isEmpty { PortsCard(ports: review.ports) }
             }
             .padding(14)
+            .background(PanelScrollMemory(key: chat.projectID.uuidString, offset: model.overviewScroll(project: chat.projectID)) { value in
+                model.setOverviewScroll(value, project: chat.projectID)
+            })
         }
         .scrollIndicators(.automatic)
         .background(Color.hChrome)
+    }
+
+    private func overviewBinding<Value>(_ keyPath: WritableKeyPath<OverviewPanelState, Value?>, fallback: Value) -> Binding<Value> {
+        let project = chat.projectID
+        return Binding(get: { model.overviewPanelState(project: project)[keyPath: keyPath] ?? fallback }, set: { value in
+            var state = model.overviewPanelState(project: project)
+            state[keyPath: keyPath] = value
+            model.setOverviewPanelState(state, project: project)
+        })
     }
 
     private var session: some View {

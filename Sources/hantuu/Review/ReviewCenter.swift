@@ -9,6 +9,13 @@ final class ReviewCenter: ObservableObject {
     static let shared = ReviewCenter()
 
     private(set) weak var model: AppModel?
+    private(set) var panelProjectID: UUID?
+    private var restoringPanel = false
+    private var savedRepositories: [String: RepositoryPanelState] = [:]
+    var diffScroll: [String: Double] = [:]
+    @Published var filesScroll: Double = 0 { didSet { rememberPanelState() } }
+    @Published var changesScroll: Double = 0 { didSet { rememberPanelState() } }
+    @Published var selectedFilePath: String? { didSet { rememberPanelState() } }
     @Published private(set) var chatID: UUID?
     @Published private(set) var folder: String?
     @Published private(set) var activeTab: PanelTab?
@@ -16,12 +23,12 @@ final class ReviewCenter: ObservableObject {
     // Changes
     @Published private(set) var repo: RepoInfo?
     @Published private(set) var repoChecked = false
-    @Published var base: DiffBase = .uncommitted { didSet { if base != oldValue { baseChanged() } } }
+    @Published var base: DiffBase = .uncommitted { didSet { if !restoringPanel, base != oldValue { baseChanged(); rememberPanelState() } } }
     @Published private(set) var changes: [ChangedFile] = []
     @Published private(set) var uncommitted: [ChangedFile] = []
     @Published private(set) var branchSummary: ChangeSummary?
     @Published private(set) var changesLoaded = false
-    @Published var selectedPath: String? { didSet { if selectedPath != oldValue { loadDiff() } } }
+    @Published var selectedPath: String? { didSet { if !restoringPanel, selectedPath != oldValue { loadDiff(); rememberPanelState() } } }
     @Published private(set) var comments: [String: [ReviewComment]] = [:]
     @Published private(set) var viewed: [String: String] = [:]
     @Published var flash: String?
@@ -32,9 +39,9 @@ final class ReviewCenter: ObservableObject {
     // diff below the sections is the focused repository's.
     @Published private(set) var repositories: [RepositoryChanges] = []
     @Published private(set) var discoveryTruncated = false
-    @Published var expandedRepositories: Set<String> = []
-    @Published var showCleanRepositories = false
-    @Published private(set) var focusedRepository: String?
+    @Published var expandedRepositories: Set<String> = [] { didSet { rememberPanelState() } }
+    @Published var showCleanRepositories = false { didSet { rememberPanelState() } }
+    @Published private(set) var focusedRepository: String? { didSet { rememberPanelState() } }
     private(set) var repositoryCenters: [String: ReviewCenter] = [:]
     private weak var parentReview: ReviewCenter?
     /// A repository's center: its part of the parent's last scan.
@@ -54,9 +61,26 @@ final class ReviewCenter: ObservableObject {
 
     // Files
     @Published private(set) var tree: FileTree?
-    @Published var filter = ""
-    @Published var expanded: Set<String> = []
+    @Published var filter = "" { didSet { rememberPanelState() } }
+    @Published var expanded: Set<String> = [] { didSet { rememberPanelState() } }
 
+    private struct CachedFolder {
+        var repo: RepoInfo?
+        var repoChecked: Bool
+        var changes: [ChangedFile]
+        var uncommitted: [ChangedFile]
+        var branchSummary: ChangeSummary?
+        var changesLoaded: Bool
+        var repositories: [RepositoryChanges]
+        var discoveryTruncated: Bool
+        var centers: [String: ReviewCenter]
+        var tree: FileTree?
+        var pr: PullRequestInfo?
+        var ports: [ListeningPort]
+        var page: DiffPage?
+        var lastDiffKey: String
+    }
+    private var cachedFolders: [String: CachedFolder] = [:]
     private var loadedDiffPage: DiffPage?
     /// Made on first use, so a repository section only gets a web view once it's opened.
     var diffPage: DiffPage {
@@ -92,6 +116,7 @@ final class ReviewCenter: ObservableObject {
     func configure(model: AppModel) {
         guard self.model !== model else { return }
         self.model = model
+        model.panelReview = self
         bag.removeAll()
         Publishers.Merge3(model.$selectedChatID.map { _ in () }, model.$selectedProjectID.map { _ in () }, model.$chats.map { _ in () })
             .receive(on: DispatchQueue.main)
@@ -108,23 +133,30 @@ final class ReviewCenter: ObservableObject {
         guard let model else { return }
         let chat = model.selectedChat
         let f = chat.map { model.workingDirectory(of: $0) } ?? model.currentProject?.path
-        guard chat?.id != chatID || f != folder else { return }
-        let folderChanged = f != folder
+        let pid = model.currentProject?.id
+        guard chat?.id != chatID || f != folder || pid != panelProjectID else { return }
+        let folderChanged = f != folder || pid != panelProjectID
+        if folderChanged {
+            rememberPanelState()
+            parkFolderContent()
+        }
+        restoringPanel = true
+        panelProjectID = pid
         chatID = chat?.id
         folder = f
         generation += 1
         for center in repositoryCenters.values {
             center.generation += 1
             center.chatID = chatID
-            center.loadedDiffPage?.clear("")
         }
         insightsFollower = nil
         insights = nil
         workTracker = AgentWorkTracker()
         work = AgentWork()
         if folderChanged {
+            flash = nil
             repo = nil
-            repositoryCenters.keys.forEach(dropRepositoryCenter)
+            repositoryCenters = [:]
             repositories = []
             expandedRepositories = []
             focusedRepository = nil
@@ -144,8 +176,112 @@ final class ReviewCenter: ObservableObject {
             lastDiffKey = ""
             stopWatching()
         }
-        diffPage.clear("")
+        if folderChanged {
+            let state = pid.flatMap { id in f.map { model.folderPanelState(project: id, folder: $0) } } ?? FolderPanelState()
+            restorePanelState(state)
+            restoreFolderContent()
+        }
+        restoringPanel = false
         updateActivity(refresh: true)
+    }
+
+    private func parkFolderContent() {
+        guard folder != nil, panelProjectID != nil else { return }
+        cachedFolders[panelContextKey] = CachedFolder(repo: repo, repoChecked: repoChecked,
+            changes: changes, uncommitted: uncommitted, branchSummary: branchSummary,
+            changesLoaded: changesLoaded, repositories: repositories, discoveryTruncated: discoveryTruncated,
+            centers: repositoryCenters, tree: tree, pr: pr, ports: ports, page: loadedDiffPage, lastDiffKey: lastDiffKey)
+        loadedDiffPage?.center = nil
+        loadedDiffPage = nil
+        for center in repositoryCenters.values {
+            center.generation += 1
+            center.activeTab = nil
+            center.parentReview = nil
+            center.model = nil
+            center.loadedDiffPage?.center = nil
+        }
+    }
+
+    private func restoreFolderContent() {
+        guard let cached = cachedFolders.removeValue(forKey: panelContextKey) else { return }
+        repo = cached.repo
+        repoChecked = cached.repoChecked
+        changes = cached.changes
+        uncommitted = cached.uncommitted
+        branchSummary = cached.branchSummary
+        changesLoaded = cached.changesLoaded
+        repositories = cached.repositories
+        discoveryTruncated = cached.discoveryTruncated
+        repositoryCenters = cached.centers
+        tree = cached.tree
+        pr = cached.pr
+        ports = cached.ports
+        loadedDiffPage = cached.page
+        loadedDiffPage?.center = self
+        lastDiffKey = cached.lastDiffKey
+        for center in repositoryCenters.values {
+            center.chatID = chatID
+            center.model = model
+            center.parentReview = self
+            center.loadedDiffPage?.center = center
+        }
+        updateRepositoryTabs()
+    }
+
+    func prunePanelCache(projects: Set<UUID>) {
+        let prefixes = projects.map { $0.uuidString + "|" }
+        for key in Array(cachedFolders.keys) where !prefixes.contains(where: { key.hasPrefix($0) }) {
+            guard let cached = cachedFolders.removeValue(forKey: key) else { continue }
+            cached.page?.close()
+            for center in cached.centers.values { center.loadedDiffPage?.close() }
+        }
+    }
+
+    /// Includes the project identity even when two projects point at the same folder.
+    var panelContextKey: String { "\(panelProjectID?.uuidString ?? "none")|\(folder ?? "")" }
+
+    func rememberPanelState() {
+        guard !restoringPanel else { return }
+        if let parentReview { parentReview.rememberPanelState(); return }
+        guard let model, let id = panelProjectID, let folder else { return }
+        var state = FolderPanelState()
+        state.base = base
+        state.selectedPath = selectedPath
+        state.expandedRepositories = expandedRepositories
+        state.showCleanRepositories = showCleanRepositories
+        state.focusedRepository = focusedRepository
+        var nested = savedRepositories
+        for (key, center) in repositoryCenters {
+            nested[key] = RepositoryPanelState(base: center.base, selectedPath: center.selectedPath, diffScroll: center.diffScroll)
+        }
+        state.repositories = nested
+        state.filter = filter
+        state.expanded = expanded
+        state.selectedFile = selectedFilePath
+        state.filesScroll = filesScroll
+        state.changesScroll = changesScroll
+        state.diffScroll = diffScroll
+        model.setFolderPanelState(state, project: id, folder: folder)
+    }
+
+    private func restorePanelState(_ state: FolderPanelState) {
+        base = state.base ?? .uncommitted
+        selectedPath = state.selectedPath
+        expandedRepositories = state.expandedRepositories ?? []
+        showCleanRepositories = state.showCleanRepositories ?? false
+        focusedRepository = state.focusedRepository
+        savedRepositories = state.repositories ?? [:]
+        filter = state.filter ?? ""
+        expanded = state.expanded ?? []
+        selectedFilePath = state.selectedFile
+        filesScroll = state.filesScroll ?? 0
+        changesScroll = state.changesScroll ?? 0
+        diffScroll = state.diffScroll ?? [:]
+    }
+
+    func recordDiffScroll(key: String, top: Double) {
+        diffScroll[key] = top
+        rememberPanelState()
     }
 
     /// Called by the panel whenever it syncs: which tab shows, if any.
@@ -334,16 +470,24 @@ final class ReviewCenter: ObservableObject {
         center.model = model
         center.chatID = chatID
         center.folder = folder
+        center.panelProjectID = panelProjectID
+        center.restoringPanel = true
         // Open on the comparison that has something to show: a branch whose work is all
         // committed opens on Branch rather than on an empty Uncommitted list.
         center.base = entry.uncommitted.isEmpty && entry.info.mergeBase != nil ? .branch : .uncommitted
-        if entry.hasChanges { expandedRepositories.insert(entry.id) }
+        if let saved = savedRepositories[entry.id] {
+            center.base = saved.base ?? center.base
+            center.selectedPath = saved.selectedPath
+            center.diffScroll = saved.diffScroll ?? [:]
+        } else if entry.hasChanges { expandedRepositories.insert(entry.id) }
+        center.restoringPanel = false
         repositoryCenters[entry.id] = center
         return center
     }
 
     private func dropRepositoryCenter(_ id: String) {
         guard let center = repositoryCenters.removeValue(forKey: id) else { return }
+        savedRepositories[id] = RepositoryPanelState(base: center.base, selectedPath: center.selectedPath, diffScroll: center.diffScroll)
         center.generation += 1
         center.loadedDiffPage?.close()
     }
@@ -398,7 +542,7 @@ final class ReviewCenter: ObservableObject {
             return
         }
         changesLoaded = false
-        refreshGit()
+        if activeTab != nil { refreshGit() }
     }
 
     var baseRef: String? {
