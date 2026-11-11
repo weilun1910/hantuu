@@ -334,8 +334,7 @@ struct CodexTranscriptParser: TranscriptParser {
                 return [ReaderEntry(id: id, kind: .user, text: kept.joined(separator: "\n\n").trimmingCharacters(in: .whitespacesAndNewlines), images: images, time: time)]
             }
             if role == "assistant" {
-                let t = texts.joined(separator: "\n\n").trimmingCharacters(in: .whitespacesAndNewlines)
-                return t.isEmpty ? [] : [ReaderEntry(id: id, kind: .assistant, text: t, time: time)]
+                return Self.answerEntries(texts.joined(separator: "\n\n"), id: id, time: time)
             }
             return [] // developer / system
 
@@ -372,6 +371,33 @@ struct CodexTranscriptParser: TranscriptParser {
         default:
             return []
         }
+    }
+
+    /// Codex puts tags meant for its own UI into an answer, and its TUI parses them out.
+    /// When it used a memory file it appends an `<oai-mem-citation>` block as the very last
+    /// thing in the reply: dropped here. In plan mode the plan comes inside `<proposed_plan>`:
+    /// shown as the reader's plan card, with any prose around it kept in order.
+    static func answerEntries(_ raw: String, id: String, time: String?) -> [ReaderEntry] {
+        var s = raw
+        while let open = s.range(of: "<oai-mem-citation>") {
+            let end = s.range(of: "</oai-mem-citation>", range: open.upperBound..<s.endIndex)?.upperBound ?? s.endIndex
+            s.removeSubrange(open.lowerBound..<end)
+        }
+        var out: [ReaderEntry] = []
+        func prose(_ t: Substring) {
+            let t = t.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !t.isEmpty { out.append(ReaderEntry(id: out.isEmpty ? id : "\(id)-\(out.count)", kind: .assistant, text: t, time: time)) }
+        }
+        var rest = s[...]
+        while let open = rest.range(of: "<proposed_plan>") {
+            prose(rest[..<open.lowerBound])
+            let close = rest.range(of: "</proposed_plan>", range: open.upperBound..<rest.endIndex)
+            let plan = rest[open.upperBound..<(close?.lowerBound ?? rest.endIndex)].trimmingCharacters(in: .whitespacesAndNewlines)
+            if !plan.isEmpty { out.append(ReaderEntry(id: out.isEmpty ? id : "\(id)-\(out.count)", kind: .plan, text: plan, time: time)) }
+            rest = rest[(close?.upperBound ?? rest.endIndex)...]
+        }
+        prose(rest)
+        return out
     }
 
     /// Codex injects its context (AGENTS.md, environment, permissions) as user messages.

@@ -135,6 +135,18 @@ enum SelfTest {
         check("codex: errors stand out", all.contains { $0.kind == .error && $0.text == "stream disconnected" })
         check("codex: interruption is a notice", all.contains { $0.kind == .notice && $0.text == "Turn interrupted" })
         check("codex: reasoning and outputs hidden", !all.contains { $0.text.contains("zzz") || $0.text == "hello" })
+
+        // Tags Codex writes for its own UI, from a real 0.167 rollout.
+        let cited = CodexTranscriptParser.answerEntries("Saved in the [course notes](/x/MEMORY.md).\n\n<oai-mem-citation>\n<citation_entries>\nMEMORY.md:1118-1122|note=[attempt first tutoring workflow]\n</citation_entries>\n<rollout_ids>\n01a0ca8d-965c-7f52-8b65-ac99fc83df95\n</rollout_ids>\n</oai-mem-citation>", id: "a", time: nil)
+        check("codex: memory citation block hidden", cited.count == 1 && cited[0].kind == .assistant && cited[0].text == "Saved in the [course notes](/x/MEMORY.md).", "\(cited.map(\.text))")
+        let cut = CodexTranscriptParser.answerEntries("Done.\n\n<oai-mem-citation>\n<citation_entries>", id: "a", time: nil)
+        check("codex: unclosed memory citation hidden", cut.map(\.text) == ["Done."], "\(cut.map(\.text))")
+        check("codex: citation-only answer shows nothing", CodexTranscriptParser.answerEntries("<oai-mem-citation></oai-mem-citation>", id: "a", time: nil).isEmpty)
+        let planned = CodexTranscriptParser.answerEntries("Here's the plan.\n\n<proposed_plan>\n# Fix it\n- step one\n</proposed_plan>\n\nSay go.", id: "a", time: nil)
+        check("codex: proposed plan becomes a plan card, prose kept in order",
+              planned.map(\.kind) == [.assistant, .plan, .assistant] && planned[1].text == "# Fix it\n- step one" && Set(planned.map(\.id)).count == 3,
+              "\(planned.map { "\($0.kind):\($0.text)" })")
+        check("codex: tags in code stay when not Codex's", CodexTranscriptParser.answerEntries("Use `<b>` here.", id: "a", time: nil).first?.text == "Use `<b>` here.")
     }
 
     // MARK: Discovery
