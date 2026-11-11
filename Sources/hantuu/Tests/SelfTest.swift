@@ -54,6 +54,7 @@ enum SelfTest {
         status(workdir)   // agent states, hooks, notifications, snapshots (Status/StatusSelfTest.swift)
         readerMode(workdir) // settings, the message box, Stop, the banner, snapshots (ReaderMode/ReaderModeSelfTest.swift)
         readerCommands(workdir)
+        releaseSnapshots(workdir) // reader command menus and queued messages for the release
         agentWork(workdir)  // subagents, background tasks, the status they hold up, snapshots (Tests/AgentWorkSelfTest.swift)
         projectPanels(workdir)
         subagentBrowser(workdir) // sidebar navigation and read-only child transcripts

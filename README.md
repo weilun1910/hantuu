@@ -45,6 +45,10 @@ The chat stays at Running in background until its subagents and background tasks
 
 <img src="docs/screenshots/running-in-background.png" width="260" alt="The sidebar showing chats with subagents and a background command still running, alongside working and finished chats">
 
+Chats with subagents show a count and chevron at the end of their row. Expand it to see what each one is doing, with nested subagents under their parent. Click one to read its conversation live in a read-only reader. Finished subagents drop out of the sidebar, but one you're reading stays open until you leave it.
+
+<img src="docs/screenshots/sidebar-subagents.png" width="260" alt="An expanded chat with its subagents nested underneath, each showing what it is doing">
+
 When something is waiting, the top of the sidebar says how many chats need you, and Cmd-J jumps to the next one. hantuu also sends a macOS notification that quotes the actual question, and clicking it opens that chat. The Dock icon shows the count too. The order of your chats never changes on its own, so Cmd-1 to Cmd-9 always mean the same thing.
 
 The states come from Claude Code's own hooks and Codex's own notifications, which hantuu passes to each chat when it starts. Your Claude and Codex settings files are never touched.
@@ -74,6 +78,8 @@ Cmd-N opens your default agent in the selected project, so you're talking to it 
 ### Review the agent's changes without leaving hantuu
 
 The right panel has five tabs: Overview, Changes, Files, Code and Terminal.
+
+Each project remembers its panel tab, open Code tabs, Files and Changes views, and shell tabs. Chats in the same project share that panel, and switching projects brings back where you left off. Unsaved edits stay open while you switch. The tabs and view positions come back after a restart too.
 
 Overview is a column of cards for the selected chat. They cover:
 - the session and its branch
@@ -115,6 +121,14 @@ Images and PDFs in a message show as compact previews side by side. Click one to
 ![The reader's message box with a pasted image and several file attachments shown as compact chips](docs/screenshots/message-box-attachments.png)
 
 ![The same chat as the reader, with the image shown inline, the formulas rendered and a message box at the bottom](docs/screenshots/reader-mode.jpg)
+
+Type **/** to browse the agent's commands. Claude Code includes personal and project commands, skills and plugins. Codex includes its commands and saved prompts, with **$** for skills. **Tab** completes a choice and **Esc** closes the menu. Commands like **/model** bring up the terminal's picker, then return you to the reader when you're done.
+
+![Claude Code's command menu above the reader's message box, with built-ins and a project skill](docs/screenshots/slash-menu.png)
+
+Send another message while the agent works and it appears immediately with a **Queued** label. The label disappears when the agent receives it, and messages delivered during a turn stay in the conversation.
+
+![A follow-up message marked Queued while the agent checks a layout](docs/screenshots/reader-queued.png)
 
 ### Open any file next to the chat
 
@@ -217,7 +231,7 @@ scripts/run.sh --data-dir "$PWD/tmp/appdata"
 
 ## Status
 
-This is v2.1. Expect some rough edges. A companion iOS app for checking on chats from my phone is planned once the desktop app settles. A signed, notarized download isn't there yet.
+This is v2.2. Expect some rough edges. A companion iOS app for checking on chats from my phone is planned once the desktop app settles. A signed, notarized download isn't there yet.
 
 See the [release notes](docs/releases/) for what changed in each version.
 

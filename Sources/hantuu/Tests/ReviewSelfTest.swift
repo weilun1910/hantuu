@@ -557,7 +557,7 @@ extension SelfTest {
         try? (lines.joined(separator: "\n") + "\n").write(to: url, atomically: true, encoding: .utf8)
     }
 
-    static func render(_ view: NSView, to url: URL) -> Bool {
+    static func render(_ view: NSView, to url: URL, overlays: [NSView] = []) -> Bool {
         view.layoutSubtreeIfNeeded()
         view.displayIfNeeded()
         let bounds = view.bounds
@@ -572,6 +572,14 @@ extension SelfTest {
             _ = waitUntil(5) { done }
             if let image { shots.append((w.convert(w.bounds, to: view), image)) }
         }
+        // WebKit snapshots cover the cached native views. Capture floating menus separately
+        // so they can be drawn above the page, just as they are in the window.
+        var overlayShots: [(NSRect, NSBitmapImageRep)] = []
+        for overlay in overlays where !overlay.isHiddenOrHasHiddenAncestor && !overlay.bounds.isEmpty {
+            guard let bitmap = overlay.bitmapImageRepForCachingDisplay(in: overlay.bounds) else { return false }
+            overlay.cacheDisplay(in: overlay.bounds, to: bitmap)
+            overlayShots.append((overlay.convert(overlay.bounds, to: view), bitmap))
+        }
         guard let out = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: cached.pixelsWide, pixelsHigh: cached.pixelsHigh, bitsPerSample: 8,
                                          samplesPerPixel: 4, hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0) else { return false }
         out.size = bounds.size
@@ -582,6 +590,7 @@ extension SelfTest {
         bounds.fill()
         cached.draw(in: bounds)
         for (r, img) in shots { img.draw(in: r) }
+        for (r, img) in overlayShots { img.draw(in: r) }
         NSGraphicsContext.restoreGraphicsState()
         guard let png = out.representation(using: .png, properties: [:]) else { return false }
         Paths.ensure(url.deletingLastPathComponent())
