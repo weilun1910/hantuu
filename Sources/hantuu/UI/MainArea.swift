@@ -52,6 +52,7 @@ final class MainAreaController: NSViewController {
     private var emptyView: NSView!
     /// Reader mode: the chat as the reader with a message box, over its terminal (ReaderMode/).
     private(set) lazy var readerMode = ReaderModeController(model: model)
+    private var subagentReader: SubagentReaderController?
     private var bag = Set<AnyCancellable>()
 
     init(model: AppModel) {
@@ -100,16 +101,34 @@ final class MainAreaController: NSViewController {
         sync()
     }
 
+    /// Requests aimed at a hidden parent terminal go to the subagent reader instead.
+    func focusTarget(for requested: NSView) -> NSView? {
+        if model.subagentBrowser.selection != nil, model.chats.contains(where: { $0.terminal === requested }) {
+            return subagentReader?.reader.view
+        }
+        return readerMode.focusTarget(for: requested)
+    }
+
     func sync() {
         let terminals = model.chats.compactMap { $0.terminal }
         let selected = model.selectedChat
-        let face = readerMode.sync(selected: selected)
-        container.show(terminals, visible: face.showsReader ? nil : selected?.terminal)
+        let browsingSubagent = model.subagentBrowser.selection != nil && selected != nil
+        let face = readerMode.sync(selected: browsingSubagent ? nil : selected)
+        if browsingSubagent, subagentReader == nil {
+            let reader = SubagentReaderController(model: model)
+            reader.install(in: view, top: header.bottomAnchor)
+            subagentReader = reader
+        }
+        subagentReader?.sync()
+        container.show(terminals, visible: face.showsReader || browsingSubagent ? nil : selected?.terminal)
         let ended = selected?.status == .ended
         endedBar.isHidden = !ended
         container.bottomInset = ended || face.peeking ? 38 : 0
         emptyView.isHidden = selected != nil && selected?.terminal != nil
-        if let s = selected, s.terminal == nil {
+        if browsingSubagent {
+            endedBar.isHidden = true
+            emptyView.isHidden = true
+        } else if let s = selected, s.terminal == nil {
             // An earlier chat restored from disk: nothing running yet.
             emptyView.isHidden = true
             endedBar.isHidden = false
@@ -128,14 +147,21 @@ struct ChatHeader: View {
                     Spacer().frame(width: 66)
                     IconButton(symbol: "sidebar.left", help: "Show Sidebar  ⌘0") { model.sidebarVisible = true }
                 }
-                if let chat = model.selectedChat {
+                if let selected = model.subagentBrowser.selection, let chat = model.selectedChat {
+                    IconButton(symbol: "chevron.left", help: "Back to parent chat  ⌘[") { _ = model.backFromSubagent() }
+                    Text(selected.agent.title).font(.system(size: 13, weight: .medium)).foregroundStyle(Color.hText).lineLimit(1)
+                    Button { _ = model.backFromSubagent() } label: {
+                        Text("Subagent of \(chat.displayTitle)").font(.system(size: 12)).foregroundStyle(Color.hSecondary).lineLimit(1)
+                    }
+                    .buttonStyle(.plain)
+                } else if let chat = model.selectedChat {
                     ChatTitle(chat: chat)
                 } else {
                     Text("hantuu").font(.system(size: 13, weight: .medium)).foregroundStyle(Color.hSecondary)
                 }
                 Spacer()
                 // Switches the chat between its terminal and the reader (Shift-Cmd-R).
-                ChatFaceButtons()
+                if model.subagentBrowser.selection == nil { ChatFaceButtons() }
                 IconButton(symbol: "sidebar.right", help: model.panelVisible ? "Hide Panel  ⌥⌘0" : "Show Panel  ⌥⌘0", active: model.panelVisible) {
                     model.panelVisible.toggle()
                 }

@@ -86,7 +86,14 @@ enum BackgroundRules {
             let file = a.transcript ?? a.agentID.flatMap { id in folder?.appendingPathComponent("agent-\(id).jsonl").path }
             var last = [began, mtime(file)].compactMap { $0 }.max()
             // Waiting on its own agents: they're the ones writing.
-            if a.state == .waiting, let n = newestInFolder() { last = max(last ?? n, n) }
+            if a.state == .waiting {
+                if let n = newestInFolder() { last = max(last ?? n, n) }
+                for child in work.subagents where child.parentID == a.id && child.state.isActive {
+                    if let n = [child.activeSince, child.startedAt, mtime(child.transcript)].compactMap({ $0 }).max() {
+                        last = max(last ?? n, n)
+                    }
+                }
+            }
             if let last, now.timeIntervalSince(last) > quietAgent {
                 work.subagents[i].state = .stale
                 work.subagents[i].step = nil
@@ -176,9 +183,14 @@ final class WorkFollower {
 final class BackgroundWatch {
     var interval: TimeInterval = 2
     var deliver: ((UUID, BackgroundSummary) -> Void)?
+    var deliverSubagents: ((UUID, [SidebarSubagent]) -> Void)?
+    /// Tests point child rollout discovery at their fixture folder.
+    var codexRoot: URL = Paths.codexSessions
     private weak var model: AppModel?
     private let queue = DispatchQueue(label: "hantuu.background-work", qos: .utility)
     private var followers: [UUID: WorkFollower] = [:]   // on the queue only
+    private var agentTrackers: [UUID: AgentWorkTracker] = [:]
+    private var lastAgents: [UUID: [SidebarSubagent]] = [:]
     private var timer: Timer?
     private var busy = false
 
@@ -211,22 +223,53 @@ final class BackgroundWatch {
             guard c.status != .ended, let p = c.transcriptPath, let kind = c.agent.transcript else { return nil }
             return Job(id: c.id, url: URL(fileURLWithPath: p), kind: kind, processStart: c.startedAt)
         }
+        let codexRoot = self.codexRoot
         busy = true
         queue.async {
             let live = Set(jobs.map(\.id))
             self.followers = self.followers.filter { live.contains($0.key) }
+            self.agentTrackers = self.agentTrackers.filter { live.contains($0.key) }
+            var agentUpdates: [(UUID, [SidebarSubagent])] = []
+            for id in Array(self.lastAgents.keys) where !live.contains(id) {
+                let ended = (self.lastAgents.removeValue(forKey: id) ?? []).map { agent -> SidebarSubagent in
+                    var agent = agent
+                    if agent.state.isActive { agent.state = .stopped; agent.step = nil }
+                    return agent
+                }
+                agentUpdates.append((id, ended))
+            }
             var out: [(UUID, BackgroundSummary)] = []
             for j in jobs {
-                if self.followers[j.id]?.url != j.url { self.followers[j.id] = WorkFollower(url: j.url, kind: j.kind) }
+                if self.followers[j.id]?.url != j.url {
+                    self.followers[j.id] = WorkFollower(url: j.url, kind: j.kind)
+                    self.agentTrackers[j.id] = nil
+                }
                 guard let f = self.followers[j.id] else { continue }
                 var work = f.poll()
-                BackgroundRules.settle(&work, transcript: j.url, processStart: j.processStart, now: now)
+                if work.subagents.contains(where: { $0.state.isActive }) || self.agentTrackers[j.id]?.hasOpenSubagents == true {
+                    let tracker = self.agentTrackers[j.id] ?? AgentWorkTracker()
+                    tracker.codexRoot = codexRoot
+                    self.agentTrackers[j.id] = tracker
+                    work = tracker.update(work, transcript: j.url, kind: j.kind, processStart: j.processStart, now: now, sidebarOnly: true)
+                } else {
+                    self.agentTrackers[j.id] = nil
+                    BackgroundRules.settle(&work, transcript: j.url, processStart: j.processStart, now: now)
+                }
+                let agents = work.subagents.map(SidebarSubagent.init)
+                if self.lastAgents[j.id] != agents {
+                    self.lastAgents[j.id] = agents
+                    agentUpdates.append((j.id, agents))
+                }
                 var s = BackgroundSummary.of(work)
                 s.checkedAt = now
                 out.append((j.id, s))
             }
             DispatchQueue.main.async {
                 self.busy = false
+                for (id, agents) in agentUpdates {
+                    self.model?.updateSubagents(agents, for: id)
+                    self.deliverSubagents?(id, agents)
+                }
                 for (id, s) in out { self.deliver?(id, s) }
                 completion?()
             }

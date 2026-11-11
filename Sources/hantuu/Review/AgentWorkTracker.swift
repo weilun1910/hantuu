@@ -23,23 +23,26 @@ final class AgentWorkTracker {
     private var codexFiles: [String: URL] = [:]
     private var codexLookups: [String: Date] = [:]
     private var codexTails: [String: (tail: LineTail, parser: CodexChildParser)] = [:]
+    private var codexWork: [String: CodexWorkParser] = [:]
     var codexRoot: URL = Paths.codexSessions
+    private(set) var hasOpenSubagents = false
 
     /// `processStart` is when the chat's agent process started, or nil once it has ended.
-    func update(_ base: AgentWork, transcript: URL, kind: TranscriptKind, processStart: Date?, now: Date = Date()) -> AgentWork {
+    func update(_ base: AgentWork, transcript: URL, kind: TranscriptKind, processStart: Date?, now: Date = Date(), sidebarOnly: Bool = false) -> AgentWork {
         var out: AgentWork
         switch kind {
-        case .claude: out = claude(base, transcript: transcript)
-        case .codex: out = codex(base, transcript: transcript)
+        case .claude: out = claude(base, transcript: transcript, sidebarOnly: sidebarOnly)
+        case .codex: out = codex(base, transcript: transcript, sidebarOnly: sidebarOnly)
         }
         // The same rules the sidebar's status uses, so the two never disagree.
         BackgroundRules.settle(&out, transcript: transcript, processStart: processStart, now: now)
+        hasOpenSubagents = out.subagents.contains { $0.state.isActive }
         return out
     }
 
     // MARK: Claude Code
 
-    private func claude(_ base: AgentWork, transcript: URL) -> AgentWork {
+    private func claude(_ base: AgentWork, transcript: URL, sidebarOnly: Bool) -> AgentWork {
         let dir = transcript.deletingPathExtension().appendingPathComponent("subagents", isDirectory: true)
         if dir != folder {
             folder = dir
@@ -102,8 +105,9 @@ final class AgentWorkTracker {
                     agents[i].state = .done
                     agents[i].endedAt = entry.parser.lastActivity
                 }
-                if agents[i].prompt == nil { agents[i].prompt = prompt(aid, file: file) }
+                if !sidebarOnly, agents[i].prompt == nil { agents[i].prompt = prompt(aid, file: file) }
             } else {
+                if sidebarOnly { tails[aid] = nil; continue }
                 if let entry = tails.removeValue(forKey: aid), let r = entry.parser.report { reports[aid] = r }
                 if agents[i].result == nil {
                     if reports[aid] == nil, reads < Self.reportReadsPerUpdate {
@@ -175,10 +179,25 @@ final class AgentWorkTracker {
 
     // MARK: Codex
 
-    private func codex(_ base: AgentWork, transcript: URL) -> AgentWork {
+    private func codex(_ base: AgentWork, transcript: URL, sidebarOnly: Bool) -> AgentWork {
         var agents = base.subagents
-        for i in agents.indices {
+        var index = 0
+        var seen = Set(agents.map(\.id))
+        // Read a child's work from the same tail as its status, including its own children.
+        while index < agents.count, index < 512 {
+            let i = index
+            index += 1
             guard let thread = agents[i].agentID else { continue }
+            if sidebarOnly, !agents[i].state.isActive {
+                agents[i].transcript = codexFiles[thread]?.path
+                if agents[i].state == .done, let work = codexWork[thread] {
+                    for var child in work.work.subagents where seen.insert(child.id).inserted {
+                        child.parentID = agents[i].id
+                        agents.append(child)
+                    }
+                }
+                continue
+            }
             if codexFiles[thread] == nil {
                 // A new rollout can take a moment to appear; look again every few seconds.
                 if let last = codexLookups[thread], Date().timeIntervalSince(last) < 5 { continue }
@@ -191,10 +210,19 @@ final class AgentWorkTracker {
             }
             guard let url = codexFiles[thread], var entry = codexTails[thread] else { continue }
             agents[i].transcript = url.path
+            var work = codexWork[thread] ?? CodexWorkParser()
             for line in entry.tail.read(limit: 4 << 20) {
-                if let obj = (try? JSONSerialization.jsonObject(with: line)) as? [String: Any] { entry.parser.consume(obj) }
+                if let obj = (try? JSONSerialization.jsonObject(with: line)) as? [String: Any] {
+                    entry.parser.consume(obj)
+                    work.consume(obj)
+                }
             }
+            codexWork[thread] = work
             codexTails[thread] = entry
+            for var child in work.work.subagents where seen.insert(child.id).inserted {
+                child.parentID = agents[i].id
+                agents.append(child)
+            }
             let c = entry.parser
             if agents[i].type == nil { agents[i].type = c.role ?? c.nickname }
             if let running = c.running {
@@ -211,6 +239,18 @@ final class AgentWorkTracker {
                 }
             }
             if let m = c.lastMessage { agents[i].result = m }
+        }
+        // A completed turn can still be waiting on children it started.
+        for _ in 0..<agents.count {
+            var changed = false
+            for i in agents.indices where agents[i].state == .done {
+                if agents.contains(where: { $0.parentID == agents[i].id && $0.state.isActive }) {
+                    agents[i].state = .waiting
+                    agents[i].step = nil
+                    changed = true
+                }
+            }
+            if !changed { break }
         }
         return AgentWork(subagents: agents, tasks: base.tasks)
     }
