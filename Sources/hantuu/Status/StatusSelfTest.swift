@@ -225,7 +225,8 @@ extension SelfTest {
         let json = AgentHooks.claudeSettingsJSON
         let obj = (try? JSONSerialization.jsonObject(with: Data(json.utf8))) as? [String: Any]
         let hooks = obj?["hooks"] as? [String: Any] ?? [:]
-        check("settings: --settings JSON parses with only a hooks key", obj != nil && obj?.keys.sorted() == ["hooks"])
+        check("settings: --settings JSON parses with the hooks, plus the usage status line only when it's on",
+              obj != nil && obj?.keys.sorted() == (ClaudeUsage.statusLineEnabled ? ["hooks", "statusLine"] : ["hooks"]))
         check("settings: hooks every event bet 1 needs", Set(hooks.keys) == Set(AgentHooks.claudeEvents)
               && ["UserPromptSubmit", "PreToolUse", "PostToolUse", "PermissionRequest", "Notification", "Stop", "SessionEnd"].allSatisfy { hooks[$0] != nil })
         var commands: [String] = []
