@@ -85,7 +85,8 @@ The reader follows the conversation as it happens. Your messages sit on the righ
 
 Images and PDFs that come up in the chat appear inline instead of as paths. LaTeX is rendered with KaTeX, and code blocks are highlighted with a Copy button. That's what makes it usable for studying.
 
-- Return sends and Shift-Return adds a line. Dropping files on the box types their paths.
+- Return sends and Shift-Return adds a line.
+- Paste a screenshot with Cmd-V, drop files on the box or pick them with the paperclip. They show as small chips above your message, and pictures reach the agent as real image attachments.
 - While the agent works, a line above the box says what it's doing. Esc or the Stop button stops it.
 - When it wants your permission or asks a question with options, a banner says so. Show Terminal brings up the terminal so you can answer there, and the reader comes back once the agent carries on.
 
