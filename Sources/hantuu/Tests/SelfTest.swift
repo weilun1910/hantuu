@@ -52,6 +52,7 @@ enum SelfTest {
         status(workdir)   // agent states, hooks, notifications, snapshots (Status/StatusSelfTest.swift)
         readerMode(workdir) // settings, the message box, Stop, the banner, snapshots (ReaderMode/ReaderModeSelfTest.swift)
         agentWork(workdir)  // subagents, background tasks, the status they hold up, snapshots (Tests/AgentWorkSelfTest.swift)
+        projectPanels(workdir)
         fileViewer(workdir) // the Code tab as a file viewer and editor (FileViewer/FileViewerSelfTest.swift)
         usage(workdir)    // usage limits and the footer rings (Usage/UsageSelfTest.swift)
         keepAwake(workdir)  // the lid-shut switch, its limits, the crash check (Tests/KeepAwakeSelfTest.swift)

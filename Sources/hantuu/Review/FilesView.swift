@@ -54,7 +54,8 @@ struct FileTreeList: View {
             .padding(.vertical, 5)
             // The filtered list and the tree share row ids (paths); a fresh stack for each
             // keeps filtered rows from reusing the tree's indented ones.
-            .id(filtering ? "filter" : "tree")
+            .id(review.panelContextKey + (filtering ? "|filter" : "|tree"))
+            .rememberPanelScroll(review, files: true)
         }
     }
 
@@ -112,7 +113,7 @@ struct FileRow: View {
         .padding(.leading, 10)
         .padding(.trailing, 12)
         .frame(height: 23)
-        .background(RoundedRectangle(cornerRadius: 5).fill(hovering ? Color.hHover : .clear))
+        .background(RoundedRectangle(cornerRadius: 5).fill(review.selectedFilePath == node.path ? Color.hSelection : (hovering ? Color.hHover : .clear)))
         .padding(.horizontal, 6)
         .contentShape(Rectangle())
         .onTapGesture { tap() }
@@ -131,6 +132,7 @@ struct FileRow: View {
     private var absolute: String { ((review.folder ?? "") as NSString).appendingPathComponent(node.path) }
 
     private func tap() {
+        review.selectedFilePath = node.path
         if node.isDirectory {
             review.toggleExpanded(node.path)
         } else if NSEvent.modifierFlags.contains(.option) {

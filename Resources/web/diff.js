@@ -83,7 +83,11 @@
   let box = null;
   const scrollMemory = {};
 
-  window.addEventListener('scroll', () => { if (current) scrollMemory[current.key] = scroller.scrollTop; });
+  window.addEventListener('scroll', () => {
+    if (!current) return;
+    scrollMemory[current.context + '|' + current.key] = scroller.scrollTop;
+    post({ type: 'scroll', context: current.context, key: current.key, top: scroller.scrollTop });
+  });
 
   function isLine(r) { return r && (r.t === 'c' || r.t === 'a' || r.t === 'd'); }
 
@@ -136,7 +140,7 @@
     view.appendChild(table);
     rowEls = Array.from(tb.rows);
     drawComments();
-    scroller.scrollTop = p.keepScroll && scrollMemory[p.key] != null ? scrollMemory[p.key] : 0;
+    scroller.scrollTop = p.scrollTop != null ? p.scrollTop : (p.keepScroll ? scrollMemory[p.context + '|' + p.key] || 0 : 0);
   }
 
   // ---- Selecting lines and the comment box ----

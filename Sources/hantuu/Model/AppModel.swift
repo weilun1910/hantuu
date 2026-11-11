@@ -87,11 +87,12 @@ final class Chat: ObservableObject, Identifiable {
 }
 
 final class PanelShell: ObservableObject, Identifiable {
-    let id = UUID()
+    let id: UUID
     let projectID: UUID
     let terminal: TerminalView
     @Published var title = "Shell"
-    init(projectID: UUID, terminal: TerminalView) {
+    init(id: UUID = UUID(), projectID: UUID, terminal: TerminalView) {
+        self.id = id
         self.projectID = projectID
         self.terminal = terminal
     }
@@ -99,7 +100,7 @@ final class PanelShell: ObservableObject, Identifiable {
 
 /// A tab in the Code panel: any file, in the viewer that suits it (FileViewer/).
 struct CodeTab: Identifiable, Equatable {
-    let id = UUID()
+    var id = UUID()
     var path: String
     var line: Int?
     /// Counts link clicks that asked for a line, so asking for the same line again still
@@ -110,6 +111,7 @@ struct CodeTab: Identifiable, Equatable {
     var kind: ViewerKind = .text
     /// The editor has changes that aren't saved.
     var dirty = false
+    var editorPosition: EditorPosition?
     var name: String { (path as NSString).lastPathComponent }
     var isMarkdown: Bool { kind == .markdown }
 }
@@ -144,6 +146,7 @@ struct SavedState: Codable {
     var sidebarWidth: Double?
     var panelWidth: Double?
     var pinnedExpanded: Bool?
+    var projectPanels: [String: ProjectPanelState]?
 
     init() {}
 
@@ -159,6 +162,7 @@ struct SavedState: Codable {
         windowFrame = get(.windowFrame)
         sidebarWidth = get(.sidebarWidth)
         panelWidth = get(.panelWidth)
+        projectPanels = (get(.projectPanels) as [String: Lenient<ProjectPanelState>]?)?.compactMapValues(\.value)
         pinnedExpanded = get(.pinnedExpanded)
     }
 
@@ -183,21 +187,29 @@ final class AppModel: ObservableObject, TerminalEvents {
 
     @Published var projects: [Project] = []
     @Published var chats: [Chat] = []
-    @Published var selectedChatID: UUID?
-    @Published var selectedProjectID: UUID?
+    @Published var selectedChatID: UUID? { didSet { syncProjectPanel() } }
+    @Published var selectedProjectID: UUID? { didSet { syncProjectPanel() } }
     @Published var agents: [AgentDefinition] = []
     @Published var agentsLoaded = false
     @Published var defaultAgentID = "claude"
     @Published var sidebarVisible = true
     @Published var panelVisible = false
-    @Published var panelTab: PanelTab = .overview
+    @Published var panelTab: PanelTab = .overview { didSet { rememberProjectPanel() } }
     @Published var shells: [PanelShell] = []
-    @Published var selectedShellID: [UUID: UUID] = [:]
-    @Published var codeTabs: [CodeTab] = []
+    @Published var selectedShellID: [UUID: UUID] = [:] { didSet { rememberProjectPanel() } }
+    @Published var codeTabs: [CodeTab] = [] { didSet { rememberProjectPanel() } }
     @Published var pinnedExpanded = true
-    @Published var selectedCodeTabID: UUID?
+    @Published var selectedCodeTabID: UUID? { didSet { rememberProjectPanel() } }
     /// The Code tab's controller, for saving and the unsaved-changes prompts.
     weak var fileViewer: FileViewerController?
+    weak var panelReview: ReviewCenter?
+    private(set) var projectPanels: [UUID: ProjectPanelState] = [:]
+    private var projectCodeTabs: [UUID: [CodeTab]] = [:]
+    private(set) var panelProjectID: UUID?
+    private var switchingPanel = false
+    private var capturingPanelSnapshot = false
+    /// Tests that construct a model without load() never write application state.
+    private var persistenceEnabled = false
     let keepAwake = KeepAwake()
 
     var windowFrame: String?
@@ -261,16 +273,13 @@ final class AppModel: ObservableObject, TerminalEvents {
     func load() {
         FileRouter.shared.openInCode = { [weak self] path, line in self?.openFile(path, line: line) }
         if let data = try? Data(contentsOf: Paths.stateFile), let s = Self.readState(data) {
-            let here = s.projects.filter { FileManager.default.fileExists(atPath: $0.path) }
-            projects = here
-            awayProjects = s.projects.filter { p in !here.contains { $0.id == p.id } }
-            awayChats = s.chats.filter { sc in awayProjects.contains { $0.id == sc.projectID } }
+            restoreProjectList(s)
             if !awayProjects.isEmpty { Log.write("state: kept \(awayProjects.count) project(s) whose folder is missing: \(awayProjects.map(\.path))") }
             defaultAgentID = s.defaultAgentID
             pinnedExpanded = s.pinnedExpanded ?? true
             sidebarVisible = s.sidebarVisible
             panelVisible = s.panelVisible
-            panelTab = s.panelTab
+            restoreProjectPanels(s)
             windowFrame = s.windowFrame
             sidebarWidth = s.sidebarWidth
             panelWidth = s.panelWidth
@@ -291,6 +300,8 @@ final class AppModel: ObservableObject, TerminalEvents {
             }
         }
         selectedProjectID = projects.first?.id
+        restorePanelShells()
+        persistenceEnabled = true
         // Agents that kept running in hantuu-session while the app was closed reattach.
         restoreSessions()
         // Reads the Keep awake switch, and turns sleep back on if an earlier hantuu left it off.
@@ -362,6 +373,7 @@ final class AppModel: ObservableObject, TerminalEvents {
     // MARK: Persistence
 
     func scheduleSave() {
+        guard persistenceEnabled, !capturingPanelSnapshot else { return }
         saveWork?.cancel()
         let w = DispatchWorkItem { [weak self] in self?.save() }
         saveWork = w
@@ -382,12 +394,155 @@ final class AppModel: ObservableObject, TerminalEvents {
         s.sidebarVisible = sidebarVisible
         s.panelVisible = panelVisible
         s.panelTab = panelTab
+        s.projectPanels = savedProjectPanels()
         s.windowFrame = windowFrame
         s.sidebarWidth = sidebarWidth
         s.panelWidth = panelWidth
         Paths.ensure(Paths.dataDir)
         if let data = try? JSONEncoder.hantuu.encode(s) {
             try? data.write(to: Paths.stateFile, options: .atomic)
+        }
+    }
+
+    // MARK: Project panels
+
+    var allCodeTabs: [CodeTab] {
+        projectCodeTabs.filter { $0.key != panelProjectID }.values.flatMap { $0 } + codeTabs
+    }
+
+    /// Runs synchronously after selection changes, before a panel can render the new chat.
+    func syncProjectPanel() {
+        guard !switchingPanel else { return }
+        let id = currentProject?.id
+        if id != panelProjectID {
+            rememberProjectPanel()
+            switchingPanel = true
+            panelProjectID = id
+            let saved = id.flatMap { projectPanels[$0] } ?? ProjectPanelState()
+            panelTab = saved.tab ?? .overview
+            codeTabs = id.flatMap { projectCodeTabs[$0] } ?? []
+            selectedCodeTabID = codeTabs.contains { $0.id == saved.selectedCodeTabID }
+                ? saved.selectedCodeTabID : codeTabs.first?.id
+            switchingPanel = false
+            fileViewer?.projectDidChange()
+        }
+        panelReview?.retarget()
+    }
+
+    private func rememberProjectPanel() {
+        guard !switchingPanel, let id = panelProjectID,
+              projects.contains(where: { $0.id == id }) || awayProjects.contains(where: { $0.id == id }) else { return }
+        projectCodeTabs[id] = codeTabs
+        var state = projectPanels[id] ?? ProjectPanelState()
+        state.tab = panelTab
+        state.codeTabs = codeTabs.map(SavedCodeTab.init)
+        state.selectedCodeTabID = selectedCodeTabID
+        state.selectedShellID = selectedShellID[id]
+        projectPanels[id] = state
+        scheduleSave()
+    }
+
+    func folderPanelState(project: UUID, folder: String) -> FolderPanelState {
+        projectPanels[project]?.folders?[folder] ?? FolderPanelState()
+    }
+
+    func setFolderPanelState(_ state: FolderPanelState, project: UUID, folder: String) {
+        guard projects.contains(where: { $0.id == project }) || awayProjects.contains(where: { $0.id == project }) else { return }
+        var panel = projectPanels[project] ?? ProjectPanelState()
+        if panel.folders == nil { panel.folders = [:] }
+        panel.folders?[folder] = state
+        projectPanels[project] = panel
+        scheduleSave()
+    }
+
+    func overviewPanelState(project: UUID) -> OverviewPanelState {
+        projectPanels[project]?.overview ?? OverviewPanelState()
+    }
+
+    func setOverviewPanelState(_ overview: OverviewPanelState, project: UUID) {
+        guard projects.contains(where: { $0.id == project }) else { return }
+        objectWillChange.send()
+        var state = projectPanels[project] ?? ProjectPanelState()
+        state.overview = overview
+        projectPanels[project] = state
+        scheduleSave()
+    }
+
+    func overviewScroll(project: UUID) -> Double { projectPanels[project]?.overviewScroll ?? 0 }
+    func setOverviewScroll(_ value: Double, project: UUID) {
+        guard projects.contains(where: { $0.id == project }) else { return }
+        var state = projectPanels[project] ?? ProjectPanelState()
+        state.overviewScroll = value
+        projectPanels[project] = state
+        scheduleSave()
+    }
+
+    func restoreProjectList(_ saved: SavedState) {
+        let here = saved.projects.filter { FileManager.default.fileExists(atPath: $0.path) }
+        projects = here
+        awayProjects = saved.projects.filter { p in !here.contains { $0.id == p.id } }
+        awayChats = saved.chats.filter { sc in awayProjects.contains { $0.id == sc.projectID } }
+    }
+
+    func restoreProjectPanels(_ saved: SavedState) {
+        switchingPanel = true
+        projectPanels = [:]
+        projectCodeTabs = [:]
+        selectedShellID = [:]
+        var seen = Set<UUID>()
+        for (key, state) in saved.projectPanels ?? [:] {
+            guard let id = UUID(uuidString: key) else { continue }
+            projectPanels[id] = state
+            selectedShellID[id] = state.selectedShellID
+            projectCodeTabs[id] = (state.codeTabs ?? []).filter { seen.insert($0.id).inserted }.map(\.restored)
+        }
+        // An old file had one tab for the whole window. Apply it only to the first project.
+        if saved.projectPanels == nil, let id = projects.first?.id {
+            var state = ProjectPanelState()
+            state.tab = saved.panelTab
+            projectPanels[id] = state
+        }
+        panelProjectID = nil
+        switchingPanel = false
+        pruneProjectPanels()
+        syncProjectPanel()
+    }
+
+    func pruneProjectPanels() {
+        let keep = Set((projects + awayProjects).map(\.id))
+        panelReview?.prunePanelCache(projects: keep)
+        projectPanels = projectPanels.filter { keep.contains($0.key) }
+        projectCodeTabs = projectCodeTabs.filter { keep.contains($0.key) }
+        let retainedShells = selectedShellID.filter { keep.contains($0.key) }
+        if retainedShells != selectedShellID { selectedShellID = retainedShells }
+    }
+
+    func savedProjectPanels() -> [String: ProjectPanelState] {
+        capturingPanelSnapshot = true
+        defer { capturingPanelSnapshot = false }
+        rememberProjectPanel()
+        panelReview?.rememberPanelState()
+        pruneProjectPanels()
+        for p in projects {
+            var state = projectPanels[p.id] ?? ProjectPanelState()
+            state.shells = shells(in: p.id).map { SavedPanelShell(id: $0.id, title: $0.title) }
+            state.selectedShellID = selectedShellID[p.id]
+            projectPanels[p.id] = state
+        }
+        return Dictionary(uniqueKeysWithValues: projectPanels.map { ($0.key.uuidString, $0.value) })
+    }
+
+    private func restorePanelShells() {
+        guard let g = GhosttyApp.shared else { return }
+        for project in projects {
+            for saved in projectPanels[project.id]?.shells ?? [] {
+                let terminal = TerminalView(app: g.app, launch: .init(workingDirectory: project.path), handlesChildExit: false)
+                terminal.events = self
+                let shell = PanelShell(id: saved.id, projectID: project.id, terminal: terminal)
+                shell.title = saved.title
+                shells.append(shell)
+            }
+            selectedShellID[project.id] = projectPanels[project.id]?.selectedShellID
         }
     }
 
@@ -428,6 +583,16 @@ final class AppModel: ObservableObject, TerminalEvents {
             a.addButton(withTitle: "Cancel")
             guard a.runModal() == .alertFirstButtonReturn else { return }
         }
+        let unsaved = allCodeTabs.filter { tab in
+            projectCodeTabs[id]?.contains(where: { $0.id == tab.id }) == true && tab.dirty
+        }
+        if !unsaved.isEmpty, let viewer = fileViewer {
+            switch viewer.ask(unsaved) {
+            case .cancel: return
+            case .save: guard viewer.saveAllAndWait(unsaved.map(\.id)) else { return }
+            case .discard: break
+            }
+        }
         for c in chats where c.projectID == id { teardown(c) }
         chats.removeAll { $0.projectID == id }
         for s in shells where s.projectID == id { s.terminal.destroy() }
@@ -435,6 +600,9 @@ final class AppModel: ObservableObject, TerminalEvents {
         projects.removeAll { $0.id == id }
         if selectedChat == nil { selectedChatID = nil }
         if selectedProjectID == id { selectedProjectID = projects.first?.id }
+        pruneProjectPanels()
+        syncProjectPanel()
+        fileViewer?.render()
         terminalsChanged.send()
     }
 
@@ -740,12 +908,14 @@ final class AppModel: ObservableObject, TerminalEvents {
         tv.events = self
         shells.append(shell)
         selectedShellID[project.id] = shell.id
+        scheduleSave()
         panelTab = .terminal
         panelVisible = true
         focusRequest.send(tv)
     }
 
     func closeShell(_ shell: PanelShell) {
+        defer { scheduleSave() }
         shell.terminal.destroy()
         let siblings = shells.filter { $0.projectID == shell.projectID }
         let idx = siblings.firstIndex(where: { $0.id == shell.id }) ?? 0
@@ -802,7 +972,17 @@ final class AppModel: ObservableObject, TerminalEvents {
     }
 
     func removeCodeTab(_ id: UUID) {
-        guard let i = codeTabs.firstIndex(where: { $0.id == id }) else { return }
+        guard let i = codeTabs.firstIndex(where: { $0.id == id }) else {
+            guard let pid = projectCodeTabs.first(where: { $0.value.contains { $0.id == id } })?.key else { return }
+            projectCodeTabs[pid]?.removeAll { $0.id == id }
+            projectPanels[pid]?.codeTabs = projectCodeTabs[pid]?.map(SavedCodeTab.init)
+            if projectPanels[pid]?.selectedCodeTabID == id {
+                projectPanels[pid]?.selectedCodeTabID = projectCodeTabs[pid]?.first?.id
+            }
+            fileViewer?.render()
+            scheduleSave()
+            return
+        }
         codeTabs.remove(at: i)
         if selectedCodeTabID == id {
             selectedCodeTabID = codeTabs.isEmpty ? nil : codeTabs[min(i, codeTabs.count - 1)].id
@@ -810,8 +990,22 @@ final class AppModel: ObservableObject, TerminalEvents {
     }
 
     func setCodeTabDirty(_ id: UUID, _ dirty: Bool) {
-        guard let i = codeTabs.firstIndex(where: { $0.id == id }), codeTabs[i].dirty != dirty else { return }
-        codeTabs[i].dirty = dirty
+        updateCodeTab(id) { $0.dirty = dirty }
+    }
+
+    func setEditorPosition(_ id: UUID, _ position: EditorPosition) {
+        updateCodeTab(id) { $0.editorPosition = position }
+    }
+
+    private func updateCodeTab(_ id: UUID, _ update: (inout CodeTab) -> Void) {
+        if let i = codeTabs.firstIndex(where: { $0.id == id }) {
+            update(&codeTabs[i])
+        } else if let pid = projectCodeTabs.first(where: { $0.value.contains { $0.id == id } })?.key,
+                  let i = projectCodeTabs[pid]?.firstIndex(where: { $0.id == id }) {
+            update(&projectCodeTabs[pid]![i])
+            projectPanels[pid]?.codeTabs = projectCodeTabs[pid]?.map(SavedCodeTab.init)
+            scheduleSave()
+        }
     }
 
     func setPreview(_ id: UUID, _ preview: Bool) {
