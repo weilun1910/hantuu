@@ -54,6 +54,7 @@ enum SelfTest {
         agentWork(workdir)  // subagents, background tasks, the status they hold up, snapshots (Tests/AgentWorkSelfTest.swift)
         fileViewer(workdir) // the Code tab as a file viewer and editor (FileViewer/FileViewerSelfTest.swift)
         usage(workdir)    // usage limits and the footer rings (Usage/UsageSelfTest.swift)
+        keepAwake(workdir)  // the lid-shut switch, its limits, the crash check (Tests/KeepAwakeSelfTest.swift)
 
         print("\n\(passes) passed, \(failures) failed")
         return failures == 0 ? 0 : 1

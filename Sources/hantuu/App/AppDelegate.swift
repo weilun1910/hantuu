@@ -88,6 +88,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         return .terminateNow
     }
 
+    func applicationWillTerminate(_ notification: Notification) {
+        // Keep awake never outlives hantuu: quitting turns sleep back on if hantuu turned it off.
+        model.keepAwake.appWillQuit()
+    }
+
     func applicationDidBecomeActive(_ notification: Notification) {
         if let c = model.selectedChat, c.status == .needsYou, c.terminal?.focused == true {
             c.status = .running
@@ -277,6 +282,7 @@ struct SettingsView: View {
             }
             ChatSettingsSection()
             SessionSettingsSection()
+            KeepAwakeSettingsSection()
             NotificationSettingsSection()
             UsageSettingsSection()
             TerminalSettingsSection()
