@@ -7,6 +7,8 @@ enum CodexProcessRollout {
     private static let maximumProcesses = 32
     private static let maximumDepth = 4
     private static let maximumDescriptors = 4096
+    // Swift does not import libproc's compound PROC_PIDPATHINFO_MAXSIZE macro.
+    private static let maximumExecutablePathBytes = Int(MAXPATHLEN) * 4
 
     struct ProcessIdentity: Equatable {
         var pid: Int32
@@ -80,7 +82,7 @@ enum CodexProcessRollout {
         var info = proc_bsdinfo()
         let size = Int32(MemoryLayout<proc_bsdinfo>.size)
         guard proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, size) == size else { return nil }
-        var path = [CChar](repeating: 0, count: Int(PROC_PIDPATHINFO_MAXSIZE))
+        var path = [CChar](repeating: 0, count: maximumExecutablePathBytes)
         let count = path.withUnsafeMutableBytes {
             proc_pidpath(pid, $0.baseAddress, UInt32($0.count))
         }
