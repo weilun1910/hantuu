@@ -658,3 +658,8 @@ body.reader.main .fresh { animation: hantuu-rise 0.28s ease-out; }
   body.reader.main .fresh { animation: none; }
   body.reader.main svg.chev, body.reader.main .meta { transition: none; }
 }
+
+/* Pending sends use the same bubble with a quiet, always visible delivery label. */
+.entry.user .queued-label { color: var(--secondary); font-size: 11px; }
+body.reader.main .entry.user > .queued-label { display: block; text-align: right; margin-bottom: 5px; }
+.entry.user.pending { animation: none; }

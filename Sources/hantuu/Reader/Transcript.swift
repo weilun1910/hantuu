@@ -25,6 +25,9 @@ struct ReaderEntry: Codable, Equatable {
     var time: String? = nil
     /// Paths found in the text that exist on disk, filled in by PathDetector.
     var links: [DetectedPath] = []
+    /// Transient reader state. These fields are never written to an agent transcript.
+    var pending: Bool? = nil
+    var replacesPendingID: String? = nil
 }
 
 protocol TranscriptParser {
@@ -39,6 +42,8 @@ protocol TranscriptParser {
 /// bookkeeping lines (summary, custom-title, file-history-snapshot, ...) that are hidden.
 struct ClaudeTranscriptParser: TranscriptParser {
     private var lineNo = 0
+    private var queuedSourceIDs = Set<String>()
+    private var userMessageIDs = Set<String>()
     private var toolNames: [String: String] = [:]   // tool_use id -> name
 
     private static let noisePrefixes = [
@@ -56,12 +61,17 @@ struct ClaudeTranscriptParser: TranscriptParser {
 
         switch type {
         case "user":
+            if queuedSourceIDs.contains(uuid) { return [] }
+            userMessageIDs.insert(uuid)
             if obj["isMeta"] as? Bool == true { return [] }
             if obj["isCompactSummary"] as? Bool == true {
                 return [ReaderEntry(id: uuid, kind: .notice, text: "Conversation compacted", time: time)]
             }
             guard let msg = obj["message"] as? [String: Any] else { return [] }
             return parseUser(msg["content"], id: uuid, time: time)
+
+        case "attachment":
+            return parseQueuedCommand(obj, id: uuid, time: time)
 
         case "assistant":
             guard let msg = obj["message"] as? [String: Any] else { return [] }
@@ -83,6 +93,19 @@ struct ClaudeTranscriptParser: TranscriptParser {
         default:
             return []
         }
+    }
+
+    private mutating func parseQueuedCommand(_ obj: [String: Any], id: String, time: String?) -> [ReaderEntry] {
+        guard let attachment = obj["attachment"] as? [String: Any],
+              attachment["type"] as? String == "queued_command",
+              let origin = attachment["origin"] as? [String: Any],
+              origin["kind"] as? String == "human",
+              attachment["commandMode"] as? String != "task-notification" else { return [] }
+        // Use identity when both representations exist. Equal text alone can be two sends.
+        if let source = attachment["source_uuid"] as? String {
+            guard !userMessageIDs.contains(source), queuedSourceIDs.insert(source).inserted else { return [] }
+        }
+        return parseUser(attachment["prompt"], id: id, time: time ?? (attachment["timestamp"] as? String))
     }
 
     private static func apiErrorText(_ obj: [String: Any]) -> String? {

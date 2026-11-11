@@ -32,7 +32,10 @@ final class Chat: ObservableObject, Identifiable {
     let createdAt: Date
     @Published var sessionID: String?
     @Published var terminalTitle = ""
-    @Published var status: ChatStatus = .running
+    @Published var status: ChatStatus = .running {
+        didSet { if status == .ended { pendingMessages.removeAll() } }
+    }
+    @Published var pendingMessages = PendingReaderMessages()
     @Published var exitCode: Int?
     @Published var transcriptPath: String?
     @Published var firstPrompt: String?
@@ -667,6 +670,7 @@ final class AppModel: ObservableObject, TerminalEvents {
         chat.earlierEntries = []
         chat.liveEntries = []
         chat.firstPrompt = nil
+        if changedID { chat.pendingMessages.removeAll() }
         if let id = session.id { chat.sessionID = id }
         chat.transcriptPath = path
         if let path {
@@ -725,7 +729,7 @@ final class AppModel: ObservableObject, TerminalEvents {
             if chat.firstPrompt == nil, let p = fresh.first(where: { $0.kind == .user })?.text {
                 chat.firstPrompt = p.split(whereSeparator: \.isNewline).first.map(String.init)
             }
-            self.readerAppend.send((chat.id, fresh))
+            self.readerAppend.send((chat.id, chat.pendingMessages.reconcile(fresh)))
         }
         chat.follower = f
         f.start(follow: live)

@@ -4,6 +4,7 @@ import Combine
 private struct ReaderPayload: Encodable {
     var chatID: String?
     var entries: [ReaderEntry]
+    var pending: [ReaderEntry] = []
     var emptyText: String
     /// The chat's folder, so reader mode can show paths inside it relative to it.
     var base: String? = nil
@@ -15,6 +16,7 @@ final class ReaderController {
     private let model: AppModel
     private var shownChatID: UUID?
     private var bag = Set<AnyCancellable>()
+    private var pendingSubscription: AnyCancellable?
     /// Esc shrinks an opened-out image or PDF (FileViewer/ReaderMedia.swift).
     let mediaKeys: ReaderMediaKeys
 
@@ -35,7 +37,7 @@ final class ReaderController {
         model.readerAppend
             .sink { [weak self] id, entries in
                 guard let self, id == self.shownChatID else { return }
-                self.page.call("append", ReaderPayload(chatID: id.uuidString, entries: entries, emptyText: ""))
+                self.page.call("append", ReaderPayload(chatID: id.uuidString, entries: entries, pending: model.selectedChat?.pendingMessages.entries ?? [], emptyText: ""))
             }
             .store(in: &bag)
     }
@@ -45,7 +47,15 @@ final class ReaderController {
     func reload() {
         let chat = model.selectedChat
         shownChatID = chat?.id
-        page.call("reset", ReaderPayload(chatID: chat?.id.uuidString, entries: chat?.allEntries ?? [], emptyText: Self.emptyText(for: chat),
+        pendingSubscription = chat?.$pendingMessages
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self, weak chat] _ in
+                guard let self, let chat, self.shownChatID == chat.id else { return }
+                self.page.call("pending", ReaderPayload(chatID: chat.id.uuidString, entries: [],
+                                                        pending: chat.pendingMessages.entries, emptyText: ""))
+            }
+        let entries = chat.map { $0.pendingMessages.reconcile($0.allEntries) } ?? []
+        page.call("reset", ReaderPayload(chatID: chat?.id.uuidString, entries: entries, pending: chat?.pendingMessages.entries ?? [], emptyText: Self.emptyText(for: chat),
                                          base: chat.map { model.workingDirectory(of: $0) }))
     }
 
