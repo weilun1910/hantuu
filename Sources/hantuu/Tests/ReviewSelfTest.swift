@@ -323,6 +323,25 @@ extension SelfTest {
         FileManager.default.createFile(atPath: folder.appendingPathComponent("edited.swift").path, contents: Data("x".utf8))
         check("watch: an edit in the folder triggers a refresh", waitUntil(4) { fired > 0 })
         w.stop()
+
+        // Changes reads git through a copy of the index. Making the copy mustn't look like a
+        // change, or every refresh would start the next one.
+        let repo = dir.appendingPathComponent("watched-repo")
+        Paths.ensure(repo)
+        fixtureGit(["init", "-q"], repo)
+        write(repo, "a.txt", "a\n")
+        fixtureGit(["add", "-A"], repo)
+        fixtureGit(["commit", "-q", "-m", "Add a."], repo)
+        RunLoop.main.run(until: Date().addingTimeInterval(0.5))
+        var copies = 0
+        let indexWatcher = FolderWatcher(path: repo.path, quiet: 0.2) { copies += 1 }
+        indexWatcher.start()
+        RunLoop.main.run(until: Date().addingTimeInterval(0.5))
+        copies = 0
+        let env = Git.readOnlyIndex(root: repo.path)
+        RunLoop.main.run(until: Date().addingTimeInterval(0.8))
+        check("watch: copying the index to read git isn't a change", copies == 0 && env["GIT_INDEX_FILE"] != nil, "fired \(copies)")
+        indexWatcher.stop()
     }
 
     // MARK: The panel, end to end with fixtures

@@ -57,7 +57,9 @@ enum Git {
         for b in root.utf8 { hash = (hash &* 33) &+ UInt64(b) }
         let copy = dir.appendingPathComponent(String(hash, radix: 16) + ".index")
         try? fm.removeItem(at: copy)
-        do { try fm.copyItem(at: URL(fileURLWithPath: index), to: copy) } catch { return [:] }
+        // A plain data copy, not a clone: cloning the index posts an FSEvent on the real
+        // index, which woke the folder watcher and started another refresh, forever.
+        guard copyfile(index, copy.path, nil, copyfile_flags_t(COPYFILE_DATA)) == 0 else { return [:] }
         return ["GIT_INDEX_FILE": copy.path]
     }
 }
@@ -75,6 +77,10 @@ extension Process {
         p.standardOutput = out
         p.standardError = err
         p.standardInput = FileHandle.nullDevice
+        // waitUntilExit polls the run loop and added about 65 ms to every call on a
+        // background queue. The termination handler fires as soon as the child exits.
+        let exited = DispatchSemaphore(value: 0)
+        p.terminationHandler = { _ in exited.signal() }
         do { try p.run() } catch {
             return Git.Result(status: -1, out: Data(), err: "\(error)")
         }
@@ -94,7 +100,7 @@ extension Process {
             p.terminate()
             _ = group.wait(timeout: .now() + 1)
         }
-        p.waitUntilExit()
+        if exited.wait(timeout: .now() + 2) == .timedOut { p.waitUntilExit() }
         return Git.Result(status: p.terminationStatus, out: outData, err: String(decoding: errData, as: UTF8.self))
     }
 }
