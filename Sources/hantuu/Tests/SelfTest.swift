@@ -42,6 +42,7 @@ enum SelfTest {
         follower(workdir)
         sessionFollowing(workdir)
         transcriptRecovery(workdir)
+        codexResumeRecovery(workdir)
         transcriptTiming(workdir)
         paths(workdir)
         misc()

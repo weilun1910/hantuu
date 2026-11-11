@@ -52,6 +52,7 @@ final class Chat: ObservableObject, Identifiable {
     var liveEntries: [ReaderEntry] = []
     var discoveryTimer: Timer?
     var transcriptRecovery: TranscriptRecovery?
+    var codexSessionRequest: UUID?
     /// Set when the chat runs in its own git worktree (Sessions/Worktrees.swift).
     @Published var worktree: WorktreeInfo?
     var worktreePath: String? { worktree?.directory }
@@ -220,6 +221,8 @@ final class AppModel: ObservableObject, TerminalEvents {
     let focusRequest = PassthroughSubject<NSView, Never>()
 
     var transcriptLocations = TranscriptLocations()
+    var codexProcessID: (UUID) -> Int32? = { SessionHelper.info($0)?.child }
+    var codexOpenRollouts: (Int32, URL) -> [URL] = { CodexProcessRollout.paths(rootPID: $0, sessionsRoot: $1) }
 
     private var saveWork: DispatchWorkItem?
     private var bag = Set<AnyCancellable>()
@@ -624,6 +627,7 @@ final class AppModel: ObservableObject, TerminalEvents {
 
     private func teardown(_ chat: Chat, then: (() -> Void)? = nil) {
         chat.discoveryTimer?.invalidate()
+        chat.codexSessionRequest = nil
         chat.transcriptRecovery = nil
         chat.follower?.stop()
         chat.terminal?.destroy()
@@ -649,12 +653,40 @@ final class AppModel: ObservableObject, TerminalEvents {
     // MARK: Transcripts
 
     /// Hooks follow the agent's active conversation, including an in-terminal resume or clear.
-    func followSession(_ chat: Chat, session: HookLineParser.Session) {
+    func followSession(_ chat: Chat, session: HookLineParser.Session, verifiedCodex: Bool = false) {
         guard let kind = chat.agent.transcript else { return }
+        if kind == .codex, !verifiedCodex {
+            // A legacy completion event may belong to a child. Resolve its main transcript
+            // before touching either the saved identity or the reader's current history.
+            if session.id == chat.sessionID, session.path == nil, chat.follower != nil { return }
+            let token = UUID()
+            chat.codexSessionRequest = token
+            let previousID = chat.sessionID
+            let previousPath = chat.transcriptPath
+            let root = transcriptLocations.codex
+            Log.write("transcript signal chat=\(chat.id) candidate=\(session.id ?? "unknown")")
+            DispatchQueue.global(qos: .utility).async { [weak self, weak chat] in
+                let resolved = TranscriptLookup.validatedCodexSession(session, root: root)
+                DispatchQueue.main.async {
+                    guard let self, let chat, chat.codexSessionRequest == token,
+                          chat.sessionID == previousID, chat.transcriptPath == previousPath else { return }
+                    chat.codexSessionRequest = nil
+                    guard let resolved else {
+                        Log.write("transcript signal chat=\(chat.id) candidate=\(session.id ?? "unknown") result=unresolved-kept-current")
+                        return
+                    }
+                    self.followSession(chat, session: resolved, verifiedCodex: true)
+                }
+            }
+            return
+        }
+        guard kind != .codex || session.path != nil else { return }
         let changedID = session.id != nil && session.id != chat.sessionID
         let path = session.path ?? (changedID ? nil : chat.transcriptPath)
         guard changedID || path != chat.transcriptPath || chat.follower == nil else { return }
+        Log.write("transcript identity chat=\(chat.id) from=\(chat.sessionID ?? "unknown") to=\(session.id ?? chat.sessionID ?? "unknown") path=\(path ?? "pending")")
         chat.discoveryTimer?.invalidate()
+        chat.codexSessionRequest = nil
         chat.transcriptRecovery = nil
         chat.follower?.stop()
         chat.follower = nil
@@ -677,6 +709,7 @@ final class AppModel: ObservableObject, TerminalEvents {
     func beginTranscriptDiscovery(_ chat: Chat, cwd: String, replayEvents: Bool = false) {
         guard chat.agent.transcript != nil else { return }
         chat.discoveryTimer?.invalidate()
+        chat.codexSessionRequest = nil
         let recovery = TranscriptRecovery(events: AgentHooks.eventsFile(for: chat.id), replay: replayEvents)
         chat.transcriptRecovery = recovery
         if let follower = chat.follower {
@@ -702,33 +735,51 @@ final class AppModel: ObservableObject, TerminalEvents {
             ((try? FileManager.default.attributesOfItem(atPath: $0.url.path))?[.size] as? NSNumber)?.uint64Value
         }
         let following = chat.status == .ended ? chat.follower != nil : chat.follower?.isFollowing == true
-        guard recovery.policy.shouldLookup(now: now, fileSize: size, hasFollower: following,
-                                           working: chat.activity == .working || chat.activity == .background) else { return }
+        let lookupDue = recovery.policy.shouldLookup(now: now, fileSize: size, hasFollower: following,
+                                                      working: chat.activity == .working || chat.activity == .background)
+        // Process-owned open files can change on /resume even while the agent is idle.
+        let probeProcess = kind == .codex && chat.status != .ended
+        guard lookupDue || probeProcess else { return }
         recovery.pending = true
         let request = TranscriptLookup.Request(kind: kind, sessionID: chat.sessionID, path: chat.transcriptPath,
                                                cwd: cwd, startedAt: chat.startedAt,
                                                excluded: Set(chats.filter { $0.id != chat.id }.compactMap { $0.transcriptPath }),
                                                roots: transcriptLocations)
-        Log.write("transcript lookup chat=\(chat.id) reason=\(size == nil ? "missing" : "recheck")")
+        let processID = codexProcessID
+        let openRollouts = codexOpenRollouts
+        let chatID = chat.id
+        if lookupDue { Log.write("transcript lookup chat=\(chat.id) reason=\(size == nil ? "missing" : "recheck")") }
         recovery.queue.async { [weak self, weak chat] in
-            let result = TranscriptLookup.find(request, events: recovery.events.read(limit: 256 * 1024))
+            var owned: HookLineParser.Session?
+            if probeProcess {
+                if recovery.lastProcessLookup.map({ now.timeIntervalSince($0) >= 10 }) ?? true {
+                    recovery.lastProcessLookup = now
+                    recovery.processID = processID(chatID)
+                }
+                if let pid = recovery.processID {
+                    owned = recovery.processRollouts.select(paths: openRollouts(pid, request.roots.codex),
+                                                           currentPath: request.path)
+                }
+            }
+            let result = owned ?? (lookupDue ? TranscriptLookup.find(request, events: recovery.events.read(limit: 256 * 1024)) : nil)
             DispatchQueue.main.async {
                 recovery.pending = false
                 guard let self, let chat, chat.transcriptRecovery === recovery,
                       chat.sessionID == request.sessionID, chat.transcriptPath == request.path else { return }
                 guard let result else {
-                    Log.write("transcript lookup chat=\(chat.id) result=missing")
+                    if lookupDue { Log.write("transcript lookup chat=\(chat.id) result=missing") }
                     return
                 }
                 // Another initial lookup may have claimed this rollout while ours was running.
-                if request.sessionID == nil, let path = result.path,
+                if owned == nil, request.sessionID == nil, let path = result.path,
                    self.chats.contains(where: { $0.id != chat.id && $0.transcriptPath == path }) {
                     Log.write("transcript lookup chat=\(chat.id) result=claimed")
                     return
                 }
                 if result.id != chat.sessionID || result.path != chat.transcriptPath || chat.follower == nil {
-                    self.followSession(chat, session: result)
-                } else {
+                    Log.write("transcript switch chat=\(chat.id) from=\(chat.sessionID ?? "unknown") to=\(result.id ?? "unknown") source=\(owned == nil ? "lookup" : "process")")
+                    self.followSession(chat, session: result, verifiedCodex: kind == .codex)
+                } else if lookupDue {
                     // Restarting a stopped timer preserves the parser cursor and existing entries.
                     chat.follower?.start(follow: chat.status != .ended)
                     if let path = result.path { Log.write("transcript chat=\(chat.id) path=\(path) reason=recovered") }
