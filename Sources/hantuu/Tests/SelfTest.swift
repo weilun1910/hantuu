@@ -41,6 +41,7 @@ enum SelfTest {
         discovery(workdir)
         follower(workdir)
         sessionFollowing(workdir)
+        transcriptRecovery(workdir)
         transcriptTiming(workdir)
         paths(workdir)
         misc()
@@ -297,6 +298,7 @@ enum SelfTest {
         let folder = dir.appendingPathComponent("session-switches")
         Paths.ensure(folder)
         let model = AppModel()
+        model.transcriptLocations = TranscriptLocations(claude: folder, codex: folder)
         let project = Project(path: folder.path)
         model.projects = [project]
         let chat = Chat(projectID: project.id, agentID: "claude")

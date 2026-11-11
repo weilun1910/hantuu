@@ -51,6 +51,7 @@ final class Chat: ObservableObject, Identifiable {
     /// "Needs you" notices raised by the terminal (permission prompts, waiting for input).
     var liveEntries: [ReaderEntry] = []
     var discoveryTimer: Timer?
+    var transcriptRecovery: TranscriptRecovery?
     /// Set when the chat runs in its own git worktree (Sessions/Worktrees.swift).
     @Published var worktree: WorktreeInfo?
     var worktreePath: String? { worktree?.directory }
@@ -218,6 +219,8 @@ final class AppModel: ObservableObject, TerminalEvents {
     /// Ask the window to focus something.
     let focusRequest = PassthroughSubject<NSView, Never>()
 
+    var transcriptLocations = TranscriptLocations()
+
     private var saveWork: DispatchWorkItem?
     private var bag = Set<AnyCancellable>()
 
@@ -286,6 +289,8 @@ final class AppModel: ObservableObject, TerminalEvents {
                 c.pinnedAt = sc.pinnedAt
                 if let p = sc.transcriptPath, FileManager.default.fileExists(atPath: p), let kind = c.agent.transcript {
                     attachFollower(c, url: URL(fileURLWithPath: p), kind: kind, live: false)
+                } else if c.sessionID != nil {
+                    beginTranscriptDiscovery(c, cwd: workingDirectory(of: c), replayEvents: true)
                 }
                 chats.append(c)
             }
@@ -527,7 +532,7 @@ final class AppModel: ObservableObject, TerminalEvents {
         chat.startedAt = startedAt ?? Date()
         terminalsChanged.send()
         // Same agent process, so its transcript keeps growing where it was.
-        if let f = chat.follower { f.start() } else { beginTranscriptDiscovery(chat, cwd: cwd) }
+        beginTranscriptDiscovery(chat, cwd: cwd, replayEvents: true)
     }
 
     func resume(_ chat: Chat) {
@@ -554,18 +559,8 @@ final class AppModel: ObservableObject, TerminalEvents {
         }
         chat.terminal?.destroy()
         chat.terminal = nil
-        if def.id == "codex", let f = chat.follower {
-            // Codex may continue in a new rollout file; keep what we already have, including
-            // a first read that is still running in the background.
-            chat.earlierEntries += f.entries
-            f.stop()
-            f.onAppend = { [weak self, weak chat] late in
-                guard let self, let chat else { return }
-                chat.earlierEntries += late
-                self.readerReload.send(chat.id)
-            }
-            chat.follower = nil
-        }
+        // Both agents append to their existing transcript when resumed by session ID.
+        // A later hook can redirect the reader if the agent changes conversations.
         launch(chat, argv: argv, in: project)
         readerReload.send(chat.id)
         select(chat.id)
@@ -629,6 +624,7 @@ final class AppModel: ObservableObject, TerminalEvents {
 
     private func teardown(_ chat: Chat, then: (() -> Void)? = nil) {
         chat.discoveryTimer?.invalidate()
+        chat.transcriptRecovery = nil
         chat.follower?.stop()
         chat.terminal?.destroy()
         chat.terminal = nil
@@ -654,14 +650,12 @@ final class AppModel: ObservableObject, TerminalEvents {
 
     /// Hooks follow the agent's active conversation, including an in-terminal resume or clear.
     func followSession(_ chat: Chat, session: HookLineParser.Session) {
-        guard chat.agentID == "claude" else { return }
+        guard let kind = chat.agent.transcript else { return }
         let changedID = session.id != nil && session.id != chat.sessionID
-        var path = session.path ?? (changedID ? nil : chat.transcriptPath)
-        if path == nil, let id = session.id ?? chat.sessionID {
-            path = ClaudeTranscriptParser.locate(sessionID: id, cwd: workingDirectory(of: chat))?.path
-        }
-        guard changedID || path != chat.transcriptPath || (path != nil && chat.follower == nil) else { return }
+        let path = session.path ?? (changedID ? nil : chat.transcriptPath)
+        guard changedID || path != chat.transcriptPath || chat.follower == nil else { return }
         chat.discoveryTimer?.invalidate()
+        chat.transcriptRecovery = nil
         chat.follower?.stop()
         chat.follower = nil
         chat.earlierEntries = []
@@ -670,46 +664,77 @@ final class AppModel: ObservableObject, TerminalEvents {
         if let id = session.id { chat.sessionID = id }
         chat.transcriptPath = path
         if let path {
-            attachFollower(chat, url: URL(fileURLWithPath: path), kind: .claude, live: chat.status != .ended)
-        } else if chat.status != .ended {
+            attachFollower(chat, url: URL(fileURLWithPath: path), kind: kind, live: chat.status != .ended)
+        }
+        if chat.status != .ended || path == nil {
             beginTranscriptDiscovery(chat, cwd: workingDirectory(of: chat))
         }
         readerReload.send(chat.id)
         scheduleSave()
     }
 
-    private func beginTranscriptDiscovery(_ chat: Chat, cwd: String) {
-        guard let kind = chat.agent.transcript else { return }
+    /// Used by fresh launches and reattachments alike. Keep checking after the first match.
+    func beginTranscriptDiscovery(_ chat: Chat, cwd: String, replayEvents: Bool = false) {
+        guard chat.agent.transcript != nil else { return }
         chat.discoveryTimer?.invalidate()
-        // Claude Code's resume appends to the same file. A chat restored from disk only read it
-        // once, so start following it now.
-        if let f = chat.follower, kind == .claude { f.start(); return }
-        let started = chat.startedAt
-        let tick = { [weak self, weak chat] in
-            guard let self, let chat else { return }
-            if chat.follower != nil { chat.discoveryTimer?.invalidate(); return }
-            var url: URL?
-            switch kind {
-            case .claude:
-                if let sid = chat.sessionID { url = ClaudeTranscriptParser.locate(sessionID: sid, cwd: cwd) }
-            case .codex:
-                let claimed = Set(self.chats.compactMap { $0.transcriptPath })
-                if let (u, meta) = CodexTranscriptParser.locate(cwd: cwd, after: started, excluding: claimed) {
-                    url = u
-                    chat.sessionID = meta.id
+        let recovery = TranscriptRecovery(events: AgentHooks.eventsFile(for: chat.id), replay: replayEvents)
+        chat.transcriptRecovery = recovery
+        if let follower = chat.follower {
+            follower.start(follow: chat.status != .ended)
+            Log.write("transcript chat=\(chat.id) path=\(follower.url.path) reason=restart")
+        }
+        if chat.status != .ended {
+            let timer = Timer(timeInterval: 1, repeats: true) { [weak self, weak chat] _ in
+                guard let self, let chat else { return }
+                if chat.status == .ended { chat.discoveryTimer?.invalidate(); return }
+                self.checkTranscriptRecovery(chat, cwd: cwd)
+            }
+            RunLoop.main.add(timer, forMode: .common)
+            chat.discoveryTimer = timer
+        }
+        checkTranscriptRecovery(chat, cwd: cwd)
+    }
+
+    func checkTranscriptRecovery(_ chat: Chat, cwd: String, now: Date = Date()) {
+        guard let kind = chat.agent.transcript, let recovery = chat.transcriptRecovery,
+              !recovery.pending else { return }
+        let size = chat.follower.flatMap {
+            ((try? FileManager.default.attributesOfItem(atPath: $0.url.path))?[.size] as? NSNumber)?.uint64Value
+        }
+        let following = chat.status == .ended ? chat.follower != nil : chat.follower?.isFollowing == true
+        guard recovery.policy.shouldLookup(now: now, fileSize: size, hasFollower: following,
+                                           working: chat.activity == .working || chat.activity == .background) else { return }
+        recovery.pending = true
+        let request = TranscriptLookup.Request(kind: kind, sessionID: chat.sessionID, path: chat.transcriptPath,
+                                               cwd: cwd, startedAt: chat.startedAt,
+                                               excluded: Set(chats.filter { $0.id != chat.id }.compactMap { $0.transcriptPath }),
+                                               roots: transcriptLocations)
+        Log.write("transcript lookup chat=\(chat.id) reason=\(size == nil ? "missing" : "recheck")")
+        recovery.queue.async { [weak self, weak chat] in
+            let result = TranscriptLookup.find(request, events: recovery.events.read(limit: 256 * 1024))
+            DispatchQueue.main.async {
+                recovery.pending = false
+                guard let self, let chat, chat.transcriptRecovery === recovery,
+                      chat.sessionID == request.sessionID, chat.transcriptPath == request.path else { return }
+                guard let result else {
+                    Log.write("transcript lookup chat=\(chat.id) result=missing")
+                    return
+                }
+                // Another initial lookup may have claimed this rollout while ours was running.
+                if request.sessionID == nil, let path = result.path,
+                   self.chats.contains(where: { $0.id != chat.id && $0.transcriptPath == path }) {
+                    Log.write("transcript lookup chat=\(chat.id) result=claimed")
+                    return
+                }
+                if result.id != chat.sessionID || result.path != chat.transcriptPath || chat.follower == nil {
+                    self.followSession(chat, session: result)
+                } else {
+                    // Restarting a stopped timer preserves the parser cursor and existing entries.
+                    chat.follower?.start(follow: chat.status != .ended)
+                    if let path = result.path { Log.write("transcript chat=\(chat.id) path=\(path) reason=recovered") }
                 }
             }
-            if let url {
-                chat.discoveryTimer?.invalidate()
-                chat.transcriptPath = url.path
-                self.attachFollower(chat, url: url, kind: kind, live: true)
-                self.readerReload.send(chat.id)
-                self.scheduleSave()
-                Log.write("transcript chat=\(chat.id) path=\(url.path)")
-            }
         }
-        chat.discoveryTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { _ in tick() }
-        tick()
     }
 
     private func attachFollower(_ chat: Chat, url: URL, kind: TranscriptKind, live: Bool) {
@@ -728,6 +753,7 @@ final class AppModel: ObservableObject, TerminalEvents {
             self.readerAppend.send((chat.id, fresh))
         }
         chat.follower = f
+        Log.write("transcript chat=\(chat.id) path=\(url.path) reason=attach")
         f.start(follow: live)
     }
 
