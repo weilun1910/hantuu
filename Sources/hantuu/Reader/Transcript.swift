@@ -587,6 +587,7 @@ final class TranscriptFollower {
     private var partial = Data()
     private(set) var entries: [ReaderEntry] = []
     private var timer: Timer?
+    var isFollowing: Bool { timer?.isValid == true }
     private let baseDir: String?
     private let kind: TranscriptKind
     private let scope: TranscriptScope

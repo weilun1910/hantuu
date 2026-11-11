@@ -109,7 +109,7 @@ final class StatusCenter: ObservableObject {
         if chat.status == .ended {
             t.state.ended = true
             // It may have moved to another conversation before it ended, with hantuu closed.
-            if t.kind == .claude { followSession(t, LineTail(url: file, from: .lastBytes(256 * 1024)).read()) }
+            followSession(t, LineTail(url: file, from: .lastBytes(256 * 1024)).read())
         } else if initial {
             // Already running when hantuu started (a session that outlived the app): replay
             // the end of its events file to get back to where it was, without notifying.
@@ -201,14 +201,15 @@ final class StatusCenter: ObservableObject {
         apply(t, signals, notify: notify)
     }
 
-    /// /resume and /clear move Claude Code to another conversation, and every main-agent hook
-    /// names the one it is in. Only the latest one counts, so a replay never loads old histories.
+    /// Claude hooks and Codex completion notifications identify the active conversation.
+    /// Only the latest one counts, so a replay never loads old histories.
     /// It re-points the chat's reader and saved resume ID, then this status tail.
     private func followSession(_ t: Tracker, _ lines: [Data]) {
-        guard t.kind == .claude, let model else { return }
+        guard t.kind != .other, let model else { return }
         var session: HookLineParser.Session?
         for line in lines {
-            guard let next = HookLineParser.session(line) else { continue }
+            let parsed = t.kind == .claude ? HookLineParser.session(line) : TranscriptLookup.codexSession(line)
+            guard let next = parsed else { continue }
             let changedID = next.id != nil && next.id != (session?.id ?? t.chat.sessionID)
             session = HookLineParser.Session(id: next.id ?? session?.id, path: next.path ?? (changedID ? nil : session?.path))
         }
