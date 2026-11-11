@@ -123,6 +123,34 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
 
+## CodeMirror and Lezer
+
+The Code tab's editor (`Resources/web/vendor/codemirror.min.js`) bundles CodeMirror 6 (https://codemirror.net): `@codemirror/state`, `view`, `commands`, `language`, `search`, `legacy-modes` and the `lang-*` packages listed in `scripts/codemirror/package.json`, the Lezer parsers and highlighter they use, and the small helper packages `crelt`, `style-mod`, `w3c-keyname` and `@marijn/find-cluster-break`. All are by Marijn Haverbeke and contributors under the MIT License; `@lezer/json` also credits Arun Srinivasan. `scripts/codemirror/build.sh` rebuilds the bundle with esbuild from the versions pinned in `scripts/codemirror/package-lock.json`.
+
+```text
+MIT License
+
+Copyright (C) 2018-2021 by Marijn Haverbeke <marijn@haverbeke.berlin> and others
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+THE SOFTWARE.
+```
+
 ## T3 Code
 
 Reader mode's layout borrows design ideas from T3 Code's chat view (github.com/pingdotgg/t3code, read at commit 2d0efd3): bubbles for your own messages, tool calls folded into one summary line, a header with the language and Copy on code blocks, the time and Copy on hover, a message box with Send turning into Stop, and a banner tucked onto the top of the message box. No code was copied. The files that follow these ideas are `Resources/web/reader-main.js`, the reader mode section of `Resources/web/style.css`, `Sources/hantuu/ReaderMode/Composer.swift` and `Sources/hantuu/ReaderMode/ReaderMode.swift`.
