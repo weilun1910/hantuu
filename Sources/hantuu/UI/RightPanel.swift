@@ -296,7 +296,6 @@ struct FileMenuButton: View {
         Menu {
             if tab.kind.isEditable {
                 Button("Save") { model.fileViewer?.saveSelected() }
-                    .keyboardShortcut("s", modifiers: .command)
                     .disabled(!(model.fileViewer?.canSaveSelected ?? false))
                 Divider()
             }

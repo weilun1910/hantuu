@@ -153,48 +153,118 @@
     return b;
   }
 
+  // Media in a message: compact previews about 180 pt tall that sit side by side and wrap.
+  // Clicking one opens it out to the reader's width (a PDF becomes the live, scrollable
+  // document), and clicking again, or Esc, shrinks it back. The pop-out button opens the file
+  // as a tab in the Code tab, and the caption opens it the way a file link does.
+  //
+  // A small PDF is a picture of its first page, made by Swift with PDFKit (hantuu://thumb),
+  // so it's crisp, light, and never catches the scroll wheel. The live PDF only loads when
+  // it's opened out.
+  function thumbURL(path) {
+    return 'hantuu://thumb' + path.split('/').map(encodeURIComponent).join('/') + '?h=400';
+  }
+
+  // `attached` marks images that came with the message itself (pasted, or a tool's result)
+  // rather than from a path the text mentions.
+  function mediaFigure(kind, src, path, attached) {
+    const fig = document.createElement('figure');
+    fig.className = 'mfig ' + kind;
+    if (path) fig.dataset.path = path;
+    fig.dataset.src = src;
+    const body = document.createElement('div');
+    body.className = 'mbody';
+    body.title = 'Click to enlarge';
+    const img = document.createElement('img');
+    img.loading = 'lazy';
+    img.draggable = false;
+    if (kind === 'pdf') {
+      img.className = 'pdf-thumb';
+      img.src = thumbURL(path);
+      img.alt = path.split('/').pop();
+      img.addEventListener('error', () => fig.classList.add('nothumb'));
+    } else {
+      img.className = attached ? 'attached-image' : 'inline-image';
+      img.src = src;
+      if (path) img.dataset.path = path;
+    }
+    body.appendChild(img);
+    fig.appendChild(body);
+    fig.appendChild(popoutButton(path || src));
+    if (path) {
+      const cap = document.createElement('figcaption');
+      const a = document.createElement('a');
+      a.className = 'path';
+      a.dataset.path = path;
+      a.textContent = path.split('/').pop();
+      a.title = path;
+      cap.appendChild(a);
+      fig.appendChild(cap);
+    }
+    return fig;
+  }
+
   // Images and PDFs a message points at, shown below it.
   function mediaFor(links, already) {
     const box = document.createElement('div');
     box.className = 'media';
     const seen = already || new Set();
     for (const l of links || []) {
-      if (seen.has(l.path)) continue;
-      if (l.kind === 'image') {
-        seen.add(l.path);
-        const fig = document.createElement('figure');
-        const img = document.createElement('img');
-        img.loading = 'lazy';
-        img.src = fileURL(l.path);
-        img.dataset.path = l.path;
-        img.className = 'inline-image';
-        const cap = document.createElement('figcaption');
-        cap.textContent = l.path.split('/').pop();
-        fig.appendChild(img);
-        fig.appendChild(popoutButton(l.path));
-        fig.appendChild(cap);
-        box.appendChild(fig);
-      } else if (l.kind === 'pdf') {
-        seen.add(l.path);
-        const fig = document.createElement('figure');
-        fig.className = 'pdf';
-        const frame = document.createElement('iframe');
-        frame.src = fileURL(l.path);
-        frame.loading = 'lazy';
-        const cap = document.createElement('figcaption');
-        const a = document.createElement('a');
-        a.className = 'path';
-        a.dataset.path = l.path;
-        a.textContent = l.path.split('/').pop();
-        cap.appendChild(a);
-        fig.appendChild(frame);
-        fig.appendChild(popoutButton(l.path));
-        fig.appendChild(cap);
-        box.appendChild(fig);
-      }
+      if (seen.has(l.path) || (l.kind !== 'image' && l.kind !== 'pdf')) continue;
+      seen.add(l.path);
+      box.appendChild(mediaFigure(l.kind, fileURL(l.path), l.path));
     }
     return box.childNodes.length ? box : null;
   }
+
+  const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
+
+  function expandedCount() { return document.querySelectorAll('figure.mfig.expanded').length; }
+
+  // Opens a preview out to full width, or shrinks it back, keeping the figure where it was
+  // on screen so the page doesn't jump under you.
+  function toggleMedia(fig, open) {
+    const want = open === undefined ? !fig.classList.contains('expanded') : open;
+    if (want === fig.classList.contains('expanded')) return;
+    const body = fig.querySelector('.mbody');
+    const before = body.getBoundingClientRect();
+    const top = fig.getBoundingClientRect().top;
+    fig.classList.toggle('expanded', want);
+    body.title = want ? 'Click to shrink' : 'Click to enlarge';
+    if (fig.classList.contains('pdf')) {
+      const live = body.querySelector('iframe');
+      if (want && !live) {
+        const frame = document.createElement('iframe');
+        frame.src = fig.dataset.src;
+        frame.title = fig.dataset.path ? fig.dataset.path.split('/').pop() : 'PDF';
+        body.appendChild(frame);
+      } else if (!want && live) {
+        live.remove();
+      }
+    }
+    const scroller = document.scrollingElement;
+    scroller.scrollTop += fig.getBoundingClientRect().top - top;
+    const after = body.getBoundingClientRect();
+    if (!reducedMotion.matches && document.visibilityState === 'visible' && body.animate) {
+      body.animate([
+        { width: before.width + 'px', height: before.height + 'px' },
+        { width: after.width + 'px', height: after.height + 'px' },
+      ], { duration: 150, easing: 'cubic-bezier(0.2, 0, 0, 1)' });
+    }
+    post({ type: 'mediaExpanded', count: expandedCount() });
+  }
+
+  // Shrinks every opened-out preview. True if there was one. Swift calls this for Esc while
+  // the message box has the keyboard.
+  function collapseMedia() {
+    const open = Array.from(document.querySelectorAll('figure.mfig.expanded'));
+    open.forEach((f) => toggleMedia(f, false));
+    return open.length > 0;
+  }
+
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && expandedCount() && collapseMedia()) e.preventDefault();
+  });
 
   // One click handler for every link: file paths go to Swift's router, web links to the
   // browser, relative Markdown links are resolved by Swift against the base folder.
@@ -209,9 +279,12 @@
       }
       return;
     }
-    const img = e.target.closest('img.inline-image');
-    if (img && img.dataset.path) post({ type: 'open', path: img.dataset.path });
+    const body = e.target.closest('figure.mfig .mbody');
+    if (body) {
+      e.preventDefault();
+      toggleMedia(body.parentElement);
+    }
   });
 
-  window.hantuuRender = { renderMarkdown, linkifyPaths, mediaFor, popoutButton, escapeHTML, fileURL, highlightBlock, post };
+  window.hantuuRender = { renderMarkdown, linkifyPaths, mediaFor, mediaFigure, toggleMedia, collapseMedia, popoutButton, escapeHTML, fileURL, highlightBlock, post };
 })();

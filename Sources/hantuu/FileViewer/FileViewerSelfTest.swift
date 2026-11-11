@@ -196,8 +196,14 @@ extension SelfTest {
         check("editor: Save writes the file and clears the dot", saved == true && disk(fx.code).hasPrefix("// Edited in hantuu.\n") && waitUntil(2) { tab(fx.code)?.dirty == false })
         edit(insert: "x")
         _ = waitUntil(2) { tab(fx.code)?.dirty == true }
-        _ = js(page, "hantuu._CM.commands.undo(hantuu._view()); 1")
-        check("editor: undoing back to the saved text clears the dot", waitUntil(2) { tab(fx.code)?.dirty == false })
+        // Cmd-Z the way AppKit delivers it: as a key equivalent to the focused web view.
+        _ = js(page, "hantuu.focus(); 1")
+        w.makeFirstResponder(page.webView)
+        let cmdZ = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: .command, timestamp: ProcessInfo.processInfo.systemUptime,
+                                    windowNumber: w.windowNumber, context: nil, characters: "z", charactersIgnoringModifiers: "z", isARepeat: false, keyCode: 6)!
+        _ = page.webView.performKeyEquivalent(with: cmdZ)
+        check("editor: Cmd-Z undoes, and undoing back to the saved text clears the dot", waitUntil(2) { tab(fx.code)?.dirty == false }
+              && disk(fx.code) == editorText())
 
         // Changes on disk with no unsaved edits: reload in place, same place on screen.
         model.openFile(fx.long.path, line: 80)
@@ -419,7 +425,7 @@ extension SelfTest {
         return (try? png.write(to: url)) != nil
     }
 
-    // MARK: The reader's pop-out button
+    // MARK: Media in the reader: compact previews, opening out, and the pop-out button
 
     static func readerPopout(_ dir: URL, _ fx: FileViewerFixtures) {
         let shots = fileViewerSnapshots(dir)
@@ -436,55 +442,107 @@ extension SelfTest {
         host.addSubview(page.webView)
         w.orderFrontRegardless()
         defer { w.orderOut(nil) }
-        guard waitUntil(10, { page.ready }) else { return check("popout: reader page loads", false) }
+        guard waitUntil(10, { page.ready }) else { return check("media: reader page loads", false) }
         RunLoop.main.run(until: Date().addingTimeInterval(0.3))
+        var posted: [[String: Any]] = []
+        let previous = page.onMessage
+        page.onMessage = { msg in
+            posted.append(msg)
+            previous?(msg)
+        }
+        func sent(_ type: String) -> [[String: Any]] { posted.filter { $0["type"] as? String == type } }
 
         let pasted = "data:image/png;base64," + (FileViewerFixtures.chartPNG(width: 240, height: 150, bars: [0.4, 0.8, 0.6])?.base64EncodedString() ?? "")
         var user = ReaderEntry(id: "u1", kind: .user, text: "Here's the chart I made.")
         user.images = [pasted]
-        let text = "I plotted it at \(fx.png.path) and wrote up the method in \(fx.pdf.path)."
+        let text = "I plotted it at \(fx.png.path), wrote up the method in \(fx.pdf.path) and made a slide, \(fx.slides.path)."
         var answer = ReaderEntry(id: "a1", kind: .assistant, text: text)
         answer.links = PathDetector.detect(in: text, base: fx.root.path)
         let entries = (try? JSONSerialization.jsonObject(with: JSONEncoder().encode([user, answer]))) ?? []
-        page.call("reset", ["chatID": "popout", "entries": entries, "emptyText": ""] as [String: Any])
-        _ = waitUntil(4) { (js(page, "document.querySelectorAll('.media figure').length") as? Int ?? 0) >= 3 }
-        let onImage = js(page, "Array.from(document.querySelectorAll('.media figure:not(.pdf)')).filter(f => f.querySelector(':scope > button.popout[aria-label]')).length") as? Int ?? 0
-        let onPDF = js(page, "document.querySelectorAll('.media figure.pdf > button.popout').length") as? Int ?? 0
-        check("popout: a real button on every image and PDF figure", onImage == 2 && onPDF == 1, "images=\(onImage) pdfs=\(onPDF)")
-        let hiddenUntilHover = js(page, "getComputedStyle(document.querySelector('button.popout')).opacity") as? String
-        check("popout: hidden until you hover the figure", hiddenUntilHover == "0")
+        page.call("reset", ["chatID": "media", "entries": entries, "emptyText": ""] as [String: Any])
+        let loaded = waitUntil(6) { (js(page, "Array.from(document.querySelectorAll('.media img')).every(i => i.complete && i.naturalWidth > 0) && document.querySelectorAll('.media img').length === 4") as? Bool) == true }
+        check("media: images and PDF first pages load (PDFs through hantuu://thumb)", loaded)
 
-        // Snapshot with the buttons as hover shows them.
-        _ = js(page, "document.querySelectorAll('button.popout').forEach(b => { b.style.transition = 'none'; b.style.opacity = 1; }); window.scrollTo(0, 0); 1")
-        for dark in [true, false] {
-            w.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
-            RunLoop.main.run(until: Date().addingTimeInterval(0.6))
-            _ = renderFileViewer(host, to: shots.appendingPathComponent("reader-popout-\(dark ? "dark" : "light").png"))
-        }
-        w.appearance = NSAppearance(named: .darkAqua)
-        _ = js(page, "document.querySelectorAll('button.popout').forEach(b => { b.style.opacity = ''; }); 1")
+        // Small, side by side, wrapping.
+        let boxes = js(page, "JSON.stringify(Array.from(document.querySelectorAll('.entry.assistant figure.mfig')).map(f => { const r = f.querySelector('.mbody').getBoundingClientRect(); return [Math.round(r.top), Math.round(r.width), Math.round(r.height)]; }))") as? String ?? "[]"
+        let b = (try? JSONSerialization.jsonObject(with: Data(boxes.utf8))) as? [[Int]] ?? []
+        check("media: previews are compact, about 180 pt tall", b.count == 3 && b.allSatisfy { $0[2] >= 170 && $0[2] <= 190 }, boxes)
+        check("media: previews sit side by side and wrap when there isn't room", b.count == 3 && b[0][0] == b[1][0] && b[2][0] > b[0][0] + 150, boxes)
+        let small = js(page, "(() => { const i = document.querySelector('.entry.user img.attached-image'); return [i.naturalHeight, Math.round(i.getBoundingClientRect().height)]; })()") as? [Int] ?? []
+        check("media: a small image isn't blown up", small.count == 2 && small[0] == 150 && abs(small[1] - 152) <= 1, "\(small)")
+        let twoInRow = js(page, "(() => { const f = Array.from(document.querySelectorAll('.entry.assistant figure.mfig')); return f[0].offsetTop === f[1].offsetTop; })()") as? Bool
+        check("media: two previews share a row", twoInRow == true)
+        check("media: every preview has a pop-out button, hidden until hover",
+              (js(page, "Array.from(document.querySelectorAll('figure.mfig')).every(f => f.querySelector(':scope > button.popout[aria-label]'))") as? Bool) == true
+              && js(page, "getComputedStyle(document.querySelector('button.popout')).opacity") as? String == "0")
 
-        // Clicking posts a popout message, which opens a kept tab in the Code tab.
-        var posted: [String] = []
-        let previous = page.onMessage
-        page.onMessage = { msg in
-            if msg["type"] as? String == "popout" { posted.append((msg["path"] as? String) ?? "data") }
-            previous?(msg)
+        // Snapshot, small, with the pop-out button showing on one as hover would.
+        func shoot(_ name: String) {
+            for dark in [true, false] {
+                w.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
+                RunLoop.main.run(until: Date().addingTimeInterval(0.6))
+                _ = renderFileViewer(host, to: shots.appendingPathComponent("\(name)-\(dark ? "dark" : "light").png"))
+            }
+            w.appearance = NSAppearance(named: .darkAqua)
         }
-        _ = js(page, "document.querySelector('.entry.assistant figure:not(.pdf) button.popout').click(); 1")
-        check("popout: clicking posts {type: 'popout', path}", waitUntil(2) { posted == [fx.png.path] })
+        _ = js(page, "(() => { const b = document.querySelectorAll('.entry.assistant button.popout')[1]; b.style.transition = 'none'; b.style.opacity = 1; window.scrollTo(0, 0); return 1; })()")
+        shoot("reader-media-small")
+
+        // Click opens out to full width, in place; click again shrinks it.
+        posted.removeAll()
+        let topBefore = js(page, "Math.round(document.querySelectorAll('.entry.assistant figure.mfig')[1].getBoundingClientRect().top)") as? Int ?? -1
+        _ = js(page, "document.querySelectorAll('.entry.assistant figure.mfig')[1].querySelector('.mbody').click(); 1")
+        let opened = js(page, "(() => { const f = document.querySelectorAll('.entry.assistant figure.mfig')[1]; const r = f.getBoundingClientRect(); const m = f.closest('.media').getBoundingClientRect(); return f.classList.contains('expanded') && Math.abs(r.width - m.width) < 2 && !!f.querySelector('iframe') && r.height > 500; })()") as? Bool
+        let topAfter = js(page, "Math.round(document.querySelectorAll('.entry.assistant figure.mfig')[1].getBoundingClientRect().top)") as? Int ?? -2
+        check("media: clicking a PDF opens it out to full width as the live PDF", opened == true)
+        check("media: opening out keeps it where it was on screen", abs(topBefore - topAfter) <= 1, "\(topBefore) -> \(topAfter)")
+        check("media: clicking doesn't open the file anymore", sent("open").isEmpty && sent("popout").isEmpty)
+        check("media: Swift hears what's opened out", waitUntil(2) { reader.mediaKeys.expanded == 1 })
+        _ = js(page, "document.querySelectorAll('.entry.assistant figure.mfig')[1].scrollIntoView({block: 'start'}); window.scrollBy(0, -24); 1")
+        RunLoop.main.run(until: Date().addingTimeInterval(1.0))
+        shoot("reader-media-expanded")
+        _ = js(page, "document.querySelectorAll('.entry.assistant figure.mfig')[1].querySelector('.mbody').click(); 1")
+        let shrunk = js(page, "(() => { const f = document.querySelectorAll('.entry.assistant figure.mfig')[1]; return !f.classList.contains('expanded') && !f.querySelector('iframe') && f.getBoundingClientRect().height < 220; })()") as? Bool
+        check("media: clicking again shrinks it", shrunk == true && waitUntil(2) { reader.mediaKeys.expanded == 0 })
+
+        // Esc: on the page, and from the message box through Swift.
+        _ = js(page, "document.querySelector('.entry.assistant figure.mfig').querySelector('.mbody').click(); 1")
+        _ = js(page, "document.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape', bubbles: true})); 1")
+        check("media: Esc on the page shrinks it", (js(page, "document.querySelectorAll('figure.mfig.expanded').length") as? Int) == 0)
+        _ = js(page, "document.querySelector('.entry.assistant figure.mfig').querySelector('.mbody').click(); 1")
+        _ = waitUntil(2) { reader.mediaKeys.expanded == 1 }
+        let esc = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0, windowNumber: w.windowNumber, context: nil,
+                                   characters: "\u{1b}", charactersIgnoringModifiers: "\u{1b}", isARepeat: false, keyCode: 53)!
+        let swallowed = reader.mediaKeys.handle(esc) == nil
+        check("media: Esc in the message box shrinks it first, and only then reaches the box", swallowed
+              && waitUntil(2) { (js(page, "document.querySelectorAll('figure.mfig.expanded').length") as? Int) == 0 }
+              && waitUntil(2) { reader.mediaKeys.expanded == 0 } && reader.mediaKeys.handle(esc) != nil)
+
+        // The caption still opens the file; the pop-out opens a kept tab.
+        posted.removeAll()
+        _ = js(page, "document.querySelectorAll('.entry.assistant figcaption a.path')[1].click(); 1")
+        check("media: the caption opens the file like a link", waitUntil(2) { sent("open").first?["path"] as? String == fx.pdf.path })
+        model.codeTabs = []
+        posted.removeAll()
+        _ = js(page, "document.querySelector('.entry.assistant figure.image button.popout').click(); 1")
+        check("popout: clicking posts {type: 'popout', path}", waitUntil(2) { sent("popout").first?["path"] as? String == fx.png.path })
         check("popout: the image opens as a tab in the Code tab, panel shown", model.codeTabs.map(\.path) == [fx.png.path] && model.panelTab == .code && model.panelVisible)
         _ = js(page, "document.querySelector('figure.pdf button.popout').click(); 1")
         check("popout: a second pop-out adds a tab and keeps the first", waitUntil(2) { model.codeTabs.map(\.path) == [fx.png.path, fx.pdf.path] })
+        _ = js(page, "(() => { const f = document.querySelectorAll('.entry.assistant figure.mfig')[2]; f.querySelector('.mbody').click(); f.querySelector('button.popout').click(); return 1; })()")
+        check("popout: works on an opened-out preview too", waitUntil(2) { model.codeTabs.last?.path == fx.slides.path })
         let folder = ReaderPopout.folder
         try? FileManager.default.removeItem(at: folder)
+        let before = model.codeTabs.count
         _ = js(page, "document.querySelector('.entry.user figure button.popout').click(); 1")
-        _ = waitUntil(2) { model.codeTabs.count == 3 }
+        _ = waitUntil(2) { model.codeTabs.count == before + 1 }
         _ = js(page, "document.querySelector('.entry.user figure button.popout').click(); 1")
         RunLoop.main.run(until: Date().addingTimeInterval(0.3))
         let files = (try? FileManager.default.contentsOfDirectory(atPath: folder.path)) ?? []
         check("popout: a pasted image is written once under attachments/reader and opened", files.count == 1 && files[0].hasSuffix(".png")
-              && model.codeTabs.count == 3 && model.codeTabs.last?.path == folder.appendingPathComponent(files[0]).path, "\(files) \(model.codeTabs.map(\.name))")
+              && model.codeTabs.count == before + 1 && model.codeTabs.last?.path == folder.appendingPathComponent(files[0]).path, "\(files) \(model.codeTabs.map(\.name))")
         check("popout: data URL decoding", ReaderPopout.write(dataURL: "data:text/plain,hello%20there", into: dir.appendingPathComponent("popout-test")).map { (try? String(contentsOfFile: $0, encoding: .utf8)) == "hello there" } == true)
+        check("media: a PDF thumbnail is a crisp PNG of page one", PDFThumbnails.png(path: fx.slides.path, height: 400).flatMap { NSBitmapImageRep(data: $0) }.map { $0.pixelsHigh == 400 && $0.pixelsWide == 518 } == true)
+        check("media: no thumbnail for something that isn't a PDF", PDFThumbnails.png(path: fx.png.path, height: 400) == nil)
     }
 }

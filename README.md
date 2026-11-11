@@ -83,7 +83,7 @@ Press Shift-Cmd-R, or click the book icon above the chat, and the chat you're lo
 
 The reader follows the conversation as it happens. Your messages sit on the right and the agent's answers read like a normal document. A run of tool calls folds into one line, like "Ran a command, read a file and 1 more", and you can open it to see each step. The agent's thinking is hidden, but permission requests, errors and questions to you always stay visible.
 
-Images and PDFs that come up in the chat appear inline instead of as paths. LaTeX is rendered with KaTeX, and code blocks are highlighted with a Copy button. That's what makes it usable for studying.
+Images and PDFs that come up in the chat appear inline instead of as paths, as small previews side by side. Click one to open it out to full width, and click again or press Esc to shrink it. The button in its corner opens it as a tab in the Code tab. LaTeX is rendered with KaTeX, and code blocks are highlighted with a Copy button. That's what makes it usable for studying.
 
 - Return sends and Shift-Return adds a line. Dropping files on the box types their paths.
 - While the agent works, a line above the box says what it's doing. Esc or the Stop button stops it.
@@ -99,7 +99,6 @@ Every file path in the chat becomes a link, and clicking one opens the file as a
 - Markdown, SVG and CSV files open rendered, with a switch to edit the source.
 - PDFs, images, video and audio open in native viewers that fit the panel. Anything else Quick Look can show, like Office and Keynote files or 3D models, opens in Quick Look.
 - When an agent changes a file you have open, the tab reloads in place. If you have unsaved edits, a bar asks whether to reload or keep yours.
-- Images and PDFs in the reader have a pop-out button that opens them as a tab.
 
 Folders, and files nothing can preview, are shown in Finder.
 

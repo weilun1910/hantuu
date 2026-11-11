@@ -15,11 +15,14 @@ final class ReaderController {
     private let model: AppModel
     private var shownChatID: UUID?
     private var bag = Set<AnyCancellable>()
+    /// Esc shrinks an opened-out image or PDF (FileViewer/ReaderMedia.swift).
+    let mediaKeys: ReaderMediaKeys
 
     /// Reader mode makes a second one for the main area, with `layout=main` in the page URL.
     init(model: AppModel, page: String = "reader.html", identifier: String = "hantuu.reader", focusless: Bool = false) {
         self.page = WebPage(page: page, identifier: identifier, focusless: focusless)
         self.model = model
+        mediaKeys = ReaderMediaKeys(page: self.page)
         self.page.onReady = { [weak self] in self?.reload() }
         self.page.onMessage = { [weak self] msg in self?.handle(msg) }
         model.$selectedChatID
@@ -75,6 +78,8 @@ final class ReaderController {
         case "popout":
             // The pop-out button on an image or PDF: open it as a tab in the Code tab.
             ReaderPopout.open(msg, model: model)
+        case "mediaExpanded":
+            mediaKeys.update(expanded: msg["count"] as? Int ?? 0)
         case "copy":
             // Reader mode's copy buttons on messages and code blocks.
             guard let text = msg["text"] as? String, !text.isEmpty else { return }

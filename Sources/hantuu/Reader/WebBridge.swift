@@ -5,10 +5,27 @@ import WebKit
 /// Serves the reader and code viewer without any network access:
 ///   hantuu://app/<file>        bundled pages, CSS, JS libraries, KaTeX fonts
 ///   hantuu://file/<abs path>   local files the chat points at (images, PDFs), read-only
+///   hantuu://thumb/<abs path>  a PDF's first page as a PNG, for the reader's previews
 final class HantuuSchemeHandler: NSObject, WKURLSchemeHandler {
+    private var stopped = Set<ObjectIdentifier>()
+
     func webView(_ webView: WKWebView, start task: WKURLSchemeTask) {
         guard let url = task.request.url, let host = url.host else {
             task.didFailWithError(URLError(.badURL))
+            return
+        }
+        if host == "thumb" {
+            // Drawn off the main thread; the task may be stopped by then.
+            let path = url.path.removingPercentEncoding ?? url.path
+            let h = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?.first { $0.name == "h" }?.value.flatMap(Int.init) ?? 400
+            let id = ObjectIdentifier(task)
+            DispatchQueue.global(qos: .userInitiated).async {
+                let png = PDFThumbnails.png(path: path, height: h)
+                DispatchQueue.main.async {
+                    guard self.stopped.remove(id) == nil else { return }
+                    self.respond(task, url: url, data: png, mime: "image/png")
+                }
+            }
             return
         }
         let fileURL: URL?
@@ -34,7 +51,19 @@ final class HantuuSchemeHandler: NSObject, WKURLSchemeHandler {
         task.didFinish()
     }
 
-    func webView(_ webView: WKWebView, stop task: WKURLSchemeTask) {}
+    func webView(_ webView: WKWebView, stop task: WKURLSchemeTask) { stopped.insert(ObjectIdentifier(task)) }
+
+    private func respond(_ task: WKURLSchemeTask, url: URL, data: Data?, mime: String) {
+        guard let data else {
+            task.didReceive(HTTPURLResponse(url: url, statusCode: 404, httpVersion: "HTTP/1.1", headerFields: nil)!)
+            task.didFinish()
+            return
+        }
+        let headers = ["Content-Type": mime, "Content-Length": "\(data.count)", "Cache-Control": "no-store"]
+        task.didReceive(HTTPURLResponse(url: url, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: headers)!)
+        task.didReceive(data)
+        task.didFinish()
+    }
 
     static func fileURLString(_ path: String) -> String {
         "hantuu://file" + (path.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? path)

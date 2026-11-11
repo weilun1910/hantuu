@@ -14,6 +14,7 @@ struct FileViewerFixtures {
     var svg: URL { root.appendingPathComponent("logo.svg") }
     var csv: URL { root.appendingPathComponent("results.csv") }
     var pdf: URL { root.appendingPathComponent("paper.pdf") }
+    var slides: URL { root.appendingPathComponent("slides.pdf") }
     var png: URL { root.appendingPathComponent("chart.png") }
     var heic: URL { root.appendingPathComponent("photo.heic") }
     var gif: URL { root.appendingPathComponent("spinner.gif") }
@@ -89,6 +90,7 @@ struct FileViewerFixtures {
             writeGIF([img, chartImage(width: 800, height: 520, bars: [0.7, 0.5, 0.3]) ?? img], to: f.gif)
         }
         makePDF(f.pdf)
+        makeSlides(f.slides)
         makeWAV(f.audio)
         makeRTF(f.rtf)
         _ = makeVideo(f.video)
@@ -172,6 +174,26 @@ struct FileViewerFixtures {
             NSGraphicsContext.restoreGraphicsState()
             ctx.endPDFPage()
         }
+        ctx.closePDF()
+    }
+
+    /// One landscape slide.
+    static func makeSlides(_ url: URL) {
+        var box = CGRect(x: 0, y: 0, width: 792, height: 612)
+        guard let ctx = CGContext(url as CFURL, mediaBox: &box, nil) else { return }
+        ctx.beginPDFPage(nil)
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = NSGraphicsContext(cgContext: ctx, flipped: false)
+        NSColor(srgbRed: 0.12, green: 0.13, blue: 0.15, alpha: 1).setFill()
+        box.fill()
+        NSAttributedString(string: "Parser, week 3", attributes: [.font: NSFont.systemFont(ofSize: 44, weight: .semibold), .foregroundColor: NSColor.white])
+            .draw(at: NSPoint(x: 72, y: 330))
+        NSAttributedString(string: "Whitespace runs, counting, and what's next", attributes: [.font: NSFont.systemFont(ofSize: 20), .foregroundColor: NSColor(white: 0.7, alpha: 1)])
+            .draw(at: NSPoint(x: 72, y: 290))
+        NSColor(srgbRed: 0.9, green: 0.64, blue: 0.23, alpha: 1).setFill()
+        NSRect(x: 72, y: 270, width: 64, height: 4).fill()
+        NSGraphicsContext.restoreGraphicsState()
+        ctx.endPDFPage()
         ctx.closePDF()
     }
 
