@@ -116,6 +116,11 @@ enum SelfTest {
         ka.agentsWorking(false, now: t0.addingTimeInterval(KeepAwake.workGrace + 1))
         check("keep awake: let go a minute after the last agent stops", !ka.preventingIdleSleep)
 
+        // Close only asks when it would cut an agent off mid-task.
+        let quiet = Chat(projectID: UUID(), agentID: "claude")
+        let asks = AgentActivity.allCases.filter { a in quiet.activity = a; return AppModel.closingInterrupts(quiet) }
+        check("close: asks only while the agent works or waits on you", Set(asks) == [.working, .needsPermission, .needsAnswer], "\(asks)")
+
         // Felix's own saved sidebar, read only: this build must load all of it.
         let mine = Paths.home.appendingPathComponent("Library/Application Support/hantuu/state.json")
         if let data = try? Data(contentsOf: mine),

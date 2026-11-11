@@ -570,13 +570,23 @@ final class AppModel: ObservableObject, TerminalEvents {
         select(ordered[index].id)
     }
 
+    /// Whether closing a live chat would cut its agent off mid-task, which is the only time
+    /// Close asks first. An agent sitting at its prompt (idle, done, or a chat that never got a
+    /// message) closes quietly: nothing is lost, and Resume brings the conversation back.
+    static func closingInterrupts(_ chat: Chat) -> Bool {
+        switch chat.activity {
+        case .working, .needsPermission, .needsAnswer: return true
+        case .doneUnseen, .idle, .ended: return false
+        }
+    }
+
     func closeChat(_ chat: Chat) {
         let running = chat.status != .ended && chat.terminal.map { !$0.processExited } == true
         var choice = WorktreePrompt.CloseChoice.keepWorktree
         if let wt = chat.worktree {
             choice = WorktreePrompt.confirmClose(agentName: chat.agent.name, worktree: wt, running: running)
             if choice == .cancel { return }
-        } else if running {
+        } else if running && Self.closingInterrupts(chat) {
             let a = NSAlert()
             a.messageText = "Close this chat?"
             a.informativeText = "\(chat.agent.name) is still running. Closing the chat stops it. The transcript stays on disk."
