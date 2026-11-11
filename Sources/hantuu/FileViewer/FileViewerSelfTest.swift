@@ -669,6 +669,8 @@ extension SelfTest {
               PDFThumbnails.png(path: rotated.path, page: 1, width: 700).flatMap { NSBitmapImageRep(data: $0) }
                 .map { $0.pixelsWide == 700 && $0.pixelsHigh == 500 } == true)
 
+        readerPDFFit(page, window: w, root: fx.root, shots: shots)
+
         // A long PDF reserves every page's shape without requesting every page's pixels.
         let longPDF = fx.root.appendingPathComponent("many-pages.pdf")
         var box = CGRect(x: 0, y: 0, width: 612, height: 792)
@@ -684,9 +686,33 @@ extension SelfTest {
         var longEntry = ReaderEntry(id: "long-pdf", kind: .assistant, text: longPDF.path)
         longEntry.links = PathDetector.detect(in: longPDF.path, base: fx.root.path)
         let longEntries = (try? JSONSerialization.jsonObject(with: JSONEncoder().encode([longEntry]))) ?? []
+        _ = js(page, """
+        window.pdfCompactObservers = {resize: ResizeObserver, intersections: IntersectionObserver, count: 0};
+        const trackPDFObserver = {construct(target, args) {
+          window.pdfCompactObservers.count++;
+          return Reflect.construct(target, args);
+        }};
+        window.ResizeObserver = new Proxy(ResizeObserver, trackPDFObserver);
+        window.IntersectionObserver = new Proxy(IntersectionObserver, trackPDFObserver);
+        1
+        """)
         page.call("reset", ["chatID": "long-media", "entries": longEntries, "emptyText": ""] as [String: Any])
-        _ = waitUntil(5) { (js(page, "document.querySelector('figure.pdf img')?.naturalWidth > 0") as? Bool) == true }
-        _ = js(page, "document.querySelector('figure.pdf .mbody').click(); window.scrollTo(0, 0); 1")
+        check("media: a compact 200-page PDF stores metadata with one image and no observers",
+              waitUntil(5) { (js(page, "document.querySelector('figure.pdf')?.dataset.pageCount === '200' && document.querySelector('figure.pdf img')?.naturalWidth > 0 && document.querySelectorAll('.pdf-page').length === 1 && document.querySelectorAll('.media img').length === 1 && window.pdfCompactObservers.count === 0") as? Bool) == true })
+        _ = js(page, "window.ResizeObserver = window.pdfCompactObservers.resize; window.IntersectionObserver = window.pdfCompactObservers.intersections; delete window.pdfCompactObservers; 1")
+        check("media: expansion builds stored page shapes synchronously at their final size",
+              (js(page, """
+              (() => {
+                const f = document.querySelector('figure.pdf');
+                f.querySelector('.mbody').click();
+                window.scrollTo(0, 0);
+                const pages = Array.from(f.querySelectorAll('.pdf-page'));
+                return pages.length === 200 && pages.every(p => {
+                  const r = p.getBoundingClientRect();
+                  return Math.abs(r.width - f.clientWidth) < 1 && Math.abs(r.height - r.width * 792 / 612) < 1;
+                });
+              })()
+              """) as? Bool) == true)
         check("media: a 200-page PDF creates placeholders without an iframe",
               waitUntil(5) { (js(page, "document.querySelectorAll('.pdf-page').length === 200 && !document.querySelector('iframe')") as? Bool) == true })
         check("media: distant pages stay lazy and have no requested image source",
@@ -701,6 +727,165 @@ extension SelfTest {
         page.call("reset", ["chatID": "empty-media", "entries": [], "emptyText": ""] as [String: Any])
         check("media: a stale metadata reply cannot recreate pages after switching chats",
               (js(page, "hantuu.pdfInfo({id: window.mediaOldID, path: window.mediaOldPath, pages: [{width: 612, height: 792}]}); document.querySelectorAll('.pdf-page').length === 0") as? Bool) == true)
+    }
+
+    /// Full-bleed pages catch padding inside a PNG that DOM width checks cannot see.
+    static func readerPDFFit(_ page: WebPage, window: NSWindow, root: URL, shots: URL) {
+        let document = PDFDocument()
+        let sizes: [CGSize] = [CGSize(width: 420, height: 560), CGSize(width: 600, height: 340),
+                               CGSize(width: 360, height: 360), CGSize(width: 280, height: 480),
+                               CGSize(width: 480, height: 320)]
+        let ratios: [Double] = [420.0 / 560, 600.0 / 340, 1, 480.0 / 280, 480.0 / 320]
+        for (index, size) in sizes.enumerated() {
+            let source = root.appendingPathComponent("solid-page-\(index).pdf")
+            var box = CGRect(origin: .zero, size: size)
+            guard let context = CGContext(source as CFURL, mediaBox: &box, nil) else {
+                check("media fit: create solid PDF fixture", false)
+                return
+            }
+            context.beginPDFPage(nil)
+            context.setFillColor(CGColor(srgbRed: 0.12, green: 0.65, blue: 0.25, alpha: 1))
+            context.fill(box)
+            context.endPDFPage()
+            context.closePDF()
+            guard let sourceDocument = PDFDocument(url: source), let pdfPage = sourceDocument.page(at: 0) else {
+                check("media fit: read solid PDF fixture", false)
+                return
+            }
+            if index == 3 { pdfPage.rotation = 90 }
+            if index == 4 { pdfPage.setBounds(CGRect(x: -120, y: -160, width: 720, height: 640), for: .cropBox) }
+            document.insert(pdfPage, at: document.pageCount)
+        }
+        let fixture = root.appendingPathComponent("solid-mixed-pages.pdf")
+        guard document.write(to: fixture) else {
+            check("media fit: write mixed PDF fixture", false)
+            return
+        }
+        func green(_ bitmap: NSBitmapImageRep, x: Int, y: Int) -> Bool {
+            guard x >= 0, y >= 0, x < bitmap.pixelsWide, y < bitmap.pixelsHigh,
+                  let color = bitmap.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB) else { return false }
+            return color.greenComponent > 0.45 && color.greenComponent > color.redComponent + 0.2
+                && color.greenComponent > color.blueComponent + 0.2
+        }
+        for (index, ratio) in ratios.enumerated() {
+            let bitmap = PDFThumbnails.png(path: fixture.path, page: index + 1, width: 900)
+                .flatMap { NSBitmapImageRep(data: $0) }
+            let fits = bitmap.map {
+                abs(Double($0.pixelsHigh) - Double($0.pixelsWide) / ratio) <= 1
+                    && green($0, x: $0.pixelsWide / 2, y: 3)
+                    && green($0, x: 3, y: $0.pixelsHigh / 2)
+                    && green($0, x: $0.pixelsWide - 4, y: $0.pixelsHigh / 2)
+                    && green($0, x: $0.pixelsWide / 2, y: $0.pixelsHigh - 4)
+            } ?? false
+            check("media fit: native page \(index + 1) has the expected aspect and no white edges", fits)
+        }
+        var entry = ReaderEntry(id: "solid-pdf", kind: .assistant, text: fixture.path)
+        entry.links = PathDetector.detect(in: fixture.path, base: root.path)
+        let entries = (try? JSONSerialization.jsonObject(with: JSONEncoder().encode([entry]))) ?? []
+        page.call("reset", ["chatID": "solid-media", "entries": entries, "emptyText": ""] as [String: Any])
+        guard waitUntil(5, { (js(page, "document.querySelector('figure.pdf')?.dataset.pageCount === '5' && document.querySelector('figure.pdf img')?.naturalWidth > 0") as? Bool) == true }) else {
+            check("media fit: compact preview has its exact metadata and thumbnail", false)
+            return
+        }
+        // Hold decoded replacements so snapshots really exercise the enlarged thumbnail.
+        // Restore the browser method even when a later assertion fails.
+        _ = js(page, """
+        window.pdfFitDecode = Image.prototype.decode;
+        window.pdfFitPending = [];
+        window.pdfFitHolding = true;
+        Image.prototype.decode = function() {
+          return window.pdfFitDecode.call(this).then(() => window.pdfFitHolding
+            ? new Promise(resolve => window.pdfFitPending.push(resolve)) : undefined);
+        };
+        window.pdfFitGeometry = () => {
+          const f = document.querySelector('figure.pdf');
+          const body = f.querySelector('.mbody');
+          const slots = Array.from(f.querySelectorAll('.pdf-page'));
+          const ratios = [420 / 560, 600 / 340, 1, 480 / 280, 480 / 320];
+          const width = body.getBoundingClientRect().width;
+          const fits = slots.length === ratios.length && slots.every((slot, index) => {
+            const image = slot.querySelector('img');
+            const s = slot.getBoundingClientRect(), r = image.getBoundingClientRect();
+            return Math.abs(r.width - width) < 1 && Math.abs(s.width - width) < 1
+              && Math.abs(r.height - width / ratios[index]) < 1
+              && Math.abs(s.height - width / ratios[index]) < 1
+              && Math.abs(r.left - s.left) < 1 && Math.abs(r.top - s.top) < 1
+              && [slot, image].every(el => {
+                const c = getComputedStyle(el);
+                return c.transform === 'none' && c.transitionDuration.split(',').every(t => parseFloat(t) === 0)
+                  && !el.getAnimations().length;
+              });
+          });
+          const height = slots.reduce((sum, slot) => sum + slot.getBoundingClientRect().height, 0)
+            + (slots.length - 1) * 10 + parseFloat(getComputedStyle(body).paddingTop);
+          return fits && Math.abs(body.getBoundingClientRect().height - height) < 1;
+        };
+        document.querySelector('figure.pdf .mbody').click();
+        window.pdfFitInitial = document.querySelector('figure.pdf img');
+        window.pdfFitInitialHeight = window.pdfFitInitial.getBoundingClientRect().height;
+        1
+        """)
+        defer {
+            _ = js(page, "window.pdfFitHolding = false; Image.prototype.decode = window.pdfFitDecode; window.pdfFitPending.splice(0).forEach(resolve => resolve()); delete window.pdfFitGeometry; 1")
+            window.appearance = NSAppearance(named: .darkAqua)
+        }
+        check("media fit: every page fills its width and exact aspect immediately, without transforms or transitions",
+              (js(page, "window.pdfFitGeometry() && document.querySelector('figure.pdf img') === window.pdfFitInitial && !window.pdfFitInitial.dataset.renderWidth") as? Bool) == true)
+
+        func snapshotEdges(_ phase: String, pageIndex: Int) {
+            _ = js(page, "document.querySelectorAll('.pdf-page')[\(pageIndex)].scrollIntoView({block: 'start'}); window.scrollBy(0, -44); 1")
+            for dark in [true, false] {
+                window.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
+                RunLoop.main.run(until: Date().addingTimeInterval(0.15))
+                let points = js(page, """
+                (() => {
+                  const r = document.querySelectorAll('.pdf-page')[\(pageIndex)].getBoundingClientRect();
+                  const y = Math.min(r.bottom - 6, innerHeight - 12, r.top + r.height / 2);
+                  return [[r.left + r.width / 2, r.top + 6], [r.left + 6, y], [r.right - 6, y]];
+                })()
+                """) as? [[Double]] ?? []
+                var image: NSImage?
+                var failure: Error?
+                var done = false
+                page.webView.takeSnapshot(with: nil) { result, error in image = result; failure = error; done = true }
+                let finished = waitUntil(5) { done }
+                let bitmap = image?.tiffRepresentation.flatMap { NSBitmapImageRep(data: $0) }
+                let pixelsFit = bitmap.map { bitmap in
+                    let scaleX = Double(bitmap.pixelsWide) / Double(page.webView.bounds.width)
+                    let scaleY = Double(bitmap.pixelsHigh) / Double(page.webView.bounds.height)
+                    return points.count == 3 && points.allSatisfy { point in
+                        point.count == 2 && green(bitmap, x: Int(point[0] * scaleX), y: Int(point[1] * scaleY))
+                    }
+                } ?? false
+                let name = "reader-pdf-fit-\(phase)-\(pageIndex + 1)-\(dark ? "dark" : "light").png"
+                if let png = bitmap?.representation(using: .png, properties: [:]) {
+                    Paths.ensure(shots)
+                    try? png.write(to: shots.appendingPathComponent(name))
+                }
+                check("media fit: \(phase) page \(pageIndex + 1) has green top and side edges in \(dark ? "dark" : "light")",
+                      finished && failure == nil && pixelsFit, failure?.localizedDescription ?? "Snapshot edge pixels do not match the full-bleed page")
+                check("media fit: \(phase) geometry in \(dark ? "dark" : "light")", (js(page, "window.pdfFitGeometry()") as? Bool) == true)
+            }
+        }
+        snapshotEdges("thumbnail", pageIndex: 0)
+        check("media fit: thumbnail remains visible while decoded replacements wait",
+              (js(page, "document.querySelector('figure.pdf img') === window.pdfFitInitial") as? Bool) == true)
+        _ = js(page, "window.pdfFitHolding = false; Image.prototype.decode = window.pdfFitDecode; window.pdfFitPending.splice(0).forEach(resolve => resolve()); 1")
+        for index in ratios.indices {
+            _ = js(page, "document.querySelectorAll('.pdf-page')[\(index)].scrollIntoView({block: 'center'}); 1")
+            check("media fit: sharp page \(index + 1) arrives without changing page geometry",
+                  waitUntil(6) { (js(page, "!!document.querySelectorAll('.pdf-page')[\(index)].querySelector('img').dataset.renderWidth && window.pdfFitGeometry() && Math.abs(document.querySelector('figure.pdf img').getBoundingClientRect().height - window.pdfFitInitialHeight) < 0.01") as? Bool) == true })
+            snapshotEdges("sharp", pageIndex: index)
+        }
+        let originalWidth = page.webView.frame.size.width
+        for width in [CGFloat(480), CGFloat(800), originalWidth] {
+            page.webView.frame.size.width = width
+            check("media fit: mixed page shapes fit after resizing to \(Int(width))",
+                  waitUntil(2) { (js(page, "window.pdfFitGeometry()") as? Bool) == true })
+        }
+        _ = js(page, "document.querySelector('figure.pdf button.shrink').click(); 1")
+        check("media fit: mixed PDF shrinks straight back to a compact card",
+              (js(page, "document.querySelector('figure.pdf').getBoundingClientRect().height < 220") as? Bool) == true)
     }
 }
 
