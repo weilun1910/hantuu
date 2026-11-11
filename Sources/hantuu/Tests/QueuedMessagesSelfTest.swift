@@ -17,7 +17,7 @@ extension SelfTest {
             check("queue: non-human \(origin) stays hidden", claude.parse(line: queued(origin, "Internal message", origin: origin)).isEmpty)
         }
         check("queue: task notifications never become user messages", claude.parse(line: queued("task", "Internal message", mode: "task-notification")).isEmpty)
-        let command = claude.parse(line: queued("cmd", "<command-name>/compact</command-name><command-args>keep tests</command-args>", mode: "command"))
+        let command = claude.parse(line: line(["type": "user", "uuid": "cmd", "message": ["content": "<command-message>compact</command-message><command-name>/compact</command-name><command-args>keep tests</command-args>"]]))
         check("queue: delivered commands use the normal command notice", command.first?.kind == .notice && command.first?.text == "Ran /compact keep tests")
         let duplicate = claude.parse(line: line(["type": "user", "uuid": "source-q1", "message": ["content": "Use the smaller version"]]))
         check("queue: a regular line with the same source identity is not repeated", duplicate.isEmpty)
@@ -55,7 +55,8 @@ extension SelfTest {
         let imageOnly = ReaderEntry(id: "image-delivery", kind: .user, text: "[Image #3]", images: ["data:image/png;base64,cGljdHVyZQ=="])
         check("queue: image-only sends match without relying on chip numbering", pending.reconcile([imageOnly]).first?.replacesPendingID == "image-only")
         pending.enqueue(id: "command", text: "/compact keep tests", files: [], agentID: "claude", existing: [])
-        check("queue: a command notice acknowledges a pending command", pending.reconcile(command).first?.replacesPendingID == "command")
+        check("queue: slash send steps preserve the command and arguments", pending.entries.first?.text == "/compact keep tests")
+        check("queue: a command notice acknowledges a pending command", pending.reconcile(command).first?.replacesPendingID == "command" && pending.isEmpty)
         pending.enqueue(id: "interrupted", text: "Do this next", files: [], agentID: "claude", existing: [])
         _ = pending.reconcile([ReaderEntry(id: "stop", kind: .notice, text: "Interrupted")])
         check("queue: a terminal interruption drops undelivered bubbles", pending.isEmpty)
@@ -84,7 +85,78 @@ extension SelfTest {
         pending.enqueue(id: "codex-image", text: "Use this", files: [picture], agentID: "codex", existing: [])
         let wrapped = ReaderEntry(id: "wrapped", kind: .user, text: "<image name=[Image #1] path=\"/tmp/picture.png\">\n\n</image>\n\n[Image #1] Use this", images: ["data:image/png;base64,cGljdHVyZQ=="])
         check("queue: Codex image wrappers do not prevent matching", pending.reconcile([wrapped]).first?.replacesPendingID == "codex-image")
+        queuedCommands()
         queuedMessageRendering()
+    }
+
+    private static func queuedCommands() {
+        func line(_ object: [String: Any]) -> Data { try! JSONSerialization.data(withJSONObject: object) }
+        var claude = ClaudeTranscriptParser()
+        func claudeCommand(_ id: String, _ name: String, _ arguments: String = "") -> [ReaderEntry] {
+            claude.parse(line: line(["type": "user", "uuid": id, "message": ["content": "<command-name>/\(name)</command-name><command-args>\(arguments)</command-args>"]]))
+        }
+        var pending = PendingReaderMessages()
+        let compact = claudeCommand("compact-command", "compact", "keep tests")
+        pending.enqueue(id: "compact", text: "/compact keep tests", files: [], agentID: "claude", existing: [])
+        _ = pending.reconcile(claudeCommand("other-arguments", "compact", "keep docs"))
+        check("queue: command notices require matching arguments", pending.entries.map(\.id) == ["compact"])
+        _ = pending.reconcile(compact)
+        pending.enqueue(id: "next-compact", text: "/compact keep tests", files: [], agentID: "claude", existing: compact)
+        let boundary = claude.parse(line: line(["type": "system", "uuid": "compact-boundary", "subtype": "compact_boundary", "compactMetadata": ["trigger": "manual"]]))
+        _ = pending.reconcile(boundary)
+        _ = pending.reconcile(boundary)
+        check("queue: an acknowledged command's result cannot consume the next send", pending.entries.map(\.id) == ["next-compact"])
+        pending.removeAll()
+
+        pending.enqueue(id: "boundary-only", text: "/compact keep tests", files: [], agentID: "claude", existing: [])
+        check("queue: a Claude compact boundary acknowledges arguments without exposing the summary", pending.reconcile(boundary).first?.replacesPendingID == "boundary-only" && pending.isEmpty)
+        var summaryParser = ClaudeTranscriptParser()
+        let summary = summaryParser.parse(line: line(["type": "user", "uuid": "compact-summary", "isCompactSummary": true, "isMeta": true, "message": ["content": "Summary fixture"]]))
+        pending.enqueue(id: "summary-only", text: "/compact keep tests", files: [], agentID: "claude", existing: boundary)
+        check("queue: a Claude compact summary can acknowledge the command on its own", pending.reconcile(summary).first?.replacesPendingID == "summary-only" && pending.isEmpty)
+
+        let model = claudeCommand("model-command", "model")
+        pending.enqueue(id: "model-picker", text: "/model", files: [], agentID: "claude", existing: [])
+        check("queue: a Claude picker command notice acknowledges its pending invocation", pending.reconcile(model).first?.replacesPendingID == "model-picker" && pending.isEmpty)
+        let modelOutput = claude.parse(line: line(["type": "user", "uuid": "model-output", "message": ["content": "<local-command-stdout>Set model to example-model</local-command-stdout>"]]))
+        pending.enqueue(id: "next-model", text: "/model", files: [], agentID: "claude", existing: model)
+        _ = pending.reconcile(modelOutput)
+        check("queue: picker output does not acknowledge a second picker after its command notice", pending.entries.map(\.id) == ["next-model"])
+        pending.removeAll()
+        pending.enqueue(id: "model-output-only", text: "/model", files: [], agentID: "claude", existing: [])
+        check("queue: Claude picker output can acknowledge an invocation without its command notice", pending.reconcile(modelOutput).first?.replacesPendingID == "model-output-only" && pending.isEmpty)
+
+        var codex = CodexTranscriptParser()
+        let codexCompact = codex.parse(line: line(["type": "compacted", "payload": ["message": "Summary fixture", "replacement_history": []]]))
+        let codexCompactEvent = codex.parse(line: line(["type": "event_msg", "payload": ["type": "context_compacted"]]))
+        pending.enqueue(id: "codex-compact", text: "/compact", files: [], agentID: "codex", existing: [])
+        check("queue: Codex compacted records acknowledge slash commands without a user echo", pending.reconcile(codexCompact).first?.replacesPendingID == "codex-compact" && pending.isEmpty && codexCompactEvent.isEmpty)
+        pending.enqueue(id: "codex-repeat", text: "/compact", files: [], agentID: "codex", existing: codexCompact)
+        _ = pending.reconcile(codexCompact)
+        check("queue: replayed compaction cannot acknowledge a repeated command", pending.entries.map(\.id) == ["codex-repeat"])
+        pending.removeAll()
+
+        var eventParser = CodexTranscriptParser()
+        let compactEventOnly = eventParser.parse(line: line(["type": "event_msg", "payload": ["type": "context_compacted"]]))
+        pending.enqueue(id: "codex-event", text: "/compact", files: [], agentID: "codex", existing: [])
+        check("queue: a standalone Codex context-compacted event acknowledges its command", pending.reconcile(compactEventOnly).first?.replacesPendingID == "codex-event" && pending.isEmpty)
+        pending.removeAll()
+
+        _ = codex.parse(line: line(["type": "turn_context", "payload": ["model": "first-model"]]))
+        let changedModel = codex.parse(line: line(["type": "turn_context", "payload": ["model": "second-model"]]))
+        pending.enqueue(id: "codex-model", text: "/model", files: [], agentID: "codex", existing: [])
+        check("queue: a Codex model change acknowledges a picker without a user echo", pending.reconcile(changedModel).first?.replacesPendingID == "codex-model" && pending.isEmpty)
+
+        pending.enqueue(id: "ordinary", text: "Conversation compacted", files: [], agentID: "codex", existing: [])
+        _ = pending.reconcile(codexCompact)
+        _ = pending.reconcile(changedModel)
+        check("queue: command results never acknowledge ordinary prose", pending.entries.map(\.id) == ["ordinary"])
+        pending.removeAll()
+        pending.enqueue(id: "model-argument", text: "/model requested-model", files: [], agentID: "codex", existing: [])
+        _ = pending.reconcile(changedModel)
+        check("queue: a different model result cannot acknowledge an explicit model argument", pending.entries.map(\.id) == ["model-argument"])
+        let requestedModel = codex.parse(line: line(["type": "turn_context", "payload": ["model": "requested-model"]]))
+        check("queue: the requested Codex model acknowledges its explicit argument", pending.reconcile(requestedModel).first?.replacesPendingID == "model-argument" && pending.isEmpty)
     }
 
     static func queuedMessageRendering() {

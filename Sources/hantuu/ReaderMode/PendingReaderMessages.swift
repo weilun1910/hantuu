@@ -8,9 +8,13 @@ struct PendingReaderMessages {
         var existingIDs: Set<String>
         var expectedText: String
         var imagePaths: [String]
+        var agentID: String
+        var commandName: String?
     }
 
     private var messages: [Message] = []
+    private var acknowledgedCommands: [String: Int] = [:]
+    private var seenResultIDs = Set<String>()
     var entries: [ReaderEntry] { messages.map(\.entry) }
     var isEmpty: Bool { messages.isEmpty }
 
@@ -18,14 +22,21 @@ struct PendingReaderMessages {
                           agentID: String, existing: [ReaderEntry]) {
         let steps = ComposerMessage.steps(text: text, files: files, agentID: agentID)
         let body = steps.compactMap { step -> String? in
-            if case .paste(let text) = step { return text }
-            return nil
+            switch step {
+            case .paste(let text), .command(let text): return text
+            case .image, .pressReturn: return nil
+            }
         }.joined()
+        let commandName = steps.compactMap { step -> String? in
+            if case .command(let text) = step { return ReaderCommandLogic.invocation(text)?.name }
+            return nil
+        }.first
         let paths = files.filter(\.image).map(\.path)
         var entry = ReaderEntry(id: id, kind: .user, text: ComposerMessage.prepare(body) ?? "", images: paths)
         entry.pending = true
         messages.append(Message(entry: entry, existingIDs: Set(existing.map(\.id)),
-                                expectedText: entry.text, imagePaths: paths))
+                                expectedText: entry.text, imagePaths: paths,
+                                agentID: agentID, commandName: commandName))
     }
 
     /// Each delivered entry consumes at most one pending send. Old identical prompts and
@@ -35,11 +46,24 @@ struct PendingReaderMessages {
             if entry.kind == .notice && (entry.text == "Interrupted" || entry.text == "Turn interrupted") {
                 messages.removeAll { !$0.existingIDs.contains(entry.id) }
             }
+            let resultCommand = Self.resultCommand(entry)
+            if let command = resultCommand {
+                guard seenResultIDs.insert(entry.id).inserted else { return entry }
+                // An invocation and its later result acknowledge the same send.
+                if acknowledgedCommands[command, default: 0] > 0 {
+                    acknowledgedCommands[command, default: 0] -= 1
+                    return entry
+                }
+            }
             guard let index = messages.firstIndex(where: { message in
                 !message.existingIDs.contains(entry.id) && Self.matches(entry, message)
             }) else { return entry }
             var delivered = entry
-            delivered.replacesPendingID = messages.remove(at: index).entry.id
+            let message = messages.remove(at: index)
+            delivered.replacesPendingID = message.entry.id
+            if resultCommand == nil, let command = message.commandName, ["compact", "model"].contains(command) {
+                acknowledgedCommands[command, default: 0] += 1
+            }
             for i in messages.indices { messages[i].existingIDs.insert(entry.id) }
             return delivered
         }
@@ -56,13 +80,35 @@ struct PendingReaderMessages {
     }
 
     mutating func remove(id: String) { messages.removeAll { $0.entry.id == id } }
-    mutating func removeAll() { messages.removeAll() }
+    mutating func removeAll() {
+        messages.removeAll()
+        acknowledgedCommands.removeAll()
+        seenResultIDs.removeAll()
+    }
+
+    private static func resultCommand(_ entry: ReaderEntry) -> String? {
+        guard entry.kind == .notice else { return nil }
+        if entry.text == "Conversation compacted" { return "compact" }
+        if entry.text.hasPrefix("Model changed to ") || entry.text.hasPrefix("Set model to ") { return "model" }
+        return nil
+    }
 
     private static func matches(_ entry: ReaderEntry, _ message: Message) -> Bool {
         guard entry.kind == .user || entry.kind == .notice else { return false }
         var text = entry.text
         if entry.kind == .notice {
-            guard text.hasPrefix("Ran /"), message.expectedText.hasPrefix("/") else { return false }
+            guard let command = message.commandName else { return false }
+            // Compaction records omit the invocation and its optional instructions.
+            if text == "Conversation compacted" { return command == "compact" }
+            // A picker can record its result without recording the slash input itself.
+            if command == "model" {
+                let prefix = message.agentID == "codex" ? "Model changed to " : "Set model to "
+                if text.hasPrefix(prefix), let invocation = ReaderCommandLogic.invocation(message.expectedText) {
+                    let model = String(text.dropFirst(prefix.count))
+                    return !model.isEmpty && (invocation.arguments.isEmpty || invocation.arguments == model)
+                }
+            }
+            guard text.hasPrefix("Ran /") else { return false }
             text = String(text.dropFirst(4))
         }
         if !message.imagePaths.isEmpty {
