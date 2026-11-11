@@ -99,16 +99,13 @@ struct PanelHeader: View {
         VStack(spacing: 0) {
             ZStack {
                 WindowDragArea()
-                HStack(spacing: 2) {
-                    // Five labels fit at the default width; a narrow panel tightens the padding.
-                    ViewThatFits(in: .horizontal) {
-                        tabs(padding: 8)
-                        tabs(padding: 5)
-                        tabs(padding: 3)
-                    }
-                    Spacer(minLength: 0)
-                    IconButton(symbol: "sidebar.right", help: "Hide Panel  ⌥⌘0") { model.panelVisible = false }
+                // Five labels fit at the default width; a narrow panel tightens the padding.
+                ViewThatFits(in: .horizontal) {
+                    tabs(padding: 8)
+                    tabs(padding: 5)
+                    tabs(padding: 3)
                 }
+                .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.horizontal, 10)
             }
             .frame(height: 40)
