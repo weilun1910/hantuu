@@ -16,6 +16,8 @@ struct StatusContext {
     /// The chat is selected and hantuu is the active app.
     var focused: Bool
     var now: Date = Date()
+    /// BackgroundWatch reports this chat's background work, so a turn's end waits for its next check.
+    var watchesBackground = false
 }
 
 /// The facts behind a chat's state. `activity` and `detail` are derived from them, so the
@@ -53,12 +55,26 @@ struct StatusState: Equatable {
     /// The latest command a tool ran this turn. Codex's approval notification cuts its command
     /// short, so the full one comes from here.
     var lastCommand: String?
+    /// Subagents and background tasks still running after the main turn ended. While any
+    /// are, the chat reads as running in background rather than done.
+    var background = BackgroundSummary()
+    /// The last of them just finished with the main agent idle. Claude Code hands each result
+    /// to the agent as a new turn, so the chat waits this long for that turn before it's Done,
+    /// rather than saying Done twice.
+    var settleUntil: Date?
+    var settleDoneAt: Date?
+    var turnStartedAt: Date?
+    /// The turn just ended. Agents it started in its last seconds may not be counted yet, so
+    /// it reads Working until a background check that began after this time.
+    var checkAfter: Date?
 
     var activity: AgentActivity {
         if ended { return .ended }
         if let w = waits.first { return w.kind == .permission ? .needsPermission : .needsAnswer }
         if turnActive { return .working }
         if finalQuestion != nil { return .needsAnswer }
+        if checkAfter != nil { return .working }
+        if background.count > 0 || settleUntil != nil { return .background }
         if unseen { return .doneUnseen }
         return .idle
     }
@@ -69,6 +85,9 @@ struct StatusState: Equatable {
         if let w = waits.first { return w.detail }
         if turnActive { return workingDetail }
         if let q = finalQuestion { return "Asks: \(q)" }
+        if checkAfter != nil { return workingDetail }
+        if background.count > 0 { return background.detail }
+        if settleUntil != nil { return "Background work finished" }
         if let n = idleNote { return n }
         return ""
     }
@@ -127,7 +146,12 @@ enum StatusReducer {
             st.finalQuestion = nil
             st.unseen = false
             st.idleNote = nil
-            if !wasActive { st.waits.removeAll { $0.fallback } }
+            if !wasActive {
+                st.waits.removeAll { $0.fallback }
+                st.turnStartedAt = ctx.now
+                st.settleUntil = nil
+                st.checkAfter = nil
+            }
             if let id {
                 if st.running[id] == nil { st.runningOrder.append(id) }
                 st.running[id] = call
@@ -226,6 +250,37 @@ enum StatusReducer {
 
         case .terminalNotice, .progress:
             terminal(s.signal, &st, ctx)
+
+        case .background(let summary):
+            background(summary, &st, ctx)
+        }
+    }
+
+    /// Background work changed. When the last of it finishes while the main agent is idle,
+    /// the chat is done from when the work ended. Claude Code first hands the results to the
+    /// agent as a turn of their own, so unless that turn already happened, wait for it.
+    private static func background(_ s: BackgroundSummary, _ st: inout StatusState, _ ctx: StatusContext) {
+        let was = st.background.count
+        st.background = s
+        if let after = st.checkAfter, (s.checkedAt ?? .distantPast) >= after || ctx.now.timeIntervalSince(after) > 10 {
+            // The check the ended turn was waiting for: Done, or running in background.
+            st.checkAfter = nil
+        }
+        if was > 0, s.count == 0, !st.turnActive {
+            let handled = st.turnStartedAt.map { started in s.endedAt.map { started >= $0.addingTimeInterval(-2) } ?? false } ?? false
+            if !handled {
+                st.settleUntil = ctx.now.addingTimeInterval(ctx.agent == .claude ? 20 : 8)
+                st.settleDoneAt = s.endedAt ?? ctx.now
+            }
+        }
+        if let until = st.settleUntil, ctx.now >= until {
+            // No turn came: done since the work ended.
+            st.settleUntil = nil
+            if !st.turnActive, st.background.count == 0 {
+                st.doneAt = st.settleDoneAt ?? ctx.now
+                st.unseen = !ctx.focused
+                st.idleNote = nil
+            }
         }
     }
 
@@ -293,6 +348,9 @@ enum StatusReducer {
         st.unseen = false
         st.idleNote = nil
         if !wasActive {
+            st.turnStartedAt = ctx.now
+            st.settleUntil = nil
+            st.checkAfter = nil
             st.workingDetail = "Thinking"
             st.lastCommand = nil
             st.waits.removeAll()
@@ -302,7 +360,9 @@ enum StatusReducer {
     }
 
     private static func endTurn(_ st: inout StatusState, _ ctx: StatusContext, last: String?) {
+        st.checkAfter = st.turnActive && ctx.watchesBackground ? ctx.now : nil
         st.turnActive = false
+        st.settleUntil = nil
         st.progressActive = false
         st.waits.removeAll()
         st.running.removeAll()
@@ -327,8 +387,11 @@ enum StatusReducer {
 
     private static func reset(_ st: inout StatusState) {
         let structured = st.structured
+        let background = st.background
         st = StatusState()
         st.structured = structured
+        // Comes from the transcript, not the turn, so a new session keeps it until it's re-read.
+        st.background = background
     }
 
     private static func remember(_ id: String, _ st: inout StatusState) {

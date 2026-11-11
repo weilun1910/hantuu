@@ -24,6 +24,9 @@ struct SessionInsights: Equatable {
     var contextWindow: Int?
     var windowIsGuess = false
     var plan: [PlanItem] = []
+    /// Subagents and background work, as the chat's own transcript tells it. ReviewCenter
+    /// adds what the subagents' own files say (AgentWorkTracker).
+    var work = AgentWork()
 
     var contextFraction: Double? {
         guard let used = contextUsed, let window = contextWindow, window > 0 else { return nil }
@@ -35,7 +38,15 @@ struct SessionInsights: Equatable {
 /// reader stays a prose view; it only ever reads the file.
 struct InsightsParser {
     let kind: TranscriptKind
-    private(set) var insights = SessionInsights()
+    private var state = SessionInsights()
+    private var claudeWork = ClaudeWorkParser()
+    private var codexWork = CodexWorkParser()
+
+    var insights: SessionInsights {
+        var i = state
+        i.work = kind == .claude ? claudeWork.work : codexWork.work
+        return i
+    }
 
     // Claude's task list: TaskCreate adds, TaskUpdate changes, TodoWrite replaces.
     private var tasks: [PlanItem] = []
@@ -49,8 +60,12 @@ struct InsightsParser {
     mutating func consume(_ line: Data) {
         guard let obj = (try? JSONSerialization.jsonObject(with: line)) as? [String: Any] else { return }
         switch kind {
-        case .claude: claude(obj)
-        case .codex: codex(obj)
+        case .claude:
+            claudeWork.consume(obj)
+            claude(obj)
+        case .codex:
+            codexWork.consume(obj)
+            codex(obj)
         }
     }
 
@@ -60,14 +75,14 @@ struct InsightsParser {
         if obj["isSidechain"] as? Bool == true { return }
         guard let type = obj["type"] as? String, let msg = obj["message"] as? [String: Any] else { return }
         if type == "assistant" {
-            if let m = msg["model"] as? String, !m.isEmpty, !m.hasPrefix("<") { insights.model = m }
+            if let m = msg["model"] as? String, !m.isEmpty, !m.hasPrefix("<") { state.model = m }
             if let u = msg["usage"] as? [String: Any] {
                 let used = int(u["input_tokens"]) + int(u["cache_creation_input_tokens"]) + int(u["cache_read_input_tokens"])
                 if used > 0 {
-                    insights.contextUsed = used
-                    let (window, guess) = Self.claudeWindow(model: insights.model, used: used)
-                    insights.contextWindow = window
-                    insights.windowIsGuess = guess
+                    state.contextUsed = used
+                    let (window, guess) = Self.claudeWindow(model: state.model, used: used)
+                    state.contextWindow = window
+                    state.windowIsGuess = guess
                 }
             }
             for item in (msg["content"] as? [[String: Any]]) ?? [] where item["type"] as? String == "tool_use" {
@@ -110,7 +125,7 @@ struct InsightsParser {
                 lastPlanSource = 2
             }
         }
-        insights.plan = lastPlanSource == 2 ? tasks : todoWrite
+        state.plan = lastPlanSource == 2 ? tasks : todoWrite
     }
 
     /// Claude Code's transcript doesn't record the window size, so it's a guess: 200k, or 1M
@@ -127,26 +142,26 @@ struct InsightsParser {
         guard let type = obj["type"] as? String, let p = obj["payload"] as? [String: Any] else { return }
         switch (type, p["type"] as? String) {
         case ("turn_context", _):
-            if let m = p["model"] as? String, !m.isEmpty { insights.model = m }
+            if let m = p["model"] as? String, !m.isEmpty { state.model = m }
         case ("session_meta", _):
-            if insights.model == nil, let m = p["model"] as? String, !m.isEmpty { insights.model = m }
+            if state.model == nil, let m = p["model"] as? String, !m.isEmpty { state.model = m }
         case ("event_msg", "token_count"):
             guard let info = p["info"] as? [String: Any] else { return }
             if let last = info["last_token_usage"] as? [String: Any] {
                 var used = int(last["total_tokens"])
                 if used == 0 { used = int(last["input_tokens"]) + int(last["output_tokens"]) }
-                if used > 0 { insights.contextUsed = used }
+                if used > 0 { state.contextUsed = used }
             }
             if let w = info["model_context_window"] as? NSNumber, w.intValue > 0 {
-                insights.contextWindow = w.intValue
-                insights.windowIsGuess = false
+                state.contextWindow = w.intValue
+                state.windowIsGuess = false
             }
         case ("response_item", "function_call"), ("response_item", "custom_tool_call"):
             guard (p["name"] as? String) == "update_plan" else { return }
             let raw = (p["arguments"] as? String) ?? (p["input"] as? String) ?? ""
             guard let d = raw.data(using: .utf8), let args = (try? JSONSerialization.jsonObject(with: d)) as? [String: Any],
                   let plan = args["plan"] as? [[String: Any]] else { return }
-            insights.plan = plan.enumerated().map { i, s in
+            state.plan = plan.enumerated().map { i, s in
                 PlanItem(id: "p\(i)", text: (s["step"] as? String) ?? "", state: PlanItem.state(s["status"] as? String))
             }
         default:
