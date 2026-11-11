@@ -3,12 +3,13 @@ import Combine
 import SwiftUI
 
 /// The toggleable right panel: Overview (glance cards for the chat), Changes (the diff, with
-/// line comments for the agent), Files (the project tree), Code (read-only viewer) and Terminal
+/// line comments for the agent), Files (the project tree), Code (any file: an editor for text,
+/// native viewers for the rest) and Terminal
 /// (plain shells in the project folder). The reader isn't here: it replaces the chat's
 /// terminal in the main area (Shift-Cmd-R).
 final class PanelController: NSViewController {
     private let model: AppModel
-    let code: CodeViewerController
+    let code: FileViewerController
     let review: ReviewCenter
     private let shells = TerminalContainer(color: Theme.background)
     private var header: NSView!
@@ -23,7 +24,7 @@ final class PanelController: NSViewController {
     init(model: AppModel, review: ReviewCenter = .shared) {
         self.model = model
         self.review = review
-        code = CodeViewerController(model: model)
+        code = FileViewerController(model: model)
         super.init(nibName: nil, bundle: nil)
         review.configure(model: model)
     }
@@ -174,6 +175,8 @@ struct SubTab: View {
     let title: String
     let selected: Bool
     let help: String
+    /// Unsaved changes: a small dot where the close button goes, until you hover.
+    var dirty = false
     let select: () -> Void
     let close: () -> Void
     @State private var hovering = false
@@ -185,12 +188,21 @@ struct SubTab: View {
                 .foregroundStyle(selected ? Color.hText : Color.hSecondary)
                 .lineLimit(1)
                 .frame(maxWidth: 150, alignment: .leading)
-            Button(action: close) {
-                Image(systemName: "xmark").font(.system(size: 8.5, weight: .semibold)).foregroundStyle(Color.hSecondary)
-                    .frame(width: 14, height: 14)
+            ZStack {
+                if dirty && !hovering {
+                    Circle().fill(Color.hSecondary).frame(width: 6, height: 6)
+                        .accessibilityLabel("Unsaved changes")
+                } else {
+                    Button(action: close) {
+                        Image(systemName: "xmark").font(.system(size: 8.5, weight: .semibold)).foregroundStyle(Color.hSecondary)
+                            .frame(width: 14, height: 14)
+                    }
+                    .buttonStyle(.plain)
+                    .opacity(hovering || selected ? 1 : 0)
+                    .accessibilityLabel("Close \(title)")
+                }
             }
-            .buttonStyle(.plain)
-            .opacity(hovering || selected ? 1 : 0)
+            .frame(width: 14, height: 14)
         }
         .padding(.leading, 9)
         .padding(.trailing, 5)
@@ -244,28 +256,70 @@ struct CodeTabs: View {
 
     var body: some View {
         HStack(spacing: 3) {
-            ScrollView(.horizontal) {
-                HStack(spacing: 3) {
-                    ForEach(model.codeTabs) { t in
-                        SubTab(title: t.name, selected: t.id == model.selectedCodeTabID, help: t.path,
-                               select: { model.selectedCodeTabID = t.id },
-                               close: { model.closeCodeTab(t.id) })
+            ScrollViewReader { proxy in
+                ScrollView(.horizontal) {
+                    HStack(spacing: 3) {
+                        ForEach(model.codeTabs) { t in
+                            SubTab(title: t.name, selected: t.id == model.selectedCodeTabID,
+                                   help: t.dirty ? "\(t.path)\nUnsaved changes" : t.path, dirty: t.dirty,
+                                   select: { model.selectedCodeTabID = t.id },
+                                   close: { model.closeCodeTab(t.id) })
+                                .id(t.id)
+                        }
                     }
                 }
+                .scrollIndicators(.never)
+                // A file opened from a link may land past the edge: bring its tab into view.
+                .onChange(of: model.selectedCodeTabID) { _, id in
+                    if let id { proxy.scrollTo(id) }
+                }
             }
-            .scrollIndicators(.never)
             if let id = model.selectedCodeTabID, let tab = model.codeTabs.first(where: { $0.id == id }) {
-                if tab.isMarkdown {
+                if tab.kind.hasPreview {
                     HStack(spacing: 0) {
                         ModeButton(title: "Source", selected: !tab.preview) { model.setPreview(id, false) }
                         ModeButton(title: "Preview", selected: tab.preview) { model.setPreview(id, true) }
                     }
                 }
-                IconButton(symbol: "arrow.up.forward.square", size: 12, help: "Reveal in Finder") {
-                    NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: tab.path)])
-                }
+                FileMenuButton(tab: tab)
             }
         }
+    }
+}
+
+/// The tab's file: Save, Open With, Reveal in Finder and Copy Path.
+struct FileMenuButton: View {
+    @EnvironmentObject var model: AppModel
+    let tab: CodeTab
+
+    var body: some View {
+        Menu {
+            if tab.kind.isEditable {
+                Button("Save") { model.fileViewer?.saveSelected() }
+                    .keyboardShortcut("s", modifiers: .command)
+                    .disabled(!(model.fileViewer?.canSaveSelected ?? false))
+                Divider()
+            }
+            if let app = FileKinds.defaultApp(for: tab.path) {
+                Button("Open with \(app.name)") { FileViewerActions.openWithDefaultApp(tab.path) }
+            }
+            Button("Reveal in Finder") { FileViewerActions.revealInFinder(tab.path) }
+            Button("Copy Path") {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(tab.path, forType: .string)
+            }
+        } label: {
+            Image(systemName: "ellipsis")
+                .font(.system(size: 12, weight: .regular))
+                .foregroundStyle(Color.hSecondary)
+                .frame(width: 26, height: 24)
+                .contentShape(Rectangle())
+        }
+        .menuStyle(.button)
+        .buttonStyle(.plain)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .help("Open With, Reveal in Finder and more")
     }
 }
 

@@ -97,13 +97,21 @@ final class PanelShell: ObservableObject, Identifiable {
     }
 }
 
+/// A tab in the Code panel: any file, in the viewer that suits it (FileViewer/).
 struct CodeTab: Identifiable, Equatable {
     let id = UUID()
     var path: String
     var line: Int?
+    /// Counts link clicks that asked for a line, so asking for the same line again still
+    /// scrolls there, and coming back to the tab doesn't.
+    var lineRequest = 0
+    /// Markdown, SVG and CSV: the rendered preview rather than the source.
     var preview = false
+    var kind: ViewerKind = .text
+    /// The editor has changes that aren't saved.
+    var dirty = false
     var name: String { (path as NSString).lastPathComponent }
-    var isMarkdown: Bool { ["md", "markdown", "mdx"].contains((path as NSString).pathExtension.lowercased()) }
+    var isMarkdown: Bool { kind == .markdown }
 }
 
 struct SavedChat: Codable {
@@ -188,6 +196,8 @@ final class AppModel: ObservableObject, TerminalEvents {
     @Published var codeTabs: [CodeTab] = []
     @Published var pinnedExpanded = true
     @Published var selectedCodeTabID: UUID?
+    /// The Code tab's controller, for saving and the unsaved-changes prompts.
+    weak var fileViewer: FileViewerController?
     let keepAwake = KeepAwake()
 
     var windowFrame: String?
@@ -709,13 +719,24 @@ final class AppModel: ObservableObject, TerminalEvents {
         for url in panel.urls { openFile(url.path, line: nil) }
     }
 
+    /// Opens any file in the Code tab, as a tab of its own (or the one it already has), and
+    /// shows the panel.
     func openFile(_ path: String, line: Int?) {
+        let path = (path as NSString).standardizingPath
         if let i = codeTabs.firstIndex(where: { $0.path == path }) {
             codeTabs[i].line = line
+            if line != nil {
+                codeTabs[i].lineRequest += 1
+                // A line is in the source, so a rendered Markdown file shows its source.
+                codeTabs[i].preview = false
+            }
             selectedCodeTabID = codeTabs[i].id
         } else {
             var tab = CodeTab(path: path, line: line)
-            tab.preview = tab.isMarkdown
+            tab.kind = FileKinds.kind(of: path)
+            if line != nil { tab.lineRequest = 1 }
+            // Markdown, SVG and CSV open rendered; a link to a line shows the source there.
+            tab.preview = tab.kind.hasPreview && line == nil
             codeTabs.append(tab)
             selectedCodeTabID = tab.id
         }
@@ -723,12 +744,24 @@ final class AppModel: ObservableObject, TerminalEvents {
         panelVisible = true
     }
 
+    /// Closes a tab, asking to save first if it has unsaved changes.
     func closeCodeTab(_ id: UUID) {
+        guard let tab = codeTabs.first(where: { $0.id == id }) else { return }
+        guard let viewer = fileViewer else { return removeCodeTab(id) }
+        viewer.confirmClose(tab) { [weak self] in self?.removeCodeTab(id) }
+    }
+
+    func removeCodeTab(_ id: UUID) {
         guard let i = codeTabs.firstIndex(where: { $0.id == id }) else { return }
         codeTabs.remove(at: i)
         if selectedCodeTabID == id {
             selectedCodeTabID = codeTabs.isEmpty ? nil : codeTabs[min(i, codeTabs.count - 1)].id
         }
+    }
+
+    func setCodeTabDirty(_ id: UUID, _ dirty: Bool) {
+        guard let i = codeTabs.firstIndex(where: { $0.id == id }), codeTabs[i].dirty != dirty else { return }
+        codeTabs[i].dirty = dirty
     }
 
     func setPreview(_ id: UUID, _ preview: Bool) {

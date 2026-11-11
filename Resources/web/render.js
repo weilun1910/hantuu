@@ -132,6 +132,27 @@
     }
   }
 
+  // The pop-out button on a figure: opens its file as a tab in the Code tab. `source` is a
+  // file path, or a data: URL for images the transcript holds only as data. The glyph is
+  // macOS's arrow.up.forward.square, drawn in the reader's line-icon style.
+  const POPOUT_ICON = '<svg viewBox="0 0 16 16" aria-hidden="true"><rect x="2.25" y="2.25" width="11.5" height="11.5" rx="2.6"/><path d="M6.25 9.75l3.5-3.5M6.75 6.25h3v3"/></svg>';
+  function popoutButton(source) {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'popout';
+    b.title = 'Open in a Tab';
+    b.setAttribute('aria-label', 'Open in a tab');
+    b.innerHTML = POPOUT_ICON;
+    b.addEventListener('mousedown', (e) => e.preventDefault());
+    b.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      if (source.startsWith('data:')) post({ type: 'popout', data: source });
+      else post({ type: 'popout', path: source });
+    });
+    return b;
+  }
+
   // Images and PDFs a message points at, shown below it.
   function mediaFor(links, already) {
     const box = document.createElement('div');
@@ -150,6 +171,7 @@
         const cap = document.createElement('figcaption');
         cap.textContent = l.path.split('/').pop();
         fig.appendChild(img);
+        fig.appendChild(popoutButton(l.path));
         fig.appendChild(cap);
         box.appendChild(fig);
       } else if (l.kind === 'pdf') {
@@ -166,6 +188,7 @@
         a.textContent = l.path.split('/').pop();
         cap.appendChild(a);
         fig.appendChild(frame);
+        fig.appendChild(popoutButton(l.path));
         fig.appendChild(cap);
         box.appendChild(fig);
       }
@@ -190,5 +213,5 @@
     if (img && img.dataset.path) post({ type: 'open', path: img.dataset.path });
   });
 
-  window.hantuuRender = { renderMarkdown, linkifyPaths, mediaFor, escapeHTML, fileURL, highlightBlock, post };
+  window.hantuuRender = { renderMarkdown, linkifyPaths, mediaFor, popoutButton, escapeHTML, fileURL, highlightBlock, post };
 })();

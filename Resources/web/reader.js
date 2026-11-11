@@ -55,6 +55,7 @@
       img.src = src.startsWith('/') ? R.fileURL(src) : src;
       img.loading = 'lazy';
       fig.appendChild(img);
+      fig.appendChild(R.popoutButton(src));
       box.appendChild(fig);
     }
     return box;

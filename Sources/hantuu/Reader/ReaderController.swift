@@ -72,6 +72,9 @@ final class ReaderController {
             guard let href = msg["href"] as? String else { return }
             let b = (msg["base"] as? String) ?? base
             FileRouter.shared.open(href.removingPercentEncoding ?? href, base: b)
+        case "popout":
+            // The pop-out button on an image or PDF: open it as a tab in the Code tab.
+            ReaderPopout.open(msg, model: model)
         case "copy":
             // Reader mode's copy buttons on messages and code blocks.
             guard let text = msg["text"] as? String, !text.isEmpty else { return }
@@ -80,83 +83,5 @@ final class ReaderController {
         default:
             break
         }
-    }
-}
-
-struct CodePayload: Encodable {
-    var path: String
-    var name: String
-    var text: String
-    var preview: Bool
-    var line: Int?
-    var base: String
-    var links: [DetectedPath]
-    var truncated: Bool
-    var error: String?
-}
-
-/// Read-only code viewer: one web view, the selected code tab rendered into it.
-final class CodeViewerController {
-    let page = WebPage(page: "code.html", identifier: "hantuu.code")
-    private let model: AppModel
-    private var lastKey = ""
-    private var bag = Set<AnyCancellable>()
-    static let maxBytes = 3_000_000
-
-    init(model: AppModel) {
-        self.model = model
-        page.onReady = { [weak self] in
-            self?.lastKey = ""
-            self?.render()
-        }
-        page.onMessage = { msg in
-            let base = msg["base"] as? String
-            switch msg["type"] as? String {
-            case "open":
-                if let p = msg["path"] as? String { FileRouter.shared.open(p, base: base) }
-            case "link":
-                if let h = msg["href"] as? String { FileRouter.shared.open(h.removingPercentEncoding ?? h, base: base) }
-            default: break
-            }
-        }
-        model.$codeTabs.combineLatest(model.$selectedCodeTabID)
-            .receive(on: DispatchQueue.main)
-            .sink { [weak self] _, _ in self?.render() }
-            .store(in: &bag)
-    }
-
-    var view: NSView { page.webView }
-
-    func render() {
-        guard let id = model.selectedCodeTabID, let tab = model.codeTabs.first(where: { $0.id == id }) else {
-            if lastKey != "none" { page.call("clear") }
-            lastKey = "none"
-            return
-        }
-        let key = "\(tab.path)|\(tab.preview)|\(tab.line ?? 0)"
-        guard key != lastKey else { return }
-        lastKey = key
-        page.call("show", Self.payload(for: tab))
-    }
-
-    static func payload(for tab: CodeTab) -> CodePayload {
-        let base = (tab.path as NSString).deletingLastPathComponent
-        var p = CodePayload(path: tab.path, name: tab.name, text: "", preview: tab.preview && tab.isMarkdown,
-                            line: tab.line, base: base, links: [], truncated: false, error: nil)
-        guard let h = FileHandle(forReadingAtPath: tab.path) else {
-            p.error = "Couldn't open \(tab.name)."
-            return p
-        }
-        defer { try? h.close() }
-        let data = (try? h.read(upToCount: maxBytes + 1)) ?? Data()
-        p.truncated = data.count > maxBytes
-        let slice = data.prefix(maxBytes)
-        if slice.prefix(8192).contains(0) {
-            p.error = "\(tab.name) isn't a text file."
-            return p
-        }
-        p.text = String(data: slice, encoding: .utf8) ?? String(decoding: slice, as: UTF8.self)
-        if p.preview { p.links = PathDetector.detect(in: p.text, base: base) }
-        return p
     }
 }

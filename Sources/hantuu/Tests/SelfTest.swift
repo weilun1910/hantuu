@@ -49,6 +49,7 @@ enum SelfTest {
         review(workdir)
         status(workdir)   // agent states, hooks, notifications, snapshots (Status/StatusSelfTest.swift)
         readerMode(workdir) // settings, the message box, Stop, the banner, snapshots (ReaderMode/ReaderModeSelfTest.swift)
+        fileViewer(workdir) // the Code tab as a file viewer and editor (FileViewer/FileViewerSelfTest.swift)
 
         print("\n\(passes) passed, \(failures) failed")
         return failures == 0 ? 0 : 1
@@ -324,7 +325,7 @@ enum SelfTest {
         check("route: web link to the browser", routes.first == .browser(URL(string: "https://example.com/x")!))
         check("route: code file to the Code tab at its line", routes.count > 1 && routes[1] == .code("\(abs)/src/app.swift", 7))
         check("route: README.md:3 style links", routes.count > 2 && routes[2] == .code("\(abs)/notes.md", 3))
-        check("route: images revealed in Finder", routes.count > 3 && routes[3] == .finder("\(abs)/plot one.png"))
+        check("route: images open in the Code tab", routes.count > 3 && routes[3] == .code("\(abs)/plot one.png", nil))
         check("route: OSC 8 file URL", routes.count > 4 && routes[4] == .code("\(abs)/src/app.swift", nil))
         check("route: unsafe OSC 8 scheme ignored", routes.count == 6 && routes[5] == .finder(abs), "\(routes)")
     }

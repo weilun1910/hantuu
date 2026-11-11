@@ -145,12 +145,15 @@ enum PathDetector {
 }
 
 /// One place that decides what opening a link means, for the terminal and the reader alike:
-/// web URLs go to the browser, text and code files to the Code tab, anything else to Finder.
+/// web URLs go to the browser, and files go to the Code tab, which shows text, code, images,
+/// PDFs, video, audio and anything Quick Look can preview. Folders, and files nothing can
+/// preview, are revealed in Finder.
 final class FileRouter {
     static let shared = FileRouter()
 
     enum Route: Equatable {
         case browser(URL)
+        /// Open in the Code tab, at a line for text.
         case code(String, Int?)
         case finder(String)
         case system(URL)
@@ -168,7 +171,8 @@ final class FileRouter {
         if let u = URL(string: s), scheme == "mailto" { return trusted ? .system(u) : nil }
         // Paths first: "README.md:12" parses as a URL with scheme "readme.md".
         if let r = PathDetector.resolve(s, base: base) {
-            return r.kind == .text ? .code(r.path, r.line) : .finder(r.path)
+            if r.kind == .directory { return .finder(r.path) }
+            return FileKinds.kind(of: r.path).opensInPanel ? .code(r.path, r.line) : .finder(r.path)
         }
         if trusted, let u = URL(string: s), let scheme, scheme != "file", !scheme.contains("."),
            !["javascript", "data", "about", "blob"].contains(scheme) {
