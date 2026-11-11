@@ -285,7 +285,7 @@ final class AppModel: ObservableObject, TerminalEvents {
         restoreSessions()
         keepAwake.refresh()
         // While any agent works, the Mac doesn't idle-sleep (lid open). No switch needed.
-        keepAwake.watchAgents { [weak self] in self?.chats.contains { $0.activity == .working } ?? false }
+        keepAwake.watchAgents { [weak self] in self?.chats.contains { $0.activity == .working || $0.activity == .background } ?? false }
         detectAgents()
 
         // Persist whenever something durable changes.
@@ -570,12 +570,12 @@ final class AppModel: ObservableObject, TerminalEvents {
         select(ordered[index].id)
     }
 
-    /// Whether closing a live chat would cut its agent off mid-task, which is the only time
-    /// Close asks first. An agent sitting at its prompt (idle, done, or a chat that never got a
+    /// Whether closing a live chat would cut its agent off mid-task (or its background agents and
+    /// tasks), which is the only time Close asks first. An agent sitting at its prompt (idle, done, or a chat that never got a
     /// message) closes quietly: nothing is lost, and Resume brings the conversation back.
     static func closingInterrupts(_ chat: Chat) -> Bool {
         switch chat.activity {
-        case .working, .needsPermission, .needsAnswer: return true
+        case .working, .background, .needsPermission, .needsAnswer: return true
         case .doneUnseen, .idle, .ended: return false
         }
     }
