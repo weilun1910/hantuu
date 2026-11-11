@@ -104,7 +104,7 @@ struct CodeTab: Identifiable, Equatable {
     var isMarkdown: Bool { ["md", "markdown", "mdx"].contains((path as NSString).pathExtension.lowercased()) }
 }
 
-private struct SavedChat: Codable {
+struct SavedChat: Codable {
     var id: UUID
     var projectID: UUID
     var agentID: String
@@ -116,7 +116,13 @@ private struct SavedChat: Codable {
     var worktree: WorktreeInfo?
 }
 
-private struct SavedState: Codable {
+/// What state.json holds: the sidebar, the chats and the window.
+///
+/// Reading it never fails as a whole. Every field may be missing, and a project or chat that
+/// can't be read is skipped on its own. So a build that adds a field, or drops one, still loads
+/// the sidebar an earlier build saved, and never saves an empty one over it. New fields must
+/// be optional or have a default here.
+struct SavedState: Codable {
     var projects: [Project] = []
     var chats: [SavedChat] = []
     var defaultAgentID = "claude"
@@ -126,6 +132,33 @@ private struct SavedState: Codable {
     var windowFrame: String?
     var sidebarWidth: Double?
     var panelWidth: Double?
+
+    init() {}
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        func get<T: Decodable>(_ key: CodingKeys) -> T? { (try? c.decodeIfPresent(T.self, forKey: key)) ?? nil }
+        projects = (get(.projects) as [Lenient<Project>]?)?.compactMap(\.value) ?? []
+        chats = (get(.chats) as [Lenient<SavedChat>]?)?.compactMap(\.value) ?? []
+        defaultAgentID = get(.defaultAgentID) ?? defaultAgentID
+        sidebarVisible = get(.sidebarVisible) ?? sidebarVisible
+        panelVisible = get(.panelVisible) ?? panelVisible
+        panelTab = get(.panelTab) ?? panelTab
+        windowFrame = get(.windowFrame)
+        sidebarWidth = get(.sidebarWidth)
+        panelWidth = get(.panelWidth)
+    }
+
+    /// Nil only when the data isn't a JSON object at all.
+    static func read(_ data: Data) -> SavedState? {
+        try? JSONDecoder.hantuu.decode(SavedState.self, from: data)
+    }
+}
+
+/// One element of a saved list: nil when that element can't be read, so the rest still load.
+struct Lenient<T: Decodable>: Decodable {
+    let value: T?
+    init(from decoder: Decoder) throws { value = try? T(from: decoder) }
 }
 
 enum AppActions {
@@ -154,6 +187,11 @@ final class AppModel: ObservableObject, TerminalEvents {
     var windowFrame: String?
     var sidebarWidth: Double?
     var panelWidth: Double?
+    /// Projects whose folder was missing at launch, and their chats. Not shown, but written
+    /// back on every save, so a folder that's away for a while (an unplugged drive, a renamed
+    /// parent) comes back with its chats.
+    private var awayProjects: [Project] = []
+    private var awayChats: [SavedChat] = []
 
     /// Fired when a chat's terminal is created or destroyed.
     let terminalsChanged = PassthroughSubject<Void, Never>()
@@ -184,9 +222,12 @@ final class AppModel: ObservableObject, TerminalEvents {
 
     func load() {
         FileRouter.shared.openInCode = { [weak self] path, line in self?.openFile(path, line: line) }
-        if let data = try? Data(contentsOf: Paths.stateFile),
-           let s = try? JSONDecoder.hantuu.decode(SavedState.self, from: data) {
-            projects = s.projects.filter { FileManager.default.fileExists(atPath: $0.path) }
+        if let data = try? Data(contentsOf: Paths.stateFile), let s = Self.readState(data) {
+            let here = s.projects.filter { FileManager.default.fileExists(atPath: $0.path) }
+            projects = here
+            awayProjects = s.projects.filter { p in !here.contains { $0.id == p.id } }
+            awayChats = s.chats.filter { sc in awayProjects.contains { $0.id == sc.projectID } }
+            if !awayProjects.isEmpty { Log.write("state: kept \(awayProjects.count) project(s) whose folder is missing: \(awayProjects.map(\.path))") }
             defaultAgentID = s.defaultAgentID
             sidebarVisible = s.sidebarVisible
             panelVisible = s.panelVisible
@@ -229,6 +270,25 @@ final class AppModel: ObservableObject, TerminalEvents {
         .store(in: &bag)
     }
 
+    /// Reads state.json for launch. Keeps a copy of a file that reads, as state.previous.json,
+    /// so an update that gets the sidebar wrong can be undone. A file that doesn't read at all
+    /// is moved aside rather than left for the next save to overwrite with an empty sidebar.
+    static func readState(_ data: Data, dir: URL = Paths.dataDir) -> SavedState? {
+        let fm = FileManager.default
+        let file = dir.appendingPathComponent("state.json")
+        if let s = SavedState.read(data) {
+            let backup = dir.appendingPathComponent("state.previous.json")
+            try? fm.removeItem(at: backup)
+            try? fm.copyItem(at: file, to: backup)
+            return s
+        }
+        let stamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "-")
+        let aside = dir.appendingPathComponent("state.unreadable-\(stamp).json")
+        try? fm.moveItem(at: file, to: aside)
+        Log.write("state: state.json couldn't be read, so it was moved to \(aside.lastPathComponent) and hantuu started empty")
+        return nil
+    }
+
     func detectAgents() {
         DispatchQueue.global(qos: .userInitiated).async {
             var found = AgentCatalog.detect()
@@ -267,12 +327,13 @@ final class AppModel: ObservableObject, TerminalEvents {
 
     func save() {
         var s = SavedState()
-        s.projects = projects
+        let away = awayProjects.filter { a in !projects.contains { $0.id == a.id || $0.path == a.path } }
+        s.projects = projects + away
         s.chats = chats.map {
             SavedChat(id: $0.id, projectID: $0.projectID, agentID: $0.agentID, sessionID: $0.sessionID,
                       title: $0.terminalTitle, firstPrompt: $0.firstPrompt, transcriptPath: $0.transcriptPath,
                       createdAt: $0.createdAt, worktree: $0.worktree)
-        }
+        } + awayChats.filter { sc in away.contains { $0.id == sc.projectID } }
         s.defaultAgentID = defaultAgentID
         s.sidebarVisible = sidebarVisible
         s.panelVisible = panelVisible

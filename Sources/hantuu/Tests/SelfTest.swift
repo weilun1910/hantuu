@@ -37,6 +37,7 @@ enum SelfTest {
 
         claudeParsing()
         codexParsing()
+        savedState(workdir)
         discovery(workdir)
         follower(workdir)
         paths(workdir)
@@ -51,6 +52,59 @@ enum SelfTest {
 
         print("\n\(passes) passed, \(failures) failed")
         return failures == 0 ? 0 : 1
+    }
+
+    // MARK: Saved state (the sidebar survives updates)
+
+    static func savedState(_ dir: URL) {
+        // The shape builds before 2026-11-11 wrote.
+        let p1 = UUID(), p2 = UUID(), c1 = UUID(), c2 = UUID()
+        let old = """
+        {"projects":[{"id":"\(p1)","path":"/tmp/a","expanded":true},{"id":"\(p2)","path":"/tmp/b","expanded":false}],
+         "chats":[{"id":"\(c1)","projectID":"\(p1)","agentID":"claude","sessionID":"s1","title":"One","createdAt":"2026-11-08T10:00:00Z"},
+                  {"id":"\(c2)","projectID":"\(p2)","agentID":"codex","title":"Two","createdAt":"2026-11-09T10:00:00Z","transcriptPath":"/tmp/t.jsonl"}],
+         "defaultAgentID":"codex","sidebarVisible":true,"panelVisible":true,"panelTab":"Changes","sidebarWidth":260}
+        """
+        let s = SavedState.read(Data(old.utf8))
+        check("state: an older state.json loads every project and chat",
+              s?.projects.map(\.id) == [p1, p2] && s?.chats.map(\.id) == [c1, c2] && s?.defaultAgentID == "codex" && s?.panelTab == .changes && s?.projects[1].expanded == false,
+              "\(String(describing: s))")
+
+        // A later build's extra field, a missing field, a broken chat and an unknown tab.
+        let mixed = """
+        {"projects":[{"id":"\(p1)","path":"/tmp/a","expanded":true}],
+         "chats":[{"id":"\(c1)","projectID":"\(p1)","agentID":"claude","title":"One","createdAt":"2026-11-08T10:00:00Z","futureField":[1,2]},
+                  {"id":"not-a-uuid","projectID":"\(p1)"}],
+         "panelTab":"Reader","somethingNew":{"x":1}}
+        """
+        let m = SavedState.read(Data(mixed.utf8))
+        check("state: a bad chat is skipped, the rest still load", m?.chats.map(\.id) == [c1] && m?.projects.count == 1, "\(String(describing: m?.chats.map(\.id)))")
+        check("state: missing and unknown fields fall back to defaults", m?.defaultAgentID == "claude" && m?.panelTab == .overview && m?.sidebarVisible == true)
+
+        // A file that isn't readable at all is moved aside, never left to be saved over.
+        let sdir = dir.appendingPathComponent("state-test")
+        Paths.ensure(sdir)
+        let file = sdir.appendingPathComponent("state.json")
+        try? Data("{not json".utf8).write(to: file)
+        let none = AppModel.readState(Data("{not json".utf8), dir: sdir)
+        let names = (try? FileManager.default.contentsOfDirectory(atPath: sdir.path)) ?? []
+        check("state: an unreadable state.json is moved aside, not overwritten", none == nil && !names.contains("state.json") && names.contains { $0.hasPrefix("state.unreadable-") }, "\(names)")
+        try? Data(old.utf8).write(to: file)
+        _ = AppModel.readState(Data(old.utf8), dir: sdir)
+        check("state: a readable state.json is copied to state.previous.json at launch",
+              (try? Data(contentsOf: sdir.appendingPathComponent("state.previous.json"))) == Data(old.utf8))
+
+        // Felix's own saved sidebar, read only: this build must load all of it.
+        let mine = Paths.home.appendingPathComponent("Library/Application Support/hantuu/state.json")
+        if let data = try? Data(contentsOf: mine),
+           let raw = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] {
+            let loaded = SavedState.read(data)
+            let rawProjects = (raw["projects"] as? [Any])?.count ?? -1
+            let rawChats = (raw["chats"] as? [Any])?.count ?? -1
+            check("state: your installed hantuu's state.json loads in this build with every project and chat",
+                  loaded?.projects.count == rawProjects && loaded?.chats.count == rawChats,
+                  "raw \(rawProjects)/\(rawChats), loaded \(loaded?.projects.count ?? -1)/\(loaded?.chats.count ?? -1)")
+        }
     }
 
     // MARK: Claude Code
