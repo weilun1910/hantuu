@@ -83,7 +83,7 @@ Press Shift-Cmd-R, or click the book icon above the chat, and the chat you're lo
 
 The reader follows the conversation as it happens. Your messages sit on the right and the agent's answers read like a normal document. A run of tool calls folds into one line, like "Ran a command, read a file and 1 more", and you can open it to see each step. The agent's thinking is hidden, but permission requests, errors and questions to you always stay visible.
 
-Images and PDFs that come up in the chat appear inline instead of as paths. LaTeX is rendered with KaTeX, and code blocks are highlighted with a Copy button. That's what makes it usable for studying.
+Images and PDFs that come up in the chat appear inline instead of as paths, as small previews side by side. Click one to open it out to full width, and click again or press Esc to shrink it. The button in its corner opens it as a tab in the Code tab. LaTeX is rendered with KaTeX, and code blocks are highlighted with a Copy button. That's what makes it usable for studying.
 
 - Return sends and Shift-Return adds a line.
 - Paste a screenshot with Cmd-V, drop files on the box or pick them with the paperclip. They show as small chips above your message, and pictures reach the agent as real image attachments.
@@ -92,9 +92,16 @@ Images and PDFs that come up in the chat appear inline instead of as paths. LaTe
 
 ![The same chat as the reader, with the image shown inline, the formulas rendered and a message box at the bottom](docs/screenshots/reader-mode.jpg)
 
-### File links that open somewhere useful
+### Open any file next to the chat
 
-Every file path in the chat becomes a link. Text and code files open in the Code tab with syntax highlighting and line numbers, and Markdown files also get a rendered preview. Anything else, like a PDF, is shown in Finder so you can open it with the app you normally use. Cmd-click works on links in the terminal too.
+Every file path in the chat becomes a link, and clicking one opens the file as a tab in the Code tab. Cmd-click works on links in the terminal too.
+
+- Code and text files open in an editor with syntax highlighting, line numbers, undo and find (Cmd-F). Cmd-S saves, and a small dot on the tab means there are unsaved changes.
+- Markdown, SVG and CSV files open rendered, with a switch to edit the source.
+- PDFs, images, video and audio open in native viewers that fit the panel. Anything else Quick Look can show, like Office and Keynote files or 3D models, opens in Quick Look.
+- When an agent changes a file you have open, the tab reloads in place. If you have unsaved edits, a bar asks whether to reload or keep yours.
+
+Folders, and files nothing can preview, are shown in Finder.
 
 ![A Markdown file open in the Code tab, shown as a rendered preview with formulas](docs/screenshots/markdown-preview.jpg)
 
@@ -158,6 +165,7 @@ scripts/run.sh --data-dir "$PWD/tmp/appdata"
 | Option-Cmd-1 to 5 | Overview, Changes, Files, Code or Terminal tab |
 | Cmd-T | New shell tab |
 | Cmd-O | Open a file in the Code tab |
+| Cmd-S | Save the file in the Code tab |
 | Cmd-0 | Show or hide the sidebar |
 
 ## How it works
@@ -168,7 +176,8 @@ scripts/run.sh --data-dir "$PWD/tmp/appdata"
 - Agent status comes from hooks passed to each chat on the command line (`claude --settings` for Claude Code, a `notify` override for Codex), with the transcripts filling in the rest. No permission-skipping flag is ever added.
 - The reader reads the transcript files the agents already write, in `~/.claude/projects/` for Claude Code and `~/.codex/sessions/` for Codex. It only ever reads them.
 - The review tabs read git through a private copy of the index, because a plain `git diff` rewrites the real one and can get in the way of the agent's own commits.
-- The reader and code viewer are local web pages bundled with markdown-it, KaTeX and highlight.js, so nothing loads from the internet.
+- The reader and the Code tab's editor are local web pages bundled with markdown-it, KaTeX, highlight.js and CodeMirror 6, so nothing loads from the internet. PDFs, images, video and Quick Look previews use the Mac's own PDFKit, AppKit, AVKit and Quick Look views.
+- Saving a file writes a new copy next to it and renames it into place, so a crash never leaves half a file. Through a symlink, it writes the file the link pointed at when you opened it, and refuses if the link has moved since.
 - In reader mode, your message is typed into the agent's terminal as one paste followed by Return, the same as typing it yourself. Nothing is sent while a menu is waiting there, because Return would answer it.
 - Light and dark use Ghostty's own `theme = light:…,dark:…` switching. hantuu ships a light and a dark terminal theme, and tells every terminal which one to show when you change the setting or macOS switches. If you use your own Ghostty config and it has a pair like that, it follows along too.
 - `scripts/selftest.sh` runs 401 checks. They cover transcript parsing, link handling, a live Ghostty terminal and the reader page. They also cover agent status, sessions that survive their client, worktrees, the review tabs and reader mode.

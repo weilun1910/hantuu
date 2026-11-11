@@ -45,17 +45,14 @@
     return d;
   }
 
+  // Images attached to a message: pasted ones arrive as data: URLs, others as paths.
   function images(srcs) {
     if (!srcs || !srcs.length) return null;
     const box = document.createElement('div');
     box.className = 'media';
     for (const src of srcs) {
-      const fig = document.createElement('figure');
-      const img = document.createElement('img');
-      img.src = src.startsWith('/') ? R.fileURL(src) : src;
-      img.loading = 'lazy';
-      fig.appendChild(img);
-      box.appendChild(fig);
+      const path = src.startsWith('/') ? src : null;
+      box.appendChild(R.mediaFigure('image', path ? R.fileURL(path) : src, path, true));
     }
     return box;
   }
@@ -150,11 +147,14 @@
   }
 
   window.hantuu = {
+    // Esc while the message box has the keyboard: shrink an opened-out preview first.
+    collapseMedia() { return R.collapseMedia(); },
     // Show a chat from scratch. Restores where you were last time you read it.
     reset(payload) {
       chatID = payload.chatID || null;
       seen.clear();
       list.textContent = '';
+      R.post({ type: 'mediaExpanded', count: 0 });
       empty.textContent = payload.emptyText || '';
       if (main) main.reset(payload.base);
       add(payload.entries || [], false);

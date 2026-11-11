@@ -7,3 +7,6 @@ tmp/
 .DS_Store
 .swiftpm/
 .claude/
+
+# CodeMirror build inputs (scripts/codemirror/build.sh)
+scripts/codemirror/node_modules/

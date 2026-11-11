@@ -67,6 +67,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        // Files with unsaved changes in the Code tab: Save, Don't Save or Cancel.
+        if let viewer = model.fileViewer, !viewer.confirmQuit() { return .terminateCancel }
         // Agents run in hantuu-session, so by default quitting leaves them running and they
         // reattach next launch. Asking first only matters when quitting is set to stop them.
         let keepRunning = SessionSettings.shared.keepAgentsRunning
@@ -124,6 +126,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         file.addItem(item("New Terminal Tab", #selector(newTerminal), "t"))
         file.addItem(.separator())
         file.addItem(item("Open File…", #selector(openFile), "o"))
+        file.addItem(FileViewerMenuTarget.saveItem())
         file.addItem(item("New Project…", #selector(addProject), "o", [.command, .shift]))
         file.addItem(.separator())
         file.addItem(item("Close", #selector(closeFocused), "w"))
