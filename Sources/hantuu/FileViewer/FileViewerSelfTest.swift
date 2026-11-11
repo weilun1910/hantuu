@@ -374,9 +374,13 @@ extension SelfTest {
         for w in all(view, WKWebView.self) where !w.isHiddenOrHasHiddenAncestor && w.bounds.width > 0 {
             var image: NSImage?
             var done = false
-            w.takeSnapshot(with: nil) { img, _ in image = img; done = true }
-            _ = waitUntil(5) { done }
-            if let image { shots.append((w.convert(w.bounds, to: view), image)) }
+            var failure: Error?
+            w.takeSnapshot(with: nil) { img, error in image = img; failure = error; done = true }
+            guard waitUntil(5, { done }), let image else {
+                print("      snapshot failed for \(w.identifier?.rawValue ?? "web view"): \(failure?.localizedDescription ?? "no image before timeout")")
+                return false
+            }
+            shots.append((w.convert(w.bounds, to: view), image))
         }
         for m in all(view, MediaViewer.self) where !m.isHiddenOrHasHiddenAncestor && !m.audioOnly {
             let gen = AVAssetImageGenerator(asset: AVURLAsset(url: m.url))
@@ -432,7 +436,7 @@ extension SelfTest {
         let model = AppModel()
         let reader = ReaderController(model: model, page: "reader.html?layout=main", identifier: "selftest.popout")
         let page = reader.page
-        let w = NSWindow(contentRect: NSRect(x: -4000, y: -4000, width: 640, height: 900), styleMask: [.borderless], backing: .buffered, defer: false)
+        let w = ReaderMediaTestWindow(contentRect: NSRect(x: -4000, y: -4000, width: 640, height: 900), styleMask: [.borderless], backing: .buffered, defer: false)
         w.isReleasedWhenClosed = false
         w.appearance = NSAppearance(named: .darkAqua)
         let host = FillView(color: Theme.background)
@@ -475,53 +479,154 @@ extension SelfTest {
         check("media: every preview has a pop-out button, hidden until hover",
               (js(page, "Array.from(document.querySelectorAll('figure.mfig')).every(f => f.querySelector(':scope > button.popout[aria-label]'))") as? Bool) == true
               && js(page, "getComputedStyle(document.querySelector('button.popout')).opacity") as? String == "0")
+        check("media: shrink controls are hidden on compact previews",
+              (js(page, "Array.from(document.querySelectorAll('figure.mfig')).every(f => getComputedStyle(f.querySelector('button.shrink[aria-label]')).display === 'none')") as? Bool) == true)
+        check("media: a PDF thumbnail fits a narrow box without distorting its page",
+              (js(page, """
+              (() => {
+                const f = document.querySelector('figure.pdf');
+                f.style.maxWidth = '80px';
+                const i = f.querySelector('img');
+                const r = i.getBoundingClientRect();
+                const fits = r.width <= 80 && Math.abs((r.width - 2) / (r.height - 2) - i.naturalWidth / i.naturalHeight) < 0.02;
+                f.style.removeProperty('max-width');
+                return fits;
+              })()
+              """) as? Bool) == true)
 
         // Snapshot, small, with the pop-out button showing on one as hover would.
         func shoot(_ name: String) {
             for dark in [true, false] {
                 w.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
                 RunLoop.main.run(until: Date().addingTimeInterval(0.6))
-                _ = renderFileViewer(host, to: shots.appendingPathComponent("\(name)-\(dark ? "dark" : "light").png"))
+                let url = shots.appendingPathComponent("\(name)-\(dark ? "dark" : "light").png")
+                let rendered = renderFileViewer(host, to: url)
+                let bitmap = (try? Data(contentsOf: url)).flatMap { NSBitmapImageRep(data: $0) }
+                var low: CGFloat = 1, high: CGFloat = 0
+                if let bitmap {
+                    for y in stride(from: 0, to: bitmap.pixelsHigh, by: 16) {
+                        for x in stride(from: 0, to: bitmap.pixelsWide, by: 16) {
+                            if let c = bitmap.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB) {
+                                let brightness = (c.redComponent + c.greenComponent + c.blueComponent) / 3
+                                low = min(low, brightness)
+                                high = max(high, brightness)
+                            }
+                        }
+                    }
+                }
+                check("media: \(name) snapshot has visible content in \(dark ? "dark" : "light")", rendered && high - low > 0.15)
+
             }
             w.appearance = NSAppearance(named: .darkAqua)
         }
         _ = js(page, "(() => { const b = document.querySelectorAll('.entry.assistant button.popout')[1]; b.style.transition = 'none'; b.style.opacity = 1; window.scrollTo(0, 0); return 1; })()")
         shoot("reader-media-small")
 
-        // Click opens out to full width, in place; click again shrinks it.
+        // Opening changes layout immediately, while page one keeps its existing pixels.
         posted.removeAll()
-        let topBefore = js(page, "Math.round(document.querySelectorAll('.entry.assistant figure.mfig')[1].getBoundingClientRect().top)") as? Int ?? -1
-        _ = js(page, "document.querySelectorAll('.entry.assistant figure.mfig')[1].querySelector('.mbody').click(); 1")
-        let opened = js(page, "(() => { const f = document.querySelectorAll('.entry.assistant figure.mfig')[1]; const r = f.getBoundingClientRect(); const m = f.closest('.media').getBoundingClientRect(); return f.classList.contains('expanded') && Math.abs(r.width - m.width) < 2 && !!f.querySelector('iframe') && r.height > 500; })()") as? Bool
-        let topAfter = js(page, "Math.round(document.querySelectorAll('.entry.assistant figure.mfig')[1].getBoundingClientRect().top)") as? Int ?? -2
-        check("media: clicking a PDF opens it out to full width as the live PDF", opened == true)
+        let topBefore = js(page, "Math.round(document.querySelector('figure.pdf').getBoundingClientRect().top)") as? Int ?? -1
+        let instant = js(page, """
+        (() => {
+          const f = document.querySelector('figure.pdf');
+          const i = f.querySelector('img');
+          window.mediaTestImage = i;
+          const src = i.src;
+          const start = performance.now();
+          f.querySelector('.mbody').click();
+          return f.classList.contains('expanded') && performance.now() - start < 100
+            && !f.querySelector('iframe') && !f.querySelector('.mbody').getAnimations().length
+            && i.src === src && i.complete && i.naturalWidth > 0
+            && Math.abs(i.getBoundingClientRect().width - f.getBoundingClientRect().width) < 1;
+        })()
+        """) as? Bool
+        check("media: expansion fits page one within 100 ms without replacing or hiding its image", instant == true)
+        let topAfter = js(page, "Math.round(document.querySelector('figure.pdf').getBoundingClientRect().top)") as? Int ?? -2
         check("media: opening out keeps it where it was on screen", abs(topBefore - topAfter) <= 1, "\(topBefore) -> \(topAfter)")
         check("media: clicking doesn't open the file anymore", sent("open").isEmpty && sent("popout").isEmpty)
         check("media: Swift hears what's opened out", waitUntil(2) { reader.mediaKeys.expanded == 1 })
-        _ = js(page, "document.querySelectorAll('.entry.assistant figure.mfig')[1].scrollIntoView({block: 'start'}); window.scrollBy(0, -24); 1")
-        RunLoop.main.run(until: Date().addingTimeInterval(1.0))
+        check("media: expanded PDFs show a shrink control above the pages",
+              (js(page, "(() => { const b = document.querySelector('figure.pdf button.shrink'); const r = b.getBoundingClientRect(); return getComputedStyle(b).display === 'flex' && getComputedStyle(b).opacity === '1' && b.contains(document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2)); })()") as? Bool) == true)
+        check("media: PDF metadata creates both page placeholders at their measured aspect ratio",
+              waitUntil(4) { (js(page, "(() => { const f = document.querySelector('figure.pdf'); const pages = Array.from(f.querySelectorAll('.pdf-page')); return f.dataset.pageCount === '2' && pages.length === 2 && pages.every(p => Math.abs(p.getBoundingClientRect().width / p.getBoundingClientRect().height - 612 / 792) < 0.02); })()") as? Bool) == true })
+        check("media: the sharp first page loads from PDFKit at device pixel resolution",
+              waitUntil(6) { (js(page, "(() => { const f = document.querySelector('figure.pdf'); const i = f.querySelector('img'); const ready = i.complete && +i.dataset.renderWidth >= Math.min(3200, f.clientWidth * devicePixelRatio) && new URL(i.src).searchParams.get('page') === '1'; if (ready) window.mediaTestImage = i; return ready; })()") as? Bool) == true })
+        _ = js(page, "document.querySelector('figure.pdf').scrollIntoView({block: 'start'}); window.scrollBy(0, -24); 1")
         shoot("reader-media-expanded")
-        _ = js(page, "document.querySelectorAll('.entry.assistant figure.mfig')[1].querySelector('.mbody').click(); 1")
-        let shrunk = js(page, "(() => { const f = document.querySelectorAll('.entry.assistant figure.mfig')[1]; return !f.classList.contains('expanded') && !f.querySelector('iframe') && f.getBoundingClientRect().height < 220; })()") as? Bool
-        check("media: clicking again shrinks it", shrunk == true && waitUntil(2) { reader.mediaKeys.expanded == 0 })
+        let shrunk = js(page, """
+        (() => {
+          const f = document.querySelector('figure.pdf');
+          window.mediaTestURL = f.querySelector('img').src;
+          window.mediaTestWidth = f.querySelector('img').getBoundingClientRect().width;
+          const start = performance.now();
+          f.querySelector('button.shrink').click();
+          return !f.classList.contains('expanded') && f.querySelector('img') === window.mediaTestImage
+            && f.querySelector('img').src === window.mediaTestURL && f.getBoundingClientRect().height < 220
+            && getComputedStyle(f.querySelectorAll('.pdf-page')[1]).display === 'none' && performance.now() - start < 100;
+        })()
+        """) as? Bool
+        check("media: shrinking is immediate and retains page one while hiding later pages", shrunk == true && waitUntil(2) { reader.mediaKeys.expanded == 0 })
+        _ = js(page, "document.querySelector('figure.pdf .media-caption').click(); 1")
+        check("media: expanding again reuses the same decoded page image at full width",
+              (js(page, "(() => { const f = document.querySelector('figure.pdf'); const i = f.querySelector('img'); return i === window.mediaTestImage && i.src === window.mediaTestURL && i.complete && Math.abs(i.getBoundingClientRect().width - window.mediaTestWidth) < 1; })()") as? Bool) == true)
+        page.webView.frame.size.width = 480
+        check("media: every page fits a narrower reader without another raster request",
+              waitUntil(2) { (js(page, "(() => { const f = document.querySelector('figure.pdf'); return f.querySelector('img').src === window.mediaTestURL && f.clientWidth < window.mediaTestWidth - 100 && Array.from(f.querySelectorAll('img')).every(i => Math.abs(i.getBoundingClientRect().width - f.clientWidth) < 1); })()") as? Bool) == true })
+        _ = js(page, "document.querySelector('figure.pdf button.shrink').click(); 1")
+        page.webView.frame = host.bounds
+        _ = js(page, "document.querySelector('figure.pdf .media-caption').click(); 1")
+        check("media: expanding after a collapsed resize fits the new reader width",
+              (js(page, "Math.abs(document.querySelector('figure.pdf img').getBoundingClientRect().width - window.mediaTestWidth) < 1") as? Bool) == true)
+        _ = js(page, "document.querySelector('figure.pdf img').click(); 1")
+        check("media: clicking a rendered PDF page shrinks it", (js(page, "!document.querySelector('figure.pdf').classList.contains('expanded')") as? Bool) == true)
+        _ = js(page, "document.querySelector('figure.image .mbody').click(); 1")
+        check("media: images also show a working shrink control",
+              (js(page, "(() => { const f = document.querySelector('figure.image'); const b = f.querySelector('button.shrink'); const shown = getComputedStyle(b).display === 'flex'; b.click(); return shown && !f.classList.contains('expanded'); })()") as? Bool) == true)
 
         // Esc: on the page, and from the message box through Swift.
-        _ = js(page, "document.querySelector('.entry.assistant figure.mfig').querySelector('.mbody').click(); 1")
+        _ = js(page, "document.querySelector('figure.pdf .mbody').click(); 1")
         _ = js(page, "document.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape', bubbles: true})); 1")
         check("media: Esc on the page shrinks it", (js(page, "document.querySelectorAll('figure.mfig.expanded').length") as? Int) == 0)
         _ = js(page, "document.querySelector('.entry.assistant figure.mfig').querySelector('.mbody').click(); 1")
         _ = waitUntil(2) { reader.mediaKeys.expanded == 1 }
-        let esc = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0, windowNumber: w.windowNumber, context: nil,
-                                   characters: "\u{1b}", charactersIgnoringModifiers: "\u{1b}", isARepeat: false, keyCode: 53)!
+        func escapeEvent() -> NSEvent {
+            NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+                            windowNumber: w.windowNumber, context: nil, characters: "\u{1b}", charactersIgnoringModifiers: "\u{1b}", isARepeat: false, keyCode: 53)!
+        }
+        let esc = escapeEvent()
         let swallowed = reader.mediaKeys.handle(esc) == nil
         check("media: Esc in the message box shrinks it first, and only then reaches the box", swallowed
               && waitUntil(2) { (js(page, "document.querySelectorAll('figure.mfig.expanded').length") as? Int) == 0 }
               && waitUntil(2) { reader.mediaKeys.expanded == 0 } && reader.mediaKeys.handle(esc) != nil)
 
-        // The caption still opens the file; the pop-out opens a kept tab.
+        // Exercise the installed event monitor, not only handle(). Returning `handle(e)
+        // through `?? e` used to collapse the preview and still forward Esc to the composer.
+        let composer = ComposerTextView.make()
+        composer.frame = NSRect(x: 0, y: 0, width: 200, height: 30)
+        var stops = 0
+        composer.onEscape = { stops += 1; return true }
+        host.addSubview(composer)
+        w.makeKeyAndOrderFront(nil)
+        check("media: the real composer is the test window's first responder", w.makeFirstResponder(composer))
+        _ = js(page, "document.querySelector('figure.pdf .mbody').click(); 1")
+        _ = waitUntil(2) { reader.mediaKeys.expanded == 1 }
+        NSApp.sendEvent(escapeEvent())
+        check("media: the installed Esc monitor consumes the event before it stops the agent",
+              waitUntil(2) { reader.mediaKeys.expanded == 0 } && stops == 0)
+        NSApp.sendEvent(escapeEvent())
+        check("media: a second Esc reaches the composer after previews collapse", stops == 1)
+        composer.cancelOperation(nil)
+        check("media: AppKit's cancelOperation route also stops the agent", stops == 2)
+        w.makeFirstResponder(page.webView)
+        composer.removeFromSuperview()
+
+        // The caption toggles the preview; the pop-out opens a kept tab.
         posted.removeAll()
-        _ = js(page, "document.querySelectorAll('.entry.assistant figcaption a.path')[1].click(); 1")
-        check("media: the caption opens the file like a link", waitUntil(2) { sent("open").first?["path"] as? String == fx.pdf.path })
+        _ = js(page, "document.querySelector('figure.pdf .media-caption').click(); 1")
+        check("media: the caption enlarges the preview without opening a file",
+              (js(page, "document.querySelector('figure.pdf').classList.contains('expanded')") as? Bool) == true && sent("open").isEmpty)
+        _ = js(page, "document.querySelector('figure.pdf .media-caption').click(); 1")
+        check("media: the caption shrinks an expanded PDF",
+              (js(page, "!document.querySelector('figure.pdf').classList.contains('expanded')") as? Bool) == true)
         model.codeTabs = []
         posted.removeAll()
         _ = js(page, "document.querySelector('.entry.assistant figure.image button.popout').click(); 1")
@@ -544,5 +649,61 @@ extension SelfTest {
         check("popout: data URL decoding", ReaderPopout.write(dataURL: "data:text/plain,hello%20there", into: dir.appendingPathComponent("popout-test")).map { (try? String(contentsOfFile: $0, encoding: .utf8)) == "hello there" } == true)
         check("media: a PDF thumbnail is a crisp PNG of page one", PDFThumbnails.png(path: fx.slides.path, height: 400).flatMap { NSBitmapImageRep(data: $0) }.map { $0.pixelsHigh == 400 && $0.pixelsWide == 518 } == true)
         check("media: no thumbnail for something that isn't a PDF", PDFThumbnails.png(path: fx.png.path, height: 400) == nil)
+        let pageOne = PDFThumbnails.png(path: fx.pdf.path, page: 1, width: 1200)
+        let pageTwo = PDFThumbnails.png(path: fx.pdf.path, page: 2, width: 1200)
+        check("media: page numbers select different PDF pages at the requested pixel width",
+              pageOne != nil && pageTwo != nil && pageOne != pageTwo
+              && pageTwo.flatMap { NSBitmapImageRep(data: $0) }?.pixelsWide == 1200)
+        check("media: repeated PDF page requests return the cached image",
+              PDFThumbnails.png(path: fx.pdf.path, page: 2, width: 1200) == pageTwo)
+        check("media: invalid PDF page numbers return no image",
+              PDFThumbnails.png(path: fx.pdf.path, page: 0, width: 1200) == nil
+              && PDFThumbnails.png(path: fx.pdf.path, page: 3, width: 1200) == nil)
+        let rotated = fx.root.appendingPathComponent("rotated-cropped.pdf")
+        if let doc = PDFDocument(url: fx.pdf), let first = doc.page(at: 0) {
+            first.setBounds(CGRect(x: 20, y: 40, width: 500, height: 700), for: .cropBox)
+            first.rotation = 90
+            _ = doc.write(to: rotated)
+        }
+        check("media: rotated crop boxes produce correctly sized page images",
+              PDFThumbnails.png(path: rotated.path, page: 1, width: 700).flatMap { NSBitmapImageRep(data: $0) }
+                .map { $0.pixelsWide == 700 && $0.pixelsHigh == 500 } == true)
+
+        // A long PDF reserves every page's shape without requesting every page's pixels.
+        let longPDF = fx.root.appendingPathComponent("many-pages.pdf")
+        var box = CGRect(x: 0, y: 0, width: 612, height: 792)
+        if let ctx = CGContext(longPDF as CFURL, mediaBox: &box, nil) {
+            for index in 0..<200 {
+                ctx.beginPDFPage(nil)
+                ctx.setFillColor(CGColor(gray: 0.15, alpha: 1))
+                ctx.fill(CGRect(x: 40, y: 700, width: CGFloat(100 + index), height: 30))
+                ctx.endPDFPage()
+            }
+            ctx.closePDF()
+        }
+        var longEntry = ReaderEntry(id: "long-pdf", kind: .assistant, text: longPDF.path)
+        longEntry.links = PathDetector.detect(in: longPDF.path, base: fx.root.path)
+        let longEntries = (try? JSONSerialization.jsonObject(with: JSONEncoder().encode([longEntry]))) ?? []
+        page.call("reset", ["chatID": "long-media", "entries": longEntries, "emptyText": ""] as [String: Any])
+        _ = waitUntil(5) { (js(page, "document.querySelector('figure.pdf img')?.naturalWidth > 0") as? Bool) == true }
+        _ = js(page, "document.querySelector('figure.pdf .mbody').click(); window.scrollTo(0, 0); 1")
+        check("media: a 200-page PDF creates placeholders without an iframe",
+              waitUntil(5) { (js(page, "document.querySelectorAll('.pdf-page').length === 200 && !document.querySelector('iframe')") as? Bool) == true })
+        check("media: distant pages stay lazy and have no requested image source",
+              (js(page, "Array.from(document.querySelectorAll('.pdf-page')).slice(10).every(p => p.querySelector('img').loading === 'lazy' && !p.querySelector('img').hasAttribute('src') && p.getBoundingClientRect().height > 500)") as? Bool) == true)
+        _ = js(page, "document.querySelector('.pdf-page:last-child').scrollIntoView({block: 'center'}); 1")
+        check("media: scrolling to page 200 loads that page without loading skipped pages",
+              waitUntil(6) { (js(page, "document.querySelector('.pdf-page:last-child').classList.contains('loaded') && !document.querySelectorAll('.pdf-page')[99].querySelector('img').hasAttribute('src')") as? Bool) == true })
+        _ = js(page, "document.querySelector('.pdf-page:last-child img').click(); 1")
+        check("media: clicking a later page also shrinks the PDF",
+              (js(page, "!document.querySelector('figure.pdf').classList.contains('expanded') && document.querySelector('figure.pdf').getBoundingClientRect().height < 220") as? Bool) == true)
+        _ = js(page, "window.mediaOldID = document.querySelector('figure.pdf').dataset.mediaID; window.mediaOldPath = document.querySelector('figure.pdf').dataset.path; 1")
+        page.call("reset", ["chatID": "empty-media", "entries": [], "emptyText": ""] as [String: Any])
+        check("media: a stale metadata reply cannot recreate pages after switching chats",
+              (js(page, "hantuu.pdfInfo({id: window.mediaOldID, path: window.mediaOldPath, pages: [{width: 612, height: 792}]}); document.querySelectorAll('.pdf-page').length === 0") as? Bool) == true)
     }
+}
+
+private final class ReaderMediaTestWindow: NSWindow {
+    override var canBecomeKey: Bool { true }
 }
