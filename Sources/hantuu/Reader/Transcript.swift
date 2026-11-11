@@ -39,6 +39,7 @@ protocol TranscriptParser {
 /// bookkeeping lines (summary, custom-title, file-history-snapshot, ...) that are hidden.
 struct ClaudeTranscriptParser: TranscriptParser {
     private var lineNo = 0
+    private var compactBoundarySeen = false
     private var toolNames: [String: String] = [:]   // tool_use id -> name
 
     private static let noisePrefixes = [
@@ -56,10 +57,11 @@ struct ClaudeTranscriptParser: TranscriptParser {
 
         switch type {
         case "user":
-            if obj["isMeta"] as? Bool == true { return [] }
             if obj["isCompactSummary"] as? Bool == true {
+                if compactBoundarySeen { compactBoundarySeen = false; return [] }
                 return [ReaderEntry(id: uuid, kind: .notice, text: "Conversation compacted", time: time)]
             }
+            if obj["isMeta"] as? Bool == true { return [] }
             guard let msg = obj["message"] as? [String: Any] else { return [] }
             return parseUser(msg["content"], id: uuid, time: time)
 
@@ -74,6 +76,10 @@ struct ClaudeTranscriptParser: TranscriptParser {
         case "system":
             let level = obj["level"] as? String
             let subtype = obj["subtype"] as? String
+            if subtype == "compact_boundary" {
+                compactBoundarySeen = true
+                return [ReaderEntry(id: uuid, kind: .notice, text: "Conversation compacted", time: time)]
+            }
             if subtype == "api_error" || level == "error" {
                 let content = (obj["content"] as? String) ?? Self.apiErrorText(obj) ?? "API error"
                 return [ReaderEntry(id: uuid, kind: .error, text: content, time: time)]
@@ -121,10 +127,15 @@ struct ClaudeTranscriptParser: TranscriptParser {
 
     private func userText(_ raw: String, images: [String], id: String, time: String?) -> [ReaderEntry] {
         let s = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        if s.hasPrefix("<command-name>") {
+        if s.hasPrefix("<command-name>") || s.hasPrefix("<command-message>") {
             let name = Self.between(s, "<command-name>", "</command-name>") ?? "command"
             let args = Self.between(s, "<command-args>", "</command-args>") ?? ""
             return [ReaderEntry(id: id, kind: .notice, text: "Ran \(name) \(args)".trimmingCharacters(in: .whitespaces), time: time)]
+        }
+        for tag in ["local-command-stdout", "local-command-stderr"] where s.hasPrefix("<" + tag + ">") {
+            let output = (Self.between(s, "<" + tag + ">", "</" + tag + ">") ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !output.isEmpty else { return [] }
+            return [ReaderEntry(id: id, kind: tag.hasSuffix("stderr") ? .error : .notice, text: String(output.prefix(2000)), time: time)]
         }
         if s.hasPrefix("[Request interrupted by user") {
             return [ReaderEntry(id: id, kind: .notice, text: "Interrupted", time: time)]
@@ -303,6 +314,8 @@ struct ClaudeTranscriptParser: TranscriptParser {
 /// function_call, custom_tool_call, ...); `event_msg` duplicates some of it and adds errors.
 struct CodexTranscriptParser: TranscriptParser {
     private var lineNo = 0
+    private var previousModel: String?
+    private var lastCompactionRecord: String?
 
     mutating func parse(line: Data) -> [ReaderEntry] {
         lineNo += 1
@@ -312,6 +325,24 @@ struct CodexTranscriptParser: TranscriptParser {
         let time = obj["timestamp"] as? String
         let id = (p["id"] as? String).map { "x\(lineNo)-\($0)" } ?? "x\(lineNo)"
         let ptype = p["type"] as? String
+
+        if type == "compacted" || (type == "event_msg" && ptype == "context_compacted") {
+            let record = type == "compacted" ? "compacted" : "event"
+            if let previous = lastCompactionRecord, previous != record {
+                lastCompactionRecord = nil
+                return []
+            }
+            lastCompactionRecord = record
+            return [ReaderEntry(id: id, kind: .notice, text: "Conversation compacted", time: time)]
+        }
+        if type == "turn_context", let model = p["model"] as? String {
+            let previous = previousModel
+            previousModel = model
+            if let previous, previous != model {
+                return [ReaderEntry(id: id, kind: .notice, text: "Model changed to \(model)", time: time)]
+            }
+            return []
+        }
 
         switch (type, ptype) {
         case ("response_item", "message"):
@@ -329,6 +360,7 @@ struct CodexTranscriptParser: TranscriptParser {
                 }
             }
             if role == "user" {
+                lastCompactionRecord = nil
                 let kept = texts.filter { !Self.isContextBlock($0) }
                 if kept.isEmpty && images.isEmpty { return [] }
                 return [ReaderEntry(id: id, kind: .user, text: kept.joined(separator: "\n\n").trimmingCharacters(in: .whitespacesAndNewlines), images: images, time: time)]

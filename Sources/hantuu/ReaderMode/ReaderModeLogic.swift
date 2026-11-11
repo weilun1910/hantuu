@@ -88,7 +88,8 @@ enum TerminalScreen {
     static let trustMarks = ["do you trust", "trust the files", "trust this folder", "trust the contents",
                              "allow codex to work in this folder", "one you trust"]
     static let updateMarks = ["update available", "update now", "skip until"]
-    static let menuMarks = ["enter to confirm", "enter to select", "press enter to continue", "to navigate", "(y/n)"]
+    static let menuMarks = ["enter to confirm", "enter to select", "press enter to continue", "to navigate", "(y/n)",
+                            "esc to cancel", "esc to close", "esc to go back", "escape to close", "press any key to continue"]
 
     /// Claude Code and Codex both show this while a turn runs.
     static let busyMark = "esc to interrupt"
@@ -223,7 +224,11 @@ enum ComposerMessage {
         // A message that starts with a path isn't a slash command.
         if text == nil && body.hasPrefix("/") { body = " " + body }
         var out = images.map { SendStep.image(ShellEscape.escape($0.path)) }
-        if !body.isEmpty { out.append(.paste(body)) }
+        if !body.isEmpty {
+            if images.isEmpty, text != nil, ReaderCommandLogic.invocation(body) != nil,
+               ["claude", "codex"].contains(agentID) { out.append(.command(body)) }
+            else { out.append(.paste(body)) }
+        }
         if !out.isEmpty { out.append(.pressReturn) }
         return out
     }
@@ -238,6 +243,8 @@ enum ComposerMessage {
 
 /// One thing reader mode types into the agent's terminal when a message goes out.
 enum SendStep: Equatable {
+    /// Slash commands stay literal input, never a pasted-text placeholder.
+    case command(String)
     /// Text, as one bracketed paste.
     case paste(String)
     /// An image's escaped path as a paste of its own. The next step waits until the agent
@@ -248,6 +255,23 @@ enum SendStep: Equatable {
 }
 
 extension TerminalView {
+    /// Sends printable command text through Ghostty's key encoder without paste markers.
+    /// The caller sends the command name separately from any pasted arguments.
+    func typeCommandText(_ text: String) {
+        guard let surface, !text.isEmpty else { return }
+        var event = ghostty_input_key_s()
+        event.action = GHOSTTY_ACTION_PRESS
+        event.keycode = 0
+        event.mods = GHOSTTY_MODS_NONE
+        event.consumed_mods = GHOSTTY_MODS_NONE
+        event.unshifted_codepoint = 0
+        event.composing = false
+        text.withCString {
+            event.text = $0
+            _ = ghostty_surface_key(surface, event)
+        }
+    }
+
     /// Presses Esc in the terminal as a real key event. Claude Code and Codex both stop the
     /// running turn on Esc.
     func pressEscape() {
