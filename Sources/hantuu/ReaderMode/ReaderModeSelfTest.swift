@@ -519,6 +519,7 @@ extension SelfTest {
         tv.frame = host.bounds
         host.addSubview(tv)
         let rm = ReaderModeController(model: model, mode: mode, commandCatalog: ReaderCommandCatalog(home: dir))
+        rm.commandDiscoveryEnabled = false
         var statusOverride: StatusState?
         rm.statusProvider = { _ in statusOverride }
         rm.install(in: host, top: host.topAnchor, above: tv)
@@ -575,9 +576,12 @@ extension SelfTest {
         let commandArrived = waitUntil(5) { !rm.isTyping && bytes().count > commandMark && bytes().last == 0x0D }
         check("commands transport: the command token stays outside the argument paste", commandSent && commandArrived && String(decoding: bytes().suffix(from: commandMark), as: UTF8.self) == "/model \u{1b}[200~example-model\u{1b}[201~\r")
         check("commands peek: an inline model argument keeps the reader", !mode.isPeeking(chat))
+        let bareCommandMark = bytes().count
         rm.composer.textView.text = "/model"
         _ = rm.send()
         check("commands peek: a known picker opens the terminal after submission", waitUntil(5) { mode.isPeeking(chat) })
+        _ = waitUntil(3) { !rm.isTyping && bytes().last == 0x0D }
+        check("commands transport: a bare command sends exactly one Return", String(decoding: bytes().suffix(from: bareCommandMark), as: UTF8.self) == "/model\r")
         _ = rm.sync(selected: chat)
         w.makeFirstResponder(rm.focusTarget(for: tv))
         check("commands peek: the visible terminal gets keyboard focus", w.firstResponder === tv)
@@ -591,6 +595,12 @@ extension SelfTest {
         _ = rm.send()
         let longArrived = waitUntil(5) { !rm.isTyping && bytes().count > longMark && bytes().last == 0x0D }
         check("commands transport: long arguments cannot swallow the command name", longArrived && String(decoding: bytes().suffix(from: longMark), as: UTF8.self) == "/compact \u{1b}[200~" + arguments + "\u{1b}[201~\r")
+
+        let namespaceMark = bytes().count
+        rm.composer.textView.text = "/example:task_name detail"
+        _ = rm.send()
+        let namespaceArrived = waitUntil(5) { !rm.isTyping && bytes().count > namespaceMark && bytes().last == 0x0D }
+        check("commands transport: namespaces and underscores remain literal key text", namespaceArrived && String(decoding: bytes().suffix(from: namespaceMark), as: UTF8.self) == "/example:task_name \u{1b}[200~detail\u{1b}[201~\r")
 
         // Attachments: the image's path as its own paste, then the text with the PDF's path.
         // The fake agent never draws "[Image #1]", so don't wait long for it.

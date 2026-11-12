@@ -255,21 +255,53 @@ enum SendStep: Equatable {
 }
 
 extension TerminalView {
-    /// Sends printable command text through Ghostty's key encoder without paste markers.
-    /// The caller sends the command name separately from any pasted arguments.
+    /// Encodes one printable key at a time. A multi-character key event has no physical
+    /// key identity and can be encoded differently when the CLI enables the Kitty protocol.
     func typeCommandText(_ text: String) {
-        guard let surface, !text.isEmpty else { return }
-        var event = ghostty_input_key_s()
-        event.action = GHOSTTY_ACTION_PRESS
-        event.keycode = 0
-        event.mods = GHOSTTY_MODS_NONE
-        event.consumed_mods = GHOSTTY_MODS_NONE
-        event.unshifted_codepoint = 0
-        event.composing = false
-        text.withCString {
-            event.text = $0
-            _ = ghostty_surface_key(surface, event)
+        guard let surface else { return }
+        for scalar in text.unicodeScalars {
+            guard scalar.value >= 0x20, scalar.value != 0x7F else { continue }
+            var event = ghostty_input_key_s()
+            event.action = GHOSTTY_ACTION_PRESS
+            let key = GhosttyInput.commandKey(scalar)
+            event.keycode = key.code
+            event.mods = key.shift ? GHOSTTY_MODS_SHIFT : GHOSTTY_MODS_NONE
+            event.consumed_mods = event.mods
+            event.unshifted_codepoint = key.unshifted
+            event.composing = false
+            String(scalar).withCString {
+                event.text = $0
+                _ = ghostty_surface_key(surface, event)
+                event.action = GHOSTTY_ACTION_RELEASE
+                _ = ghostty_surface_key(surface, event)
+            }
         }
+    }
+
+    /// Paces the literal command token beyond Codex's paste-burst threshold. Cancellation
+    /// is checked before every key, including when a chat ends during the sequence.
+    func typeCommandToken(_ text: String, while allowed: @escaping () -> Bool, completion: @escaping () -> Void) {
+        let keys = text.unicodeScalars.map(String.init)
+        func send(_ index: Int) {
+            guard allowed() else { completion(); return }
+            guard index < keys.count else { completion(); return }
+            self.typeCommandText(keys[index])
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.03) { send(index + 1) }
+        }
+        send(0)
+    }
+
+    func pressCommandMenuDown() {
+        guard let surface else { return }
+        var key = ghostty_input_key_s()
+        key.keycode = 125
+        key.mods = GHOSTTY_MODS_NONE
+        key.consumed_mods = GHOSTTY_MODS_NONE
+        key.composing = false
+        key.action = GHOSTTY_ACTION_PRESS
+        _ = ghostty_surface_key(surface, key)
+        key.action = GHOSTTY_ACTION_RELEASE
+        _ = ghostty_surface_key(surface, key)
     }
 
     /// Presses Esc in the terminal as a real key event. Claude Code and Codex both stop the

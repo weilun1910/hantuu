@@ -11,6 +11,8 @@ struct ReaderCommand: Equatable {
     var precedence = 0
     var peek: Peek = .never
     var userInvocable = true
+    /// Codex hides aliases from the unfiltered menu but offers them when searching.
+    var aliasOf: String? = nil
     var token: String { sigil + name }
 
     func opensTerminal(arguments: String) -> Bool {
@@ -58,7 +60,7 @@ enum ReaderCommandLogic {
             for c in name where remaining.first == c { remaining = remaining.dropFirst() }
             return remaining.isEmpty ? 3 : nil
         }
-        return commands.filter { $0.sigil == query.sigil }.compactMap { c -> (ReaderCommand, Int)? in
+        return commands.filter { $0.sigil == query.sigil && ($0.aliasOf == nil || !needle.isEmpty) }.compactMap { c -> (ReaderCommand, Int)? in
             score(c.name).map { (c, $0) }
         }.sorted { a, b in
             a.1 == b.1 ? a.0.name.localizedStandardCompare(b.0.name) == .orderedAscending : a.1 < b.1

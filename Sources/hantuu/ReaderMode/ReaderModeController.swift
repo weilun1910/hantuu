@@ -28,6 +28,21 @@ final class ReaderModeController: NSObject {
     private var commandContext: ReaderCommandCatalog.Context?
     private var commandLoadAt = Date.distantPast
     private var commandLoading = false
+    /// Fixture tests and the independent live-menu probe turn off background discovery.
+    var commandDiscoveryEnabled = true
+    private var menuProbe: CommandMenuProbe?
+    private var menuProbeChatID: UUID?
+    private var menuProbeGeneration = UUID()
+    private var menuProbeRetryAt = Date.distantPast
+    private var waitingToSendAfterProbe = false
+    private struct ObservedMenu {
+        var context: ReaderCommandCatalog.Context
+        var terminal: ObjectIdentifier
+        var rows: [ReaderCommand]
+    }
+    // A running terminal fixes the agent version and account. Never share observations
+    // between processes, even if their executable path and working folder are identical.
+    private var observedMenus: [UUID: ObservedMenu] = [:]
     private var commandSentAt: [UUID: Date] = [:]
     private var commandPeekAt: [UUID: Date] = [:]
     private var commandMenuHeight: NSLayoutConstraint!
@@ -227,6 +242,7 @@ final class ReaderModeController: NSObject {
     /// Called by MainAreaController whenever it lays out the selected chat.
     @discardableResult
     func sync(selected: Chat?) -> Layout {
+        if selected?.id != menuProbeChatID || selected.map({ !mode.showsReader($0) }) == true { cancelMenuProbe() }
         guard let chat = selected else {
             root.isHidden = true
             peekBar.isHidden = true
@@ -234,6 +250,7 @@ final class ReaderModeController: NSObject {
             return Layout()
         }
         let shows = mode.showsReader(chat)
+        if mode.face(of: chat) != .reader { observedMenus[chat.id] = nil }
         let live = isLive(chat)
         let peeking = mode.isPeeking(chat) && live
         if mode.isPeeking(chat) && !live { mode.endPeek(chat) }
@@ -264,7 +281,7 @@ final class ReaderModeController: NSObject {
         commandLoading = false
         composer.textView.dismissCommands()
         composer.textView.allowsSkillMentions = chat.agent.id == "codex"
-        composer.textView.commandCatalog = ReaderCommandCatalog.builtins(agent: chat.agent.id)
+        composer.textView.commandCatalog = commandsForChat(ReaderCommandCatalog.builtins(agent: chat.agent.id), chat: chat)
         composer.textView.text = drafts[chat.id] ?? ""
         composer.textView.setSelectedRange(NSRange(location: (composer.textView.string as NSString).length, length: 0))
         composer.setAttachments(draftFiles[chat.id] ?? [])
@@ -305,6 +322,10 @@ final class ReaderModeController: NSObject {
         if live, let t = chat.terminal, mode.face(of: chat) == .reader {
             screen = TerminalScreen.analyze(t.activeScreenText())
             if screen.ready { readyChats.insert(chat.id) }
+            if menuProbe != nil {
+                if !mayProbe(chat, terminal: t) { cancelMenuProbe() }
+                else { screen.menu = nil }
+            }
             // Esc in the terminal can restore queued text without writing an interruption.
             // Only trust the input box once our own paste has completely finished.
             if screen.ready && !screen.busy && screen.menu == nil,
@@ -342,12 +363,13 @@ final class ReaderModeController: NSObject {
             chat.pendingMessages.sendNowEnabled = sendNowAvailable
         }
 
-        if ReaderCommandLogic.autoPeek(sentAt: commandSentAt[chat.id], now: Date(), menu: screen.menu),
+        if !typing, menuProbe == nil,
+           ReaderCommandLogic.autoPeek(sentAt: commandSentAt[chat.id], now: Date(), menu: screen.menu),
            mode.showsReader(chat) {
             commandPeekAt[chat.id] = Date()
             showTerminal()
         }
-        if composer.textView.commandMenuVisible { loadCommands() }
+        if hasSlashQuery { loadCommands() }
 
         // A peek ends once nothing has waited in the terminal for two checks in a row.
         if mode.isPeeking(chat) {
@@ -419,10 +441,86 @@ final class ReaderModeController: NSObject {
         commandLoading = true
         commandLoadAt = Date()
         commandCatalog.load(context) { [weak self] commands in
-            guard let self, self.commandContext == context else { return }
+            guard let self, self.commandContext == context, self.model.selectedChat === chat else { return }
             self.commandLoading = false
-            self.composer.textView.commandCatalog = commands
+            self.composer.textView.commandCatalog = self.commandsForChat(commands, chat: chat)
+            self.discoverCommands(chat)
         }
+    }
+
+    private func commandsForChat(_ commands: [ReaderCommand], chat: Chat) -> [ReaderCommand] {
+        guard let terminal = chat.terminal, let observed = observedMenus[chat.id],
+              observed.context == commandContext, observed.terminal == ObjectIdentifier(terminal) else { return commands }
+        return CommandMenuScreen.reconcile(commands, observed: observed.rows, complete: true)
+    }
+
+    private func mayProbe(_ chat: Chat, terminal: TerminalView) -> Bool {
+        ["claude", "codex"].contains(chat.agent.id) && commandDiscoveryEnabled && model.selectedChat === chat && chat.id == shownChatID &&
+            chat.terminal === terminal && mode.showsReader(chat) && isLive(chat) &&
+            model.subagentBrowser.selection == nil && composerMode == .ready && !typing && outbox.isEmpty &&
+            chat.activity != .working && chat.activity != .background && !chat.activity.isNeeds &&
+            (statusProvider(chat)?.waits.isEmpty ?? true) && !root.isHidden && root.window != nil &&
+            root.window?.firstResponder !== terminal
+    }
+
+    private var hasSlashQuery: Bool {
+        let text = composer.textView
+        return !text.hasMarkedText() && ReaderCommandLogic.query(text.string, selection: text.selectedRange(), skills: false) != nil
+    }
+
+    private func discoverCommands(_ chat: Chat) {
+        guard let terminal = chat.terminal, let context = commandContext,
+              menuProbe == nil, Date() >= menuProbeRetryAt, mayProbe(chat, terminal: terminal),
+              hasSlashQuery else { return }
+        if let observed = observedMenus[chat.id], observed.context == context,
+           observed.terminal == ObjectIdentifier(terminal) { return }
+        let generation = UUID()
+        menuProbeGeneration = generation
+        menuProbeChatID = chat.id
+        let probe = CommandMenuProbe(agent: chat.agent.id, io: .init(
+            screen: { [weak terminal] in terminal?.activeScreenText() ?? "" },
+            allowed: { [weak self, weak chat, weak terminal] in
+                guard let self, let chat, let terminal else { return false }
+                return self.menuProbeGeneration == generation && self.mayProbe(chat, terminal: terminal)
+            },
+            slash: { [weak terminal] in terminal?.typeCommandText("/") },
+            down: { [weak terminal] in terminal?.pressCommandMenuDown() },
+            escape: { [weak terminal] in terminal?.pressEscape() },
+            backspace: { [weak terminal] in terminal?.pressBackspace(times: 1) }
+        )) { [weak self, weak chat, weak terminal] rows, complete in
+            guard let self, let chat, let terminal, self.menuProbeGeneration == generation else { return }
+            self.menuProbe = nil
+            self.menuProbeChatID = nil
+            self.menuProbeRetryAt = Date().addingTimeInterval(complete ? 0 : 30)
+            guard self.commandContext == context, self.model.selectedChat === chat else { return }
+            if complete {
+                self.observedMenus[chat.id] = ObservedMenu(context: context, terminal: ObjectIdentifier(terminal), rows: rows)
+            }
+            self.composer.textView.commandCatalog = CommandMenuScreen.reconcile(
+                self.composer.textView.commandCatalog, observed: rows, complete: complete)
+            self.refresh()
+        }
+        menuProbe = probe
+        if !probe.start() {
+            menuProbe = nil
+            menuProbeChatID = nil
+            menuProbeRetryAt = Date().addingTimeInterval(5)
+        }
+    }
+
+    private func cancelMenuProbe() {
+        guard let probe = menuProbe else { return }
+        menuProbeGeneration = UUID()
+        probe.cancel()
+        menuProbe = nil
+        menuProbeChatID = nil
+        menuProbeRetryAt = Date().addingTimeInterval(5)
+    }
+
+    var isDiscoveringCommands: Bool { menuProbe != nil }
+    var hasObservedCommands: Bool {
+        guard let chat = model.selectedChat, let terminal = chat.terminal, let observed = observedMenus[chat.id] else { return false }
+        return observed.context == commandContext && observed.terminal == ObjectIdentifier(terminal)
     }
 
     // MARK: Actions
@@ -436,6 +534,21 @@ final class ReaderModeController: NSObject {
     @discardableResult
     func send() -> Bool {
         guard let chat = model.selectedChat, chat.id == shownChatID, let t = chat.terminal else { return false }
+        if waitingToSendAfterProbe { return false }
+        if menuProbe != nil {
+            cancelMenuProbe()
+            waitingToSendAfterProbe = true
+            let draft = composer.textView.string
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self, weak chat] in
+                guard let self else { return }
+                self.waitingToSendAfterProbe = false
+                guard let chat, self.model.selectedChat === chat, self.composer.textView.string == draft else { return }
+                // Never join a command to a probe that could not restore its empty input.
+                guard CommandMenuScreen.emptyInput(t.activeScreenText(), agent: chat.agent.id) else { self.showTerminal(); return }
+                _ = self.send()
+            }
+            return true
+        }
         refresh()
         let text = ComposerMessage.prepare(composer.textView.string)
         let attachments = composer.attachments
@@ -537,16 +650,16 @@ final class ReaderModeController: NSObject {
         switch step {
         case .command(let text):
             if let invocation = ReaderCommandLogic.invocation(text) {
-                // Keep the entire name outside any paste burst. Codex expands pasted
-                // argument placeholders only after recognizing this literal command token.
+                // Only the arguments use bracketed paste. The token is paced ordinary
+                // input, and one Return follows after the paste-burst suppression window.
                 let hasArguments = !invocation.arguments.isEmpty
-                t.typeCommandText("/" + invocation.name + (hasArguments ? " " : ""))
-                if hasArguments {
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
-                        t.pasteText(invocation.arguments)
-                        next(0.15)
-                    }
-                } else { next(0.15) }
+                t.typeCommandToken("/" + invocation.name + (hasArguments ? " " : ""), while: { [weak self] in
+                    self?.canType(id) == true
+                }) { [weak self] in
+                    guard let self, self.canType(id) else { next(0); return }
+                    if hasArguments { t.pasteText(invocation.arguments) }
+                    next(0.2)
+                }
             } else {
                 t.pasteText(text)
                 next(0.15)
@@ -573,10 +686,16 @@ final class ReaderModeController: NSObject {
             // The same pause TerminalView.submit leaves, so the agent has taken the paste in.
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
                 guard let self, self.outbox.first?.id == id else { return }
-                if self.canType(id) && self.permitsSubmit(t) {
+                let screen = t.activeScreenText()
+                let suggestions = !CommandMenuScreen.rows(screen).isEmpty
+                let commandSafe = command == nil || (CommandMenuScreen.safe(screen) &&
+                    (TerminalScreen.analyze(screen).menu == nil || suggestions))
+                if self.canType(id) && self.permitsSubmit(t) && commandSafe {
                     t.pressReturn()
                     self.model.chats.first { $0.id == self.outbox[0].chatID }?.pendingMessages.markSubmitted(id: id)
                     if let command { self.didSendCommand(command, terminal: t) }
+                } else if command != nil, self.model.selectedChat?.terminal === t {
+                    self.showTerminal()
                 }
                 self.typeNext()
             }
@@ -589,6 +708,11 @@ final class ReaderModeController: NSObject {
     private func didSendCommand(_ text: String, terminal: TerminalView) {
         guard let chat = model.chats.first(where: { $0.terminal === terminal }),
               let invocation = ReaderCommandLogic.invocation(text) else { return }
+        if let name = ReaderCommandLogic.invocation(text)?.name,
+           ["cd", "model", "login", "logout", "plugin", "plugins", "reload-plugins", "reload-skills", "config", "experimental", "restart", "resume", "clear"].contains(name) {
+            observedMenus[chat.id] = nil
+            commandLoadAt = .distantPast
+        }
         commandSentAt[chat.id] = Date()
         let commands = ReaderCommandCatalog.builtins(agent: chat.agent.id)
         let opens = commands.first { $0.name == invocation.name }?.opensTerminal(arguments: invocation.arguments) ?? false
@@ -667,6 +791,7 @@ final class ReaderModeController: NSObject {
 
     /// Shows the live terminal so a menu can be answered there.
     func showTerminal() {
+        cancelMenuProbe()
         guard let chat = model.selectedChat, isLive(chat) else { return }
         calmChecks = 0
         mode.peek(chat)
@@ -724,6 +849,7 @@ final class ReaderModeController: NSObject {
     func insertBrowserFeedback(_ feedback: BrowserFeedback, chatID: UUID) -> Bool {
         guard let chat = model.selectedChat, chat.id == chatID,
               model.subagentBrowser.selection == nil, !isTyping else { return false }
+        cancelMenuProbe()
         let inReader = mode.showsReader(chat)
         if inReader {
             guard composerMode != .none else { return false }

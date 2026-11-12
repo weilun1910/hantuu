@@ -3,6 +3,7 @@ import AppKit
 extension SelfTest {
     static func readerCommands(_ dir: URL) {
         readerCommandLogic()
+        readerCommandMenuProbe()
         readerCommandDiscovery(dir.appendingPathComponent("reader-commands"))
         readerCommandKeys()
         readerCommandTranscripts()
@@ -45,6 +46,93 @@ extension SelfTest {
         check("commands: file-only messages keep their leading space", ComposerMessage.steps(text: nil, files: [.init(path: "/tmp/example.txt", image: false)], agentID: "claude") == [.paste(" /tmp/example.txt"), .pressReturn])
         check("commands: unknown names still reach the agent", ComposerMessage.steps(text: "/custom:name arg", files: [], agentID: "claude") == [.command("/custom:name arg"), .pressReturn])
         check("commands: absolute paths and multiline prose stay pastes", ComposerMessage.steps(text: "/tmp/example.txt", files: [], agentID: "codex") == [.paste("/tmp/example.txt"), .pressReturn] && ComposerMessage.steps(text: "/compact\njust an example", files: [], agentID: "codex").first == .paste("/compact\njust an example"))
+    }
+
+    private static func readerCommandMenuProbe() {
+        let first = (0..<8).map { ReaderCommand(name: "item-\($0)", description: "Command \($0)") }
+        var walk = CommandMenuTraversal()
+        walk.observe(first)
+        for _ in 0..<8 { walk.observe(first) }
+        check("commands probe: identical text while highlighting does not end paging", !walk.finished)
+        let second = (8..<18).map { ReaderCommand(name: "item-\($0)", description: "Command \($0)") }
+        walk.observe(second)
+        for _ in 0..<16 { walk.observe(second) }
+        check("commands probe: paging retains both pages before stopping", walk.finished && walk.commands.count == 18 && !walk.capped)
+        var capped = CommandMenuTraversal()
+        for index in 0..<CommandMenuTraversal.limit {
+            capped.observe([ReaderCommand(name: "item-\(index)", description: "Command")])
+        }
+        check("commands probe: a capped traversal cannot hide unseen commands", capped.capped && !capped.finished)
+        let model = ReaderCommand(name: "model", description: "Fallback", argumentHint: "[model]", peek: .withoutArguments)
+        let stale = ReaderCommand(name: "cost", description: "Old command")
+        let skill = ReaderCommand(name: "helper", description: "Skill", sigil: "$")
+        let rows = CommandMenuScreen.rows("❯ /model    Choose model\n  /anthropic-skills:deep-research  Research\n  /imessage:access  Access rules\n❯ /\nRead /tmp/example now")
+        let merged = CommandMenuScreen.reconcile([model, stale, skill], observed: rows, complete: true)
+        check("commands probe: runtime rows include account namespaces and omit input", Set(rows.map(\.name)) == ["model", "anthropic-skills:deep-research", "imessage:access"])
+        check("commands probe: runtime gates remove stale slash rows but keep dollar skills", !merged.contains { $0.name == "cost" } && merged.contains { $0.token == "$helper" })
+        check("commands probe: live descriptions preserve picker rules and hints", merged.first { $0.name == "model" }?.description == "Choose model" && merged.first { $0.name == "model" }?.argumentHint == "[model]" && merged.first { $0.name == "model" }?.peek == .withoutArguments)
+        check("commands probe: partial observations add without filtering", CommandMenuScreen.reconcile([stale], observed: rows, complete: false).contains { $0.name == "cost" })
+        let claudeNames = Set(ReaderCommandCatalog.builtins(agent: "claude").map(\.name))
+        check("commands: Claude fallback drops four unobserved legacy entries", claudeNames.isDisjoint(with: ["agents", "cost", "review", "vim"]))
+        check("commands: Claude fallback includes recent native entries", Set(["focus", "statusline", "terminal-setup", "upgrade", "usage-credits", "voice"]).isSubset(of: claudeNames))
+        check("commands keys: slash and model use their own key identities", GhosttyInput.commandKey("/").code == 44 && GhosttyInput.commandKey("m").code == 46 && GhosttyInput.commandKey("m").unshifted == 109)
+        check("commands keys: namespace punctuation preserves shifted base keys", GhosttyInput.commandKey(":").code == 41 && GhosttyInput.commandKey(":").unshifted == 59 && GhosttyInput.commandKey(":").shift && GhosttyInput.commandKey("_").code == 27)
+
+        check("commands probe: an empty first line does not erase a multiline draft", !CommandMenuScreen.emptyInput("❯ \n  unfinished second line\n────────\n? for shortcuts", agent: "claude") && !CommandMenuScreen.emptyInput("› \n  unfinished second line\nGPT-6 low", agent: "codex"))
+        let aliases = CommandMenuScreen.reconcile(ReaderCommandCatalog.builtins(agent: "codex"), observed: [
+            ReaderCommand(name: "side", description: "Side chat"), ReaderCommand(name: "exit", description: "Exit")
+        ], complete: true)
+        let unfiltered = ReaderCommandLogic.ranked(aliases, query: .init(range: NSRange(location: 0, length: 1), sigil: "/", text: ""))
+        let filtered = ReaderCommandLogic.ranked(aliases, query: .init(range: NSRange(location: 0, length: 3), sigil: "/", text: "bt"))
+        check("commands: Codex aliases appear only while searching", !unfiltered.contains { $0.name == "btw" || $0.name == "quit" } && filtered.contains { $0.name == "btw" })
+        check("commands: Codex popup omits commands it always hides", !ReaderCommandCatalog.builtins(agent: "codex").contains { $0.name == "apps" || $0.name == "debug-config" })
+
+        for agent in ["claude", "codex"] {
+            let marker = agent == "claude" ? "❯" : "›"
+            let empty = marker + " \n? for shortcuts"
+            check("commands probe: \(agent) recognizes only its input row", CommandMenuScreen.emptyInput(empty, agent: agent) && CommandMenuScreen.input(marker + " /\n/model  Choose model", agent: agent) == "/" && !CommandMenuScreen.emptyInput(marker + " unfinished draft", agent: agent))
+            var screen = empty
+            var keys: [String] = []
+            var allowed = false
+            let probe = CommandMenuProbe(agent: agent, io: .init(screen: { screen }, allowed: { allowed },
+                slash: { keys.append("/") }, down: { keys.append("Down") }, escape: { keys.append("Esc") },
+                backspace: { keys.append("Backspace") })) { _, _ in }
+            check("commands probe: \(agent) refuses a visible or busy terminal lease", !probe.start() && keys.isEmpty)
+            allowed = true
+            let cancelled = CommandMenuProbe(agent: agent, io: .init(screen: { screen }, allowed: { allowed },
+                slash: { keys.append("/") }, down: { keys.append("Down") }, escape: { keys.append("Esc") },
+                backspace: { keys.append("Backspace") })) { _, _ in }
+            let started = cancelled.start()
+            cancelled.cancel()
+            check("commands probe: \(agent) cancellation before redraw clears its own queued slash", started && keys == ["/", "Esc", "Backspace"])
+            keys.removeAll()
+            screen = marker + " draft"
+            let draftProbe = CommandMenuProbe(agent: agent, io: .init(screen: { screen }, allowed: { true },
+                slash: { keys.append("/") }, down: { keys.append("Down") }, escape: { keys.append("Esc") },
+                backspace: { keys.append("Backspace") })) { _, _ in }
+            check("commands probe: \(agent) leaves existing terminal drafts untouched", !draftProbe.start() && keys.isEmpty)
+        }
+        // A simulated CLI has eight visible rows and keeps the text unchanged while
+        // selection moves inside that window. No real agent or home folder is involved.
+        var position = 0
+        var draft = ""
+        let available = (0..<20).map { "command-\($0)" }
+        var completed: [ReaderCommand]?
+        var complete = false
+        var cleanups = 0
+        let simulated = CommandMenuProbe(agent: "codex", io: .init(screen: {
+            let start = min(max(0, position - 7), available.count - 8)
+            let rows = draft == "/" ? available[start..<(start + 8)].map { "/\($0)  Description" }.joined(separator: "\n") : ""
+            return rows + "\n› " + draft + "\n? for shortcuts"
+        }, allowed: { true }, slash: { draft = "/" }, down: { position = (position + 1) % available.count },
+            escape: { cleanups += 1 }, backspace: { draft = "" })) { rows, full in
+                completed = rows
+                complete = full
+            }
+        let running = simulated.start()
+        let finished = waitUntil(8) { completed != nil }
+        check("commands probe: an asynchronous full scan restores the input before publishing", running && finished && complete && draft.isEmpty && cleanups == 1 && Set(completed?.map(\.name) ?? []) == Set(available))
+        check("commands probe: trust, update, approval and active turns cannot be scanned", ["Do you trust this folder?", "Update available", "Would you like to run this command?", "esc to interrupt"].allSatisfy { !CommandMenuScreen.safe($0) })
     }
 
     private static func readerCommandDiscovery(_ root: URL) {

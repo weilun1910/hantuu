@@ -19,11 +19,7 @@ enum LiveCheckRules {
     /// Only rows with a description count, never the bare slash in the input box, a path,
     /// or a command mentioned in prose. Capture each page before comparing the catalogue.
     static func commands(on screen: String) -> Set<String> {
-        let pattern = #"^\s*[│┃║>›❯●○*\s]*\/([A-Za-z][A-Za-z0-9_:-]*)[ \t]{2,}\S"#
-        guard let regex = try? NSRegularExpression(pattern: pattern, options: .anchorsMatchLines) else { return [] }
-        let ns = screen as NSString
-        return Set(regex.matches(in: screen, range: NSRange(location: 0, length: ns.length))
-            .map { ns.substring(with: $0.range(at: 1)) })
+        Set(CommandMenuScreen.rows(screen).map(\.name))
     }
 
     /// Selection styling is absent from Ghostty's text capture. Keep moving through a
@@ -345,6 +341,7 @@ private final class LiveCheckSession {
         let mode = ReaderMode(settings: settings)
         self.mode = mode
         let rm = ReaderModeController(model: app, mode: mode)
+        rm.commandDiscoveryEnabled = false
         rm.statusProvider = { [weak center] in center?.state(of: $0.id) }
         rm.permitsSubmit = { [weak self] _ in
             guard let self else { return false }
@@ -477,48 +474,54 @@ private final class LiveCheckSession {
     func slash() {
         var observed = Set<String>()
         var bounded = false
-        for prefix in ["/", "/c", "/m", "/re"] {
+        // Selection highlighting is not present in activeScreenText. Repeated text is
+        // expected while Down moves within one viewport, so it cannot end the traversal.
+        for prefix in ["/"] {
             guard safe(), let terminal else { report("suggestion scan", false); return }
             terminal.typeCommandText(prefix)
             guard pause(0.6, allowingMenu: true) else { report("suggestion scan", false); return }
-            guard !LiveCheckRules.commands(on: screen).isEmpty else {
-                report("suggestion scan", false, "No command rows for \(prefix); \(String(screen.suffix(450)))")
-                return
-            }
-            var scan = LiveCheckRules.PopupScan()
-            var ended = false
-            for _ in 0..<1024 {
+            var traversal = CommandMenuTraversal()
+            while !traversal.finished && !traversal.capped {
                 guard safe(allowingMenu: true) else { report("suggestion scan", false); return }
-                let current = screen
-                let visible = LiveCheckRules.commands(on: current)
-                observed.formUnion(visible)
-                if scan.observe(visible) { ended = true; break }
+                traversal.observe(CommandMenuScreen.rows(screen))
+                if traversal.finished || traversal.capped { break }
                 arrowDown()
-                guard pause(0.2, allowingMenu: true) else { report("suggestion scan", false); return }
+                guard pause(0.15, allowingMenu: true) else { report("suggestion scan", false); return }
             }
-            bounded = bounded || !ended
+            observed.formUnion(traversal.commands.map(\.name))
+            bounded = bounded || traversal.capped
             terminal.pressEscape()
-            terminal.pressBackspace(times: 256)
-            guard wait(3, allowingMenu: true, until: { TerminalScreen.analyze(self.screen).menu == nil }) else {
+            terminal.pressBackspace(times: prefix.count)
+            guard wait(3, allowingMenu: true, until: { CommandMenuScreen.emptyInput(self.screen, agent: self.agent) }) else {
                 report("cleared suggestions", false); return
             }
         }
         report("suggestions paged without submitting", !observed.isEmpty && !bounded,
                "Observed \(observed.sorted().joined(separator: ",")); traversal cap reached=\(bounded).")
-        guard !observed.isEmpty, failure == nil, let app = model, let chat else { return }
-        var listed: [ReaderCommand]?
-        let catalogue = ReaderCommandCatalog()
-        catalogue.load(.init(agent: agent, folder: app.workingDirectory(of: chat), transcript: chat.transcriptPath)) { listed = $0 }
-        guard wait(10, until: { listed != nil }) else { report("loaded command catalogue", false); return }
-        let names = Set((listed ?? []).filter { $0.sigil == "/" }.map(\.name))
+        guard !observed.isEmpty, !bounded, failure == nil, let chat, let reader else { return }
+        // Exercise production discovery separately. Comparing the static table to a live
+        // menu cannot account for account skills or feature gates.
+        reader.commandDiscoveryEnabled = true
+        reader.composer.textView.text = "/"
+        reader.composer.textView.setSelectedRange(NSRange(location: 1, length: 0))
+        reader.composer.textView.updateCommands()
+        reader.composer.textView.onCommandQuery?()
+        let discovered = wait(100, allowingMenu: true) { reader.hasObservedCommands && !reader.isDiscoveringCommands }
+        report("reader harvests its idle menu and restores input", discovered && CommandMenuScreen.emptyInput(screen, agent: agent),
+               String(screen.suffix(450)))
+        guard discovered else { return }
+        let names = Set(reader.composer.textView.commandCatalog.filter { $0.sigil == "/" && $0.aliasOf == nil }.map(\.name))
         report("TUI commands present in reader", observed.subtracting(names).isEmpty,
                "Missing in reader: \(observed.subtracting(names).sorted().joined(separator: ",")).")
-        report("reader commands observed in TUI", names.subtracting(observed).isEmpty && !bounded,
-               "Not observed in TUI (may be gated): \(names.subtracting(observed).sorted().joined(separator: ",")).")
+        report("reader commands observed in TUI", names.subtracting(observed).isEmpty,
+               "Not observed in TUI: \(names.subtracting(observed).sorted().joined(separator: ",")).")
+        reader.composer.textView.text = ""
 
         let sent = send("/model")
         let peeked = sent && wait(15, allowingMenu: true) {
-            self.mode?.isPeeking(chat) == true && TerminalScreen.analyze(self.screen).menu != nil && self.screen.lowercased().contains("model")
+            self.mode?.isPeeking(chat) == true && TerminalScreen.analyze(self.screen).menu != nil &&
+                self.screen.lowercased().contains("model") && CommandMenuScreen.rows(self.screen).isEmpty &&
+                CommandMenuScreen.input(self.screen, agent: self.agent) != "/model"
         }
         report("/model opens the real picker and peeks terminal", peeked, String(screen.suffix(450)))
         guard peeked, safe(allowingMenu: true) else { return }
@@ -530,19 +533,27 @@ private final class LiveCheckSession {
         report("Esc returns to reader with composer focus", returned, String(screen.suffix(450)))
         guard returned else { return }
 
-        // /cost is a panel in current Claude builds. /status is also presented as terminal
-        // output by some Codex builds. Record what the real reader exposes without requiring
-        // a transcript line that the provider may not write.
-        let command = agent == "claude" ? "/cost" : "/status"
+        // A harmless local command with arguments must execute once and clear its input.
+        let title = "slash-check-" + UUID().uuidString.prefix(8).lowercased()
+        let rename = "/rename " + title
+        let renamed = send(rename) && wait(15, allowingMenu: true) {
+            reader.isTyping == false && CommandMenuScreen.emptyInput(self.screen, agent: self.agent) &&
+                self.screen.contains(title) && !TerminalScreen.analyze(self.screen).busy
+        }
+        report("/rename with arguments executes and clears the input", renamed, String(screen.suffix(450)))
+        guard renamed else { return }
+
+        // /cost is absent from Claude 2.1.322's menu. /status exists in both providers.
+        let command = "/status"
         let before = Set(chat.allEntries.map(\.id))
         let commandSent = send(command)
         let shown = commandSent && wait(15, allowingMenu: true) {
             let added = chat.allEntries.filter { !before.contains($0.id) }
             let rendered = added.contains { $0.kind == .notice && !$0.text.hasPrefix("Ran /") && self.body().contains($0.text) }
-            let markers = self.agent == "claude" ? ["total cost", "total duration", "total tokens", "usage"]
-                : ["context", "session", "token", "usage"]
+            let markers = ["context", "session", "token", "usage", "version", "model"]
             let terminalOutput = markers.contains { self.screen.lowercased().contains($0) }
-            return rendered || (self.mode?.isPeeking(chat) == true && terminalOutput && self.reader?.isTyping == false)
+            return rendered || (self.mode?.isPeeking(chat) == true && terminalOutput && self.reader?.isTyping == false &&
+                CommandMenuScreen.input(self.screen, agent: self.agent) != command)
         }
         let notices = chat.allEntries.filter { !before.contains($0.id) && $0.kind == .notice }.map(\.text).joined(separator: " | ")
         report("\(command) exposes local output", shown, "reader notices=\(notices); terminal peek=\(mode?.isPeeking(chat) == true); \(String(screen.suffix(450)))")
