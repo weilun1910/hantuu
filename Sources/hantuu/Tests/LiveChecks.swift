@@ -8,6 +8,10 @@ enum LiveCheckRules {
     static let agents = ["claude", "codex"]
     static let features = ["slash", "queued", "send-now", "relaunch", "subagents"]
 
+    static func codexModel(for feature: String, configured: String?) -> String {
+        configured ?? (feature == "subagents" ? "gpt-6.1-sol" : "gpt-6-luna")
+    }
+
     static func selection(_ value: String?, allowed: [String]) -> [String]? {
         guard let value else { return allowed }
         let parts = value.split(separator: ",", omittingEmptySubsequences: false)
@@ -144,6 +148,10 @@ extension SelfTest {
               LiveCheckRules.inside(dir.appendingPathComponent("live/data"), dir) &&
               !LiveCheckRules.inside(URL(fileURLWithPath: dir.path + "-other/data"), dir))
         check("live checks: diagnostics stay on one line", LiveCheckRules.oneLine("a\nb\t c") == "a b c")
+        check("live checks: child probe uses Sol unless its model is explicitly overridden",
+              LiveCheckRules.codexModel(for: "subagents", configured: nil) == "gpt-6.1-sol" &&
+              LiveCheckRules.codexModel(for: "queued", configured: nil) == "gpt-6-luna" &&
+              LiveCheckRules.codexModel(for: "subagents", configured: "gpt-6-astra") == "gpt-6-astra")
     }
 
     static func liveChecks(_ dir: URL) {
@@ -191,7 +199,7 @@ extension SelfTest {
                     continue
                 }
                 let probe = LiveCheckSession(agent: agent, feature: feature, folder: folder, dir: dir,
-                                             codexModel: env["HANTUU_LIVE_CODEX_MODEL"] ?? "gpt-6-luna")
+                                             codexModel: LiveCheckRules.codexModel(for: feature, configured: env["HANTUU_LIVE_CODEX_MODEL"]))
                 defer { probe.finish() }
                 guard probe.start() else { continue }
                 switch feature {
@@ -699,32 +707,37 @@ private final class LiveCheckSession {
     func subagents() {
         guard let app = model, let chat, let host else { return }
         let token = "child" + UUID().uuidString.prefix(8).lowercased()
-        // Give the child enough output to stay visible across transcript flushes. The
-        // explicit delegation instruction overrides a project's default against spawning.
-        let task = "Without tools or file access, write every integer from 1 to 200, one per line, without abbreviating. End your answer with \(token)."
-        let prompt: String
-        if agent == "codex" {
-            prompt = "I explicitly authorize exactly one subagent for this live check. Call spawn_agent with task_name=live_probe, fork_turns=none, and message: \(task) Use your inherited model without a model override. Then use wait_agent or list_agents to observe its completion and reply done. Do not do the child's task yourself or substitute a shell command for spawn_agent."
-        } else {
-            prompt = "I explicitly authorize exactly one subagent for this live check. Use the Agent tool with model haiku and task: \(task) Wait for it, then reply done."
-        }
+        let taskToken = "task" + UUID().uuidString.prefix(8).lowercased()
+        let tool = agent == "claude" ? "Agent tool with model haiku"
+            : "available spawn_agent tool (which may be named collaboration.spawn_agent), with fork_turns none and model \(codexModel)"
+        let prompt = """
+        This is an integration test of subagent navigation. Delegation is explicitly authorized and required even though the task is small. Use the \(tool) to start exactly one child. Do not perform its task yourself or simulate its reply.
+        Give the child this exact task: "Task marker \(taskToken). Without file access or command execution, count from 1 to 30, one number per line, then finish with \(token). Use your provider's required final-report tool if it has one."
+        Wait for the child to finish using your available agent tools, then reply only done. If no spawn tool is exposed, say that explicitly. Do not inspect files or configuration or change any feature flags.
+        """
         let sent = send(prompt)
         let found = sent && wait(120) { app.subagentBrowser.count(for: chat.id) > 0 }
         report("sidebar observes an open subagent", found,
                found ? "open=\(app.subagentBrowser.count(for: chat.id))"
-               : "No active row observed. For Codex, multi_agent_v2 was explicitly enabled for this process. Model refusal does not establish a missing tool; inspect this probe's rollout tool calls and turn metadata. \(String(screen.suffix(450)))")
+               : "No active row observed. A missing tool is not established by an assistant refusal. For Codex, multi_agent was checked before launch; retry with HANTUU_LIVE_CODEX_MODEL set to an available delegating model. \(String(screen.suffix(450)))")
         guard found, let child = app.subagentBrowser.open[chat.id]?.first else { return }
         app.selectSubagent(child.id, in: chat.id)
         let childReader = SubagentReaderController(model: app)
         self.childReader = childReader
         childReader.install(in: host, top: host.topAnchor)
         childReader.sync()
+        let promptRendered = wait(120) {
+            childReader.sync()
+            return (SelfTest.js(childReader.reader.page,
+                                "Array.from(document.querySelectorAll('section.entry.user')).some(e => e.textContent.includes('\(taskToken)'))") as? Bool) == true
+        }
+        report("child task renders in its own reader", promptRendered)
         let rendered = wait(120) {
             childReader.sync()
             guard let path = app.subagentBrowser.selection?.agent.transcript,
                   FileManager.default.fileExists(atPath: path) else { return false }
             return (SelfTest.js(childReader.reader.page,
-                                "Array.from(document.querySelectorAll('section.entry.assistant')).some(e => e.innerText.includes('\(token)'))") as? Bool) == true
+                                "Array.from(document.querySelectorAll('section.entry.assistant')).filter(e => e.textContent.includes('\(token)')).length === 1") as? Bool) == true
         }
         report("child transcript is found and renders in its reader", rendered,
                "transcript=\(app.subagentBrowser.selection?.agent.transcript ?? "not found").")
@@ -734,5 +747,12 @@ private final class LiveCheckSession {
         }
         report("completed child leaves open sidebar list", retired,
                "open=\(app.subagentBrowser.count(for: chat.id)).")
+        report("finished child keeps its final answer visible", rendered && retired && !childReader.root.isHidden &&
+               (SelfTest.js(childReader.reader.page,
+                            "Array.from(document.querySelectorAll('section.entry.assistant')).filter(e => e.textContent.includes('\(token)')).length === 1") as? Bool) == true)
+        _ = app.backFromSubagent()
+        childReader.sync()
+        report("back returns to parent without closing it", childReader.root.isHidden &&
+               app.subagentBrowser.selection == nil && app.selectedChatID == chat.id && chat.terminal?.processExited == false)
     }
 }

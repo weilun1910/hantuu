@@ -8,6 +8,7 @@ extension SelfTest {
         Paths.ensure(base)
         subagentNavigation(base)
         subagentPolling(base)
+        subagentProviderMessages()
         subagentTranscripts(base)
         subagentSidebarSnapshots(dir, fixtureDirectory: base)
     }
@@ -127,6 +128,89 @@ extension SelfTest {
         check("subagent polling: Codex child completion retires the whole finished branch", done.subagents.allSatisfy { !$0.state.isActive })
     }
 
+    /// Sanitized shapes from Claude Code 2.1.322 and Codex 0.167.1 child transcripts.
+    private static func subagentProviderMessages() {
+        func parse(_ parser: inout ClaudeTranscriptParser, _ object: [String: Any]) -> [ReaderEntry] {
+            parser.parse(line: Data(WorkFixture.line(object).utf8))
+        }
+        func claude(_ id: String, _ type: String, _ content: Any) -> [String: Any] {
+            ["uuid": id, "type": type, "isSidechain": true, "agentId": "fixture-child",
+             "sessionId": "fixture-parent", "message": ["role": type, "content": content]]
+        }
+        var parser = ClaudeTranscriptParser(scope: .subagent)
+        let task = claude("task", "user", "Inspect the child conversation")
+        let initial = parse(&parser, task)
+        check("subagent Claude: initial plain-string task is attributed to the parent", initial.first?.kind == .user && initial.first?.author == "Parent")
+        var meta = claude("reminder", "user", "<system-reminder>Use the final-report tool.</system-reminder>")
+        meta["isMeta"] = true
+        check("subagent Claude: injected reminders and request bookkeeping stay hidden",
+              parse(&parser, meta).isEmpty &&
+              parse(&parser, ["type": "api-request-blob", "message": ["content": "internal fixture"]]).isEmpty &&
+              parse(&parser, ["type": "attachment", "attachment": ["type": "agent_status"]]).isEmpty)
+        let handback = claude("report", "assistant", [
+            ["type": "tool_use", "id": "handback", "name": "SubagentHandback",
+             "input": ["message": "The **child report** is complete.\n\n- Checked the renderer."]]
+        ])
+        let report = parse(&parser, handback)
+        check("subagent Claude: SubagentHandback renders its full report as an answer",
+              report.count == 1 && report.first?.kind == .assistant &&
+              report.first?.text == "The **child report** is complete.\n\n- Checked the renderer." && report.first?.id == "report-0")
+        let receipt = claude("receipt", "user", [
+            ["type": "tool_result", "tool_use_id": "handback", "content": [["type": "text", "text": "Report delivered to your caller."]]]
+        ])
+        check("subagent Claude: handback receipt does not duplicate the answer", parse(&parser, receipt).isEmpty)
+        let failure = claude("failure", "user", [
+            ["type": "tool_result", "tool_use_id": "handback", "is_error": true, "content": "Delivery failed"]
+        ])
+        check("subagent Claude: handback delivery errors remain visible", parse(&parser, failure).first?.kind == .error)
+        let empty = claude("empty", "assistant", [["type": "tool_use", "name": "SubagentHandback", "input": ["message": " "]]])
+        check("subagent Claude: malformed handback retains a tool row", parse(&parser, empty).first?.kind == .tool)
+        let plain = claude("plain", "assistant", [["type": "text", "text": "An ordinary final answer"]])
+        check("subagent Claude: ordinary final text is still supported", parse(&parser, plain).first?.text == "An ordinary final answer")
+        var main = ClaudeTranscriptParser()
+        check("subagent Claude: the parent reader still excludes child messages",
+              parse(&main, task).isEmpty && parse(&main, handback).isEmpty)
+
+        func codex(_ type: String, _ payload: [String: Any]) -> Data {
+            Data(WorkFixture.line(["type": type, "timestamp": "2026-11-11T12:00:00Z", "payload": payload]).utf8)
+        }
+        func inbound(_ text: String, recipient: String = "/root/child") -> Data {
+            codex("response_item", ["type": "agent_message", "id": "message-id", "author": "/root", "recipient": recipient,
+                                    "content": [["type": "input_text", "text": text],
+                                                ["type": "encrypted_content", "encrypted_content": "opaque-fixture"]]])
+        }
+        let metadata = codex("session_meta", ["id": "child", "thread_source": "subagent", "parent_thread_id": "parent",
+                                              "source": ["subagent": ["thread_spawn": ["agent_path": "/root/child", "parent_thread_id": "parent", "depth": 1]]]])
+        var child = CodexTranscriptParser(scope: .subagent)
+        _ = child.parse(line: metadata)
+        let prompt = "Message Type: NEW_TASK\nTask name: /root/child\nSender: /root\nPayload:\nCheck the child reader"
+        let first = child.parse(line: inbound(prompt))
+        check("subagent Codex: task text renders with its sender and without internal envelope",
+              first.count == 1 && first.first?.kind == .user && first.first?.text == "Check the child reader" && first.first?.author == "/root")
+        let followup = child.parse(line: inbound("Message Type: MESSAGE\nSender: /root\nPayload:\nCheck the final output too"))
+        check("subagent Codex: followups have distinct entries", followup.first?.kind == .user && followup.first?.id != first.first?.id)
+        check("subagent Codex: messages for another child stay out", child.parse(line: inbound("Unrelated task", recipient: "/root/other")).isEmpty)
+        let output = codex("response_item", ["type": "message", "role": "assistant", "phase": "final_answer",
+                                            "content": [["type": "output_text", "text": "Final child answer"]]])
+        check("subagent Codex: final answer renders once without the completion echo",
+              child.parse(line: output).map(\.text) == ["Final child answer"] &&
+              child.parse(line: codex("event_msg", ["type": "task_complete", "last_agent_message": "Final child answer"])).isEmpty)
+        check("subagent Codex: encrypted-only and malformed messages stay hidden",
+              child.parse(line: codex("response_item", ["type": "agent_message", "author": "/root", "recipient": "/root/child",
+                                                        "content": [["type": "encrypted_content", "encrypted_content": "opaque-fixture"]]])).isEmpty &&
+              child.parse(line: codex("response_item", ["type": "agent_message", "content": [["type": "input_text", "text": "Missing sender"]]])).isEmpty)
+        var bounded = CodexTranscriptParser(scope: .subagent)
+        check("subagent Codex: a bounded tail can read followups without metadata", bounded.parse(line: inbound(prompt)).first?.text == "Check the child reader")
+        check("subagent Codex: unknown envelopes and mismatched sender text are preserved",
+              CodexTranscriptParser.agentMessageText(prompt, author: "/root/other") == prompt &&
+              CodexTranscriptParser.agentMessageText("Plain task text", author: "/root") == "Plain task text")
+        var parent = CodexTranscriptParser()
+        check("subagent Codex: main scope does not import child task envelopes", parent.parse(line: inbound(prompt)).isEmpty)
+        let legacy = child.parse(line: codex("response_item", ["type": "message", "role": "user",
+                                                               "content": [["type": "input_text", "text": "Legacy child task"]]]))
+        check("subagent Codex: ordinary user-message tasks remain supported", legacy.first?.text == "Legacy child task" && legacy.first?.author == "Parent")
+    }
+
     private static func subagentTranscripts(_ base: URL) {
         let claude = base.appendingPathComponent("sidechain.jsonl")
         func message(_ id: String, _ type: String, _ content: Any) -> String {
@@ -145,6 +229,18 @@ extension SelfTest {
         check("subagent reader: a second poll never duplicates entries", follower.poll().isEmpty)
         WorkFixture.append(claude, [message("later", "assistant", "New child output")])
         check("subagent reader: follows only new complete lines", follower.poll().map(\.text) == ["New child output"])
+        let splitReport = Data((message("split", "assistant", [["type": "tool_use", "id": "split-handback", "name": "SubagentHandback", "input": ["message": "A report written in two parts"]]]) + "\n").utf8)
+        if let handle = try? FileHandle(forWritingTo: claude) {
+            defer { try? handle.close() }
+            _ = try? handle.seekToEnd()
+            let half = splitReport.count / 2
+            try? handle.write(contentsOf: splitReport.prefix(half))
+            check("subagent reader: a partial handback waits for its newline", follower.poll().isEmpty)
+            try? handle.write(contentsOf: splitReport.dropFirst(half))
+            check("subagent reader: the completed handback arrives once", follower.poll().map(\.text) == ["A report written in two parts"] && follower.poll().isEmpty)
+        } else {
+            check("subagent reader: partial-write fixture opens", false)
+        }
         WorkFixture.write(claude, [message("reset", "user", "Replacement sidechain")])
         _ = follower.poll()
         check("subagent reader: truncation preserves sidechain mode", follower.entries.count == 1 && follower.entries.first?.text == "Replacement sidechain")
@@ -152,9 +248,9 @@ extension SelfTest {
 
         let codex = base.appendingPathComponent("child-rollout.jsonl")
         let codexLines = [
-            #"{"type":"session_meta","payload":{"id":"child","parent_thread_id":"parent","thread_source":"subagent"}}"#,
-            #"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Check Codex rendering"}]}}"#,
-            #"{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Codex child answer"}]}}"#,
+            #"{"type":"session_meta","payload":{"id":"child","parent_thread_id":"parent","thread_source":"subagent","agent_path":"/root/child"}}"#,
+            #"{"type":"response_item","payload":{"type":"agent_message","author":"/root","recipient":"/root/child","content":[{"type":"input_text","text":"Message Type: NEW_TASK\nSender: /root\nPayload:\nCheck Codex rendering"},{"type":"encrypted_content","encrypted_content":"opaque-fixture"}]}}"#,
+            #"{"type":"response_item","payload":{"type":"message","role":"assistant","phase":"commentary","content":[{"type":"output_text","text":"Codex child answer"}]}}"#,
             #"{"type":"response_item","payload":{"type":"function_call","name":"exec_command","arguments":"{\"cmd\":\"pwd\"}"}}"#,
             #"{"type":"response_item","payload":{"type":"function_call_output","output":"Fixture command output"}}"#,
         ]
@@ -176,7 +272,6 @@ extension SelfTest {
         model.projects = [project]
         model.chats = [chat]
         var agent = SubagentInfo(id: "reader", title: "Inspect the reader")
-        agent.transcript = claude.path
         model.updateSubagents([SidebarSubagent(agent)], for: chat.id)
         model.selectSubagent(agent.id, in: chat.id)
         let window = makeWindow()
@@ -186,12 +281,22 @@ extension SelfTest {
         controller.sync()
         let page = controller.reader.page
         check("subagent reader: read-only view has no native message box", !controller.root.subviews.contains { $0 is ComposerBox })
-        check("subagent reader: the real reader renders a Claude sidechain", waitUntil(10) { page.ready && (js(page, "document.body.textContent.includes('Check the child reader') && document.querySelector('strong') !== null") as? Bool) == true })
-        WorkFixture.append(claude, [message("final", "assistant", "Final child output")])
-        agent.state = .done
+        check("subagent reader: selection can precede transcript discovery", waitUntil(10) {
+            page.ready && (js(page, "document.body.textContent.includes('Waiting for this subagent')") as? Bool) == true
+        })
+        agent.transcript = claude.path
         model.updateSubagents([SidebarSubagent(agent)], for: chat.id)
         controller.sync()
-        check("subagent reader: retirement keeps the view and follows final output", !controller.root.isHidden && model.subagentBrowser.selection?.agent.detail == "Finished" && waitUntil(5) { (js(page, "document.body.textContent.includes('Final child output')") as? Bool) == true })
+        check("subagent reader: the real reader renders a Claude sidechain", waitUntil(10) { page.ready && (js(page, "document.body.textContent.includes('Check the child reader') && document.querySelector('strong') !== null") as? Bool) == true })
+        agent.state = .done
+        agent.transcript = nil
+        model.updateSubagents([SidebarSubagent(agent)], for: chat.id)
+        controller.sync()
+        WorkFixture.append(claude, [message("final", "assistant", [["type": "tool_use", "id": "final-handback", "name": "SubagentHandback", "input": ["message": "Final **child output**"]]])])
+        let handbackVisible = "Array.from(document.querySelectorAll('section.entry.assistant')).filter(e => e.textContent.includes('Final child output')).length === 1"
+        check("subagent reader: retirement retains the path and renders a late handback", !controller.root.isHidden && model.subagentBrowser.selection?.agent.detail == "Finished" && waitUntil(5) { (js(page, handbackVisible) as? Bool) == true })
+        controller.reader.reload()
+        check("subagent reader: reload preserves one complete handback answer", waitUntil(5) { (js(page, handbackVisible) as? Bool) == true })
         _ = model.backFromSubagent()
         controller.sync()
         check("subagent reader: navigation hides the finished view", controller.root.isHidden)
@@ -209,7 +314,20 @@ extension SelfTest {
         model.updateSubagents([SidebarSubagent(agent)], for: codexChat.id)
         model.selectSubagent(agent.id, in: codexChat.id)
         controller.sync()
-        check("subagent reader: the real reader renders a Codex child", waitUntil(5) { (js(page, "document.body.textContent.includes('Codex child answer')") as? Bool) == true })
+        check("subagent reader: the real reader renders a Codex task and child answer", waitUntil(5) {
+            (js(page, "document.body.textContent.includes('Check Codex rendering') && document.body.textContent.includes('Codex child answer') && document.querySelector('.sender-label').textContent === 'From /root' && !document.body.textContent.includes('opaque-fixture') && !document.body.textContent.includes('Message Type:')") as? Bool) == true
+        })
+        agent.state = .done
+        model.updateSubagents([SidebarSubagent(agent)], for: codexChat.id)
+        controller.sync()
+        WorkFixture.append(codex, [
+            #"{"type":"response_item","payload":{"type":"agent_message","author":"/root","recipient":"/root/child","content":[{"type":"input_text","text":"Check the last result too"}]}}"#,
+            #"{"type":"response_item","payload":{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"Codex final result"}]}}"#,
+            #"{"type":"event_msg","payload":{"type":"task_complete","last_agent_message":"Codex final result"}}"#,
+        ])
+        check("subagent reader: retired Codex selection follows the final message once", waitUntil(5) {
+            (js(page, "document.body.textContent.includes('Check the last result too') && Array.from(document.querySelectorAll('section.entry.assistant')).filter(e => e.textContent.includes('Codex final result')).length === 1") as? Bool) == true
+        })
         if let event = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: .command, timestamp: 0, windowNumber: window.windowNumber, context: nil, characters: "[", charactersIgnoringModifiers: "[", isARepeat: false, keyCode: 33) {
             check("subagent reader: Cmd-[ returns to the parent", controller.handle(event) == nil && model.subagentBrowser.selection == nil)
         }

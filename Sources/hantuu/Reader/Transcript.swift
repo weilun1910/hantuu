@@ -31,6 +31,8 @@ struct ReaderEntry: Codable, Equatable {
     var replacesPendingIDs: [String]? = nil
     var deliveryRequested: Bool? = nil
     var sendNowLabel: String? = nil
+    /// A delegated task or followup comes from another agent, not the person at the keyboard.
+    var author: String? = nil
 }
 
 /// Only a subagent's own file includes sidechain lines and successful tool results.
@@ -175,12 +177,16 @@ struct ClaudeTranscriptParser: TranscriptParser {
         if s.isEmpty && images.isEmpty { return [] }
         // Pasted images show as "[Image #1]" placeholders in the prompt text; the image
         // itself arrives as an image block and is shown below the prose.
-        return [ReaderEntry(id: id, kind: .user, text: s, images: images, time: time)]
+        return [ReaderEntry(id: id, kind: .user, text: s, images: images, time: time,
+                            author: scope == .subagent ? "Parent" : nil)]
     }
 
     private mutating func toolResult(_ item: [String: Any], id: String, time: String?) -> [ReaderEntry] {
         let toolID = item["tool_use_id"] as? String ?? ""
         let name = toolNames[toolID] ?? "Tool"
+        // Handback carries the answer in its call. Its successful receipt is bookkeeping,
+        // but a rejected or failed delivery still needs to be visible below.
+        if scope == .subagent, name == "SubagentHandback", item["is_error"] as? Bool != true { return [] }
         var text = ""
         var images: [String] = []
         if let s = item["content"] as? String {
@@ -226,6 +232,14 @@ struct ClaudeTranscriptParser: TranscriptParser {
                 let name = item["name"] as? String ?? "Tool"
                 if let tid = item["id"] as? String { toolNames[tid] = name }
                 let input = item["input"] as? [String: Any] ?? [:]
+                // Newer Claude children finish through this tool instead of a text block.
+                // Treat the report as their answer, not a collapsed tool with no content.
+                if scope == .subagent, name == "SubagentHandback",
+                   let report = input["message"] as? String,
+                   !report.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    out.append(ReaderEntry(id: eid, kind: .assistant, text: report, time: time))
+                    continue
+                }
                 out.append(Self.toolEntry(name: name, input: input, id: eid, time: time))
             default:
                 break // thinking, redacted_thinking: hidden
@@ -353,6 +367,7 @@ struct CodexTranscriptParser: TranscriptParser {
     private var previousModel: String?
     private var lastCompactionRecord: String?
     private var sideBoundarySeen = false
+    private var agentPath: String?
 
     mutating func parse(line: Data) -> [ReaderEntry] {
         lineNo += 1
@@ -395,6 +410,30 @@ struct CodexTranscriptParser: TranscriptParser {
         }
 
         switch (type, ptype) {
+        case ("session_meta", _):
+            let source = p["source"] as? [String: Any]
+            let subagent = source?["subagent"] as? [String: Any]
+            let spawn = subagent?["thread_spawn"] as? [String: Any]
+            agentPath = (p["agent_path"] as? String) ?? (spawn?["agent_path"] as? String)
+            return []
+
+        case ("response_item", "agent_message"):
+            // Codex children receive their task and followups as collaboration messages.
+            // Keep the sender and plaintext payload, never the opaque encrypted block.
+            // A bounded tail may start after the session metadata.
+            guard scope == .subagent,
+                  let author = p["author"] as? String, !author.isEmpty,
+                  let recipient = p["recipient"] as? String, !recipient.isEmpty,
+                  agentPath == nil || recipient == agentPath,
+                  let content = p["content"] as? [[String: Any]] else { return [] }
+            let text = content.compactMap { item -> String? in
+                guard item["type"] as? String == "input_text" else { return nil }
+                return item["text"] as? String
+            }.joined(separator: "\n\n").trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !text.isEmpty else { return [] }
+            lastCompactionRecord = nil
+            return [ReaderEntry(id: id, kind: .user, text: Self.agentMessageText(text, author: author), time: time, author: author)]
+
         case ("response_item", "message"):
             let role = p["role"] as? String
             let content = p["content"] as? [[String: Any]] ?? []
@@ -413,7 +452,8 @@ struct CodexTranscriptParser: TranscriptParser {
                 lastCompactionRecord = nil
                 let kept = texts.filter { !Self.isContextBlock($0) }
                 if kept.isEmpty && images.isEmpty { return [] }
-                return [ReaderEntry(id: id, kind: .user, text: kept.joined(separator: "\n\n").trimmingCharacters(in: .whitespacesAndNewlines), images: images, time: time)]
+                return [ReaderEntry(id: id, kind: .user, text: kept.joined(separator: "\n\n").trimmingCharacters(in: .whitespacesAndNewlines), images: images, time: time,
+                                    author: scope == .subagent ? "Parent" : nil)]
             }
             if role == "assistant" {
                 return Self.answerEntries(texts.joined(separator: "\n\n"), id: id, time: time)
@@ -459,6 +499,17 @@ struct CodexTranscriptParser: TranscriptParser {
         default:
             return []
         }
+    }
+
+    /// Strip only a recognized collaboration envelope. Unknown formats remain readable.
+    static func agentMessageText(_ text: String, author: String) -> String {
+        guard let delimiter = text.range(of: "\nPayload:\n") else { return text }
+        let header = text[..<delimiter.lowerBound].split(separator: "\n").map(String.init)
+        guard let first = header.first, ["Message Type: NEW_TASK", "Message Type: MESSAGE", "Message Type: FINAL_ANSWER"].contains(first),
+              header.contains("Sender: " + author),
+              header.dropFirst().allSatisfy({ $0.hasPrefix("Task name: ") || $0.hasPrefix("Sender: ") }) else { return text }
+        let payload = String(text[delimiter.upperBound...]).trimmingCharacters(in: .whitespacesAndNewlines)
+        return payload.isEmpty ? text : payload
     }
 
     /// Codex puts tags meant for its own UI into an answer, and its TUI parses them out.

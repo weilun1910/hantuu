@@ -528,6 +528,7 @@ body.reader.main .entry.user {
 }
 body.reader.main .entry.user:first-child { margin-top: 0; }
 body.reader.main .entry.user > .label { display: none; }
+body.reader.main .entry.user > .sender-label { display: block; text-align: right; margin-bottom: 5px; }
 body.reader.main .entry.user > .md {
   max-width: 82%;
   background: var(--bubble);

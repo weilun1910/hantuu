@@ -104,7 +104,7 @@
     const shown = new Set();
     switch (e.kind) {
       case 'user':
-        el.appendChild(label('You'));
+        el.appendChild(label(e.author ? 'From ' + e.author : 'You', e.author ? 'sender-label' : ''));
         if (e.pending) updatePending(el, e);
         if (e.text) el.appendChild(body(e.text, e.links, true));
         break;
