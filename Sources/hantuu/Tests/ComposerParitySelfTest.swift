@@ -13,6 +13,27 @@ extension SelfTest {
               ReaderSubmissionGuard.refusal(screen: "Select a model\nenter to select", waiting: false, command: nil) != nil)
         check("submission: update prompt blocks a command",
               ReaderSubmissionGuard.refusal(screen: "Update available\n/model  Choose model\nenter to select", waiting: false, command: "/model") != nil)
+        let permissionSuggestions = """
+        /permissions  Manage permission rules
+        /fewer-permission-prompts  Pre-approve safe read-only commands based on your usage
+        ────────────────────
+        ❯ /pe
+        ────────────────────
+        ⏵⏵ auto mode on (shift+tab to cycle)
+        """
+        check("submission: permission suggestions cannot interrupt the literal command token",
+              ReaderSubmissionGuard.refusal(screen: permissionSuggestions, waiting: false, command: "/permissions") == nil)
+        check("submission: suggestions never exempt an actual approval request",
+              ReaderSubmissionGuard.refusal(screen: permissionSuggestions + "\nApprove this command?", waiting: false, command: "/permissions") != nil)
+        check("submission: suggestions never exempt trust or update prompts",
+              ReaderSubmissionGuard.refusal(screen: permissionSuggestions + "\nDo you trust this folder?", waiting: false, command: "/permissions") != nil &&
+              ReaderSubmissionGuard.refusal(screen: permissionSuggestions + "\nUpdate available", waiting: false, command: "/permissions") != nil)
+        // Claude 2.1.322's installed Permissions module exposes this ordinary-list footer.
+        // Its unnumbered rule layout cannot be mirrored safely, but must trigger a peek.
+        let permissionsRules = "Permissions\nAllow  Ask  Deny  Workspace\n❯ Add a new rule...\n↑/↓ to navigate | Enter to select | ←/→ to switch | Esc to cancel"
+        check("permissions: native unnumbered rules retain the terminal fallback",
+              ReaderMenuParser.parse(permissionsRules, agent: "claude") == nil &&
+              ReaderCommandLogic.autoPeek(sentAt: Date(), now: Date(), menu: TerminalScreen.analyze(permissionsRules).menu))
 
         let terminalIdentity = NSObject()
         for provider in ["claude", "codex"] {

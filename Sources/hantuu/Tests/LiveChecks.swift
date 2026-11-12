@@ -149,6 +149,36 @@ enum LiveCheckRules {
         text.split(whereSeparator: \.isWhitespace).joined(separator: " ")
     }
 
+    /// Diagnostic only. Replay the provider parser so Claude's identified paste envelope
+    /// and queued/user deduplication are exactly the same as the production follower.
+    static func reviewReceipts(_ data: Data, agent: String, text: String) -> (user: Int, queued: Int) {
+        var parser: TranscriptParser
+        if agent == "claude" { parser = ClaudeTranscriptParser() }
+        else { parser = CodexTranscriptParser() }
+        var users = 0, queued = 0
+        for record in data.split(separator: 10) {
+            let line = Data(record)
+            guard parser.parse(line: line).contains(where: { $0.kind == .user && $0.text == text }) else { continue }
+            let object = (try? JSONSerialization.jsonObject(with: line)) as? [String: Any]
+            let attachment = object?["attachment"] as? [String: Any]
+            if attachment?["type"] as? String == "queued_command" { queued += 1 }
+            else { users += 1 }
+        }
+        return (users, queued)
+    }
+
+    /// Native records only. Prose about compaction and auto-update notices prove nothing.
+    static func claudeCompactionIDs(_ data: Data) -> Set<String> {
+        Set(data.split(separator: 10).enumerated().compactMap { index, record -> String? in
+            guard let object = (try? JSONSerialization.jsonObject(with: Data(record))) as? [String: Any],
+                  object["isSidechain"] as? Bool != true else { return nil }
+            let boundary = object["type"] as? String == "system" && object["subtype"] as? String == "compact_boundary"
+            let summary = object["type"] as? String == "user" && object["isCompactSummary"] as? Bool == true
+            guard boundary || summary else { return nil }
+            return object["uuid"] as? String ?? "record-\(index)"
+        })
+    }
+
     /// Following is about new transcript identity, even when a model repeats old prose.
     static func replyAfter(_ prompt: String, entries: [ReaderEntry], previousIDs: Set<String>) -> ReaderEntry? {
         guard let index = entries.lastIndex(where: { $0.kind == .user && $0.text == prompt && !previousIDs.contains($0.id) }) else { return nil }
@@ -168,6 +198,39 @@ extension SelfTest {
               LiveCheckRules.selection("claude,typo", allowed: LiveCheckRules.agents) == nil)
         check("live checks: selectors trim, deduplicate and retain stable order",
               LiveCheckRules.selection("codex, claude,codex", allowed: LiveCheckRules.agents) == ["claude", "codex"])
+        func records(_ objects: [[String: Any]]) -> Data {
+            objects.reduce(into: Data()) { data, object in
+                data.append(try! JSONSerialization.data(withJSONObject: object)); data.append(10)
+            }
+        }
+        let review = "Please address this review comment on your changes:\n\n1. fixture.swift:1\nUse the supplied value."
+        let claudeReview = records([["type": "user", "uuid": "review-user", "message": ["role": "user",
+            "content": "\n\n<pasted_content id=\"d343\">\n" + review + "\n</pasted_content id=\"d343\">\n"]]])
+        let directReceipt = LiveCheckRules.reviewReceipts(claudeReview, agent: "claude", text: review)
+        check("live checks: a Claude review receipt does not require an assistant reply", directReceipt.user == 1 && directReceipt.queued == 0)
+        let claudeQueued = records([
+            ["type": "attachment", "uuid": "review-queued", "attachment": ["type": "queued_command", "origin": ["kind": "human"], "prompt": review, "source_uuid": "review-source"]],
+            ["type": "user", "uuid": "review-source", "message": ["role": "user", "content": review]]
+        ])
+        let queuedReceipt = LiveCheckRules.reviewReceipts(claudeQueued, agent: "claude", text: review)
+        check("live checks: queued review and its user echo are one receipt", queuedReceipt.user == 0 && queuedReceipt.queued == 1)
+        let codexReview = records([
+            ["type": "event_msg", "payload": ["type": "user_message", "message": review]],
+            ["type": "response_item", "payload": ["type": "message", "role": "user", "content": [["type": "input_text", "text": review]]]]
+        ])
+        let codexReceipt = LiveCheckRules.reviewReceipts(codexReview, agent: "codex", text: review)
+        check("live checks: Codex review diagnostics retain canonical receipt deduplication", codexReceipt.user == 1 && codexReceipt.queued == 0)
+        let compaction = records([
+            ["type": "system", "subtype": "compact_boundary", "uuid": "boundary", "compactMetadata": ["trigger": "manual", "preTokens": 100]],
+            ["type": "user", "uuid": "summary", "isCompactSummary": true, "message": ["role": "user", "content": "Summary"]],
+            ["type": "system", "subtype": "compact_boundary", "uuid": "child-boundary", "isSidechain": true]
+        ])
+        check("live checks: compact evidence uses native boundary and summary records", LiveCheckRules.claudeCompactionIDs(compaction) == ["boundary", "summary"])
+        let agreement = records([["type": "assistant", "uuid": "agreement", "message": ["content": "I compacted the conversation."]]])
+        check("live checks: assistant agreement cannot establish compaction", LiveCheckRules.claudeCompactionIDs(agreement).isEmpty)
+        let updateNotice = "✘ Auto-update failed | Run claude doctor\n────────────────────\n❯\n────────────────────\n⏵⏵ auto mode on (shift+tab to cycle)"
+        check("live checks: failed background update notice is not an update dialog",
+              LiveCheckRules.blocker(updateNotice) == nil && ReaderSubmissionGuard.refusal(screen: updateNotice, waiting: false, command: "/compact") == nil)
         var sideAnswer = SideQuestion(question: "Fixture")
         sideAnswer.state = .answered
         sideAnswer.answer = "fixture-token"
@@ -418,8 +481,9 @@ private final class LiveCheckSession {
 
     private func report(_ name: String, _ ok: Bool, _ detail: String = "") {
         let seen = LiveCheckRules.oneLine(detail)
+        let diagnostic = [failure, detail.isEmpty ? nil : detail].compactMap { $0 }.joined(separator: " ")
         SelfTest.check("live \(agent) \(feature): \(name)" + (ok && !seen.isEmpty ? " - " + seen : ""), ok,
-                       LiveCheckRules.oneLine(failure ?? detail))
+                       LiveCheckRules.oneLine(diagnostic))
     }
 
     private func safe(allowingMenu: Bool = false) -> Bool {
@@ -1230,7 +1294,8 @@ private final class LiveCheckSession {
         let wrong = service.send(comments: [rejectedComment], folder: folder.path, chatID: wrongChat, model: app) { _ in
             self.report("stale-chat callback must never run", false)
         }
-        report("stale chat is rejected without pending input", !wrong && chat.pendingMessages.isEmpty && service.latest(for: wrongChat)?.state == .failed)
+        report("stale chat is rejected without pending input", !wrong && chat.pendingMessages.isEmpty && service.latest(for: wrongChat)?.state == .failed,
+               "accepted=\(wrong), pending=\(chat.pendingMessages.entries.count), batch=\(service.latest(for: wrongChat)?.state.rawValue ?? "missing"), comments=1, elapsed=0s; \(String(screen.suffix(450)))")
         guard !wrong else { return }
 
         for busy in [false, true] {
@@ -1240,12 +1305,22 @@ private final class LiveCheckSession {
             let c = ReviewComment(root: folder.path, path: "review-fixture.txt", side: "new", start: 1, end: 1,
                 quoted: ["This is a synthetic review anchor; do not access a file."],
                 body: "This is a delivery test. Do not use tools or change files. Reply only \(token).", revision: "fixture-1")
+            let expectedText = CommentMessage.build([c], folder: folder.path)
             var retained = [c]
             var receipts = 0
+            var acknowledgedBeforeReceipt = false
+            var sentAt = ProcessInfo.processInfo.systemUptime
+            var acknowledgedAt: TimeInterval?
+            var firstReaderReceiptAt: TimeInterval?
+            var stages: [String] = []
             func submitReview() -> Bool {
                 reader.composer.textView.text = draft
+                sentAt = ProcessInfo.processInfo.systemUptime
                 return service.send(comments: retained, folder: folder.path, chatID: chat.id, model: app) { delivered in
                     receipts += 1
+                    acknowledgedAt = ProcessInfo.processInfo.systemUptime - sentAt
+                    acknowledgedBeforeReceipt = acknowledgedBeforeReceipt ||
+                        !chat.allEntries.contains { $0.kind == .user && $0.text == expectedText }
                     retained.removeAll { delivered.contains($0) }
                 }
             }
@@ -1263,24 +1338,64 @@ private final class LiveCheckSession {
                     sent = submitReview()
                     return true
                 }
-                report("review queue starts during real work", working, String(screen.suffix(450)))
+                report("review queue starts during real work", working,
+                       "accepted=\(sent), pending=\(chat.pendingMessages.entries.map { $0.pendingState ?? "unknown" }), composer=\(String(reflecting: reader.composer.textView.string)), comments left=\(retained.count), elapsed=\(String(format: "%.2f", Date().timeIntervalSince(began)))s; \(String(screen.suffix(450)))")
                 guard working else { return }
             } else { sent = submitReview() }
             let batch = service.latest(for: chat.id)
+            func observe() {
+                guard let batch else { return }
+                let elapsed = ProcessInfo.processInfo.systemUptime - sentAt
+                let stage = chat.pendingMessages.stage(id: batch.id)?.rawValue ?? "removed"
+                if stages.last?.hasPrefix(stage + "@") != true { stages.append("\(stage)@\(String(format: "%.2f", elapsed))s") }
+                if firstReaderReceiptAt == nil, chat.allEntries.contains(where: { $0.kind == .user && $0.text == batch.text }) {
+                    firstReaderReceiptAt = elapsed
+                }
+            }
+            func diagnostic() -> String {
+                observe()
+                let bytes = chat.transcriptPath.flatMap { try? Data(contentsOf: URL(fileURLWithPath: $0)) } ?? Data()
+                let raw = LiveCheckRules.reviewReceipts(bytes, agent: agent, text: batch?.text ?? "")
+                let pending = chat.pendingMessages.entries.first { $0.id == batch?.id }
+                let stage = batch.flatMap { chat.pendingMessages.stage(id: $0.id) }?.rawValue ?? "removed"
+                let recorded = chat.allEntries.filter { $0.kind == .user && $0.text == batch?.text }.count
+                return [
+                    "pending=\(stage), detail=\(pending?.pendingDetail ?? "none"), batch=\(service.latest(for: chat.id)?.state.rawValue ?? "missing")",
+                    "raw user receipts=\(raw.user), raw queued receipts=\(raw.queued), reader receipts=\(recorded), callbacks=\(receipts), callback before receipt=\(acknowledgedBeforeReceipt)",
+                    "composer=\(String(reflecting: reader.composer.textView.string)), comments left=\(retained.count)",
+                    "elapsed=\(String(format: "%.2f", ProcessInfo.processInfo.systemUptime - sentAt))s",
+                    "first reader receipt=\(firstReaderReceiptAt.map { String(format: "%.2f", $0) } ?? "none")s, callback=\(acknowledgedAt.map { String(format: "%.2f", $0) } ?? "none")s",
+                    "stages=\(stages.joined(separator: ",")), transcript=\(chat.transcriptPath ?? "missing"), follower=\(chat.follower?.health.state ?? "missing")",
+                    String(screen.suffix(450))
+                ].joined(separator: "; ")
+            }
             report("\(busy ? "queued" : "idle") review retains comments and draft before acknowledgement",
                 sent && retained == [c] && reader.composer.textView.string == draft && receipts == 0 &&
-                batch?.state == (busy ? .queued : .sending) && chat.pendingMessages.entries.contains { $0.id == batch?.id })
+                batch?.state == (busy ? .queued : .sending) && chat.pendingMessages.entries.contains { $0.id == batch?.id }, diagnostic())
             guard sent, let batch else { return }
             let delivered = wait(busy ? 300 : 120) {
-                service.latest(for: chat.id)?.state == .delivered && self.reply(token) &&
-                self.reader?.composerMode == .ready && !TerminalScreen.analyze(self.screen).busy
+                observe()
+                // Delivery is acknowledged by the provider's user/queued record. An API
+                // stall after that receipt must not make it look like comments were lost.
+                return service.latest(for: chat.id)?.state == .delivered && receipts == 1 &&
+                    !acknowledgedBeforeReceipt && retained.isEmpty &&
+                    chat.allEntries.contains { $0.kind == .user && $0.text == batch.text } &&
+                    !chat.pendingMessages.entries.contains { $0.id == batch.id }
             }
             report("\(busy ? "queued" : "idle") review removes only after matching receipt",
-                delivered && receipts == 1 && retained.isEmpty && !chat.pendingMessages.entries.contains { $0.id == batch.id })
+                delivered, diagnostic())
+            let routed = delivered && wait(10) {
+                chat.allEntries.filter { $0.kind == .user && $0.text == batch.text }.count == 1 &&
+                    reader.composer.textView.string == draft && self.countUser(batch.text, pending: true) == 0
+            }
             report("review routes once to owning chat and preserves composer",
-                delivered && chat.allEntries.filter { $0.kind == .user && $0.text == batch.text }.count == 1 &&
-                reader.composer.textView.string == draft && countUser(batch.text, pending: true) == 0)
+                routed, diagnostic())
             guard delivered else { return }
+            let answered = wait(120) {
+                self.reply(token) && reader.composerMode == .ready && !TerminalScreen.analyze(self.screen).busy
+            }
+            report("\(busy ? "queued" : "idle") acknowledged review receives provider reply", answered, diagnostic())
+            guard answered else { return }
         }
     }
 
@@ -1482,7 +1597,7 @@ private final class LiveCheckSession {
     /// Opt-in only. Exercises the mounted controller against a disposable provider session.
     /// No picker option, trust dialog, permission request or update prompt is accepted.
     func composerParity() {
-        guard let reader, let chat, safe() else { report("mounted composer", false); return }
+        guard let reader, let chat, let provider = chat.agent.transcript, safe() else { report("mounted composer", false); return }
         func descendants(_ view: NSView) -> [NSView] {
             [view] + view.subviews.flatMap { descendants($0) }
         }
@@ -1501,10 +1616,13 @@ private final class LiveCheckSession {
             button.performClick(nil)
             let marker = action == .permissions ? "permission" : action == .effort && agent == "claude" ? "effort" : "model"
             let opened = wait(15, allowingMenu: true) {
-                self.mode?.isPeeking(chat) == true && self.screen.lowercased().contains(marker) &&
-                    TerminalScreen.analyze(self.screen).menu != nil && !reader.isTyping
+                (self.mode?.isPeeking(chat) == true || reader.mirroredMenu != nil) && self.screen.lowercased().contains(marker) &&
+                    TerminalScreen.analyze(self.screen).menu != nil && !reader.isTyping &&
+                    CommandMenuScreen.rows(self.screen).isEmpty &&
+                    CommandMenuScreen.input(self.screen, agent: self.agent) != action.command(for: provider)
             }
-            report("\(action.label) opens actual native picker", opened, String(screen.suffix(450)))
+            report("\(action.label) opens actual native picker", opened,
+                   "mirrored=\(reader.mirroredMenu?.kind.rawValue ?? "none"), terminal fallback=\(self.mode?.isPeeking(chat) == true), pending=\(chat.pendingMessages.entries.map { $0.pendingDetail ?? $0.pendingState ?? "unknown" }); \(String(screen.suffix(450)))")
             guard opened, safe(allowingMenu: true) else { return }
             report("\(action.label) retains unsent text and caret", reader.composer.textView.string == draft &&
                    reader.composer.textView.selectedRange() == selection)
@@ -1681,6 +1799,22 @@ private final class LiveCheckSession {
         report("seed conversation exists before compaction", seeded)
         guard seeded else { return }
 
+        if agent == "claude" {
+            // A Stop hook and parsed answer can precede the native terminal's final
+            // redraw. /compact is not an immediate command, so wait for its idle input.
+            var calmReads = 0
+            let nativeReady = wait(15) {
+                let state = TerminalScreen.analyze(self.screen)
+                if state.ready && !state.busy && state.menu == nil && reader.composerMode == .ready &&
+                    !reader.isTyping && CommandMenuScreen.emptyInput(self.screen, agent: self.agent) {
+                    calmReads += 1
+                } else { calmReads = 0 }
+                return calmReads >= 2
+            }
+            report("native input is idle before non-immediate compact command", nativeReady, String(screen.suffix(1000)))
+            guard nativeReady else { return }
+        }
+
         let imageURL = dir.appendingPathComponent("command-arguments-\(agent).png")
         guard let bitmap = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 16, pixelsHigh: 16,
                                            bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true,
@@ -1695,6 +1829,7 @@ private final class LiveCheckSession {
             guard safe(), reader.composerMode == .ready else { report("next command ready", false); return }
             let previousIDs = Set(chat.allEntries.map(\.id))
             let transcriptOffset = chat.transcriptPath.flatMap { try? Data(contentsOf: URL(fileURLWithPath: $0)).count } ?? 0
+            let compactBefore = chat.transcriptPath.flatMap { try? Data(contentsOf: URL(fileURLWithPath: $0)) }.map(LiveCheckRules.claudeCompactionIDs) ?? []
             let baselineMarks = ComposerMessage.imageMarks(screen)
             var nativeImageSeen = false
             let previousPermit = reader.permitsSubmit
@@ -1710,8 +1845,16 @@ private final class LiveCheckSession {
                 ? "/plan Do not use tools or change files.\nReply only \(token)."
                 : "/compact Preserve the conversation token \(seedToken).\nKeep the summary brief. Do not use tools or change files."
             var currentPlanConfirmed = false
+            let began = ProcessInfo.processInfo.systemUptime
             let accepted = send(command)
+            let pendingID = chat.pendingMessages.entries.last { $0.text == command }?.id
+            var stages: [String] = []
+            var submittedAfter: TimeInterval?
             let dispatched = accepted && wait(120) {
+                let elapsed = ProcessInfo.processInfo.systemUptime - began
+                let stage = pendingID.flatMap { chat.pendingMessages.stage(id: $0) }?.rawValue ?? "removed"
+                if stages.last?.hasPrefix(stage + "@") != true { stages.append("\(stage)@\(String(format: "%.2f", elapsed))s") }
+                if submittedAfter == nil, ["sent", "delivering", "unconfirmed", "removed"].contains(stage) { submittedAfter = elapsed }
                 if usesPlan {
                     if self.agent == "codex", let path = chat.transcriptPath,
                        let bytes = try? Data(contentsOf: URL(fileURLWithPath: path)), bytes.count >= transcriptOffset {
@@ -1735,8 +1878,21 @@ private final class LiveCheckSession {
                     !reader.isTyping && !TerminalScreen.analyze(self.screen).busy
             }
             let suffix = attachImage ? "with image" : "without image"
+            let currentBytes = chat.transcriptPath.flatMap { try? Data(contentsOf: URL(fileURLWithPath: $0)) } ?? Data()
+            let newCompactions = LiveCheckRules.claudeCompactionIDs(currentBytes).subtracting(compactBefore)
+            let added = chat.allEntries.filter { !previousIDs.contains($0.id) }
+            let pending = chat.pendingMessages.entries.first { $0.id == pendingID }
+            let diagnosis = [
+                "accepted=\(accepted), typing=\(reader.isTyping), pending=\(pendingID.flatMap { chat.pendingMessages.stage(id: $0) }?.rawValue ?? "removed"), detail=\(pending?.pendingDetail ?? "none")",
+                "input review=\(chat.pendingMessages.inputNeedsReview), input=\(String(reflecting: CommandMenuScreen.input(screen, agent: agent)))",
+                "stages=\(stages.joined(separator: ",")), submitted after=\(submittedAfter.map { String(format: "%.2f", $0) } ?? "none")s, elapsed=\(String(format: "%.2f", ProcessInfo.processInfo.systemUptime - began))s",
+                "new native compaction records=\(newCompactions.sorted())",
+                "reader additions=\(added.filter { [.user, .notice, .error].contains($0.kind) }.map { String($0.text.prefix(500)) })",
+                "transcript=\(chat.transcriptPath ?? "missing"), follower=\(chat.follower?.health.state ?? "missing")",
+                String(screen.suffix(3000))
+            ].joined(separator: "; ")
             report("multiline \(usesPlan ? "/plan" : "/compact") dispatches natively \(suffix)", dispatched,
-                   "Requires native mode plus reply, or a new provider compaction event. Assistant agreement alone cannot pass. \(String(screen.suffix(450)))")
+                   "Requires native mode plus reply, or a new provider compaction event. Assistant agreement alone cannot pass. \(diagnosis)")
             if attachImage { report("native image chip acknowledged before command submission", dispatched && nativeImageSeen) }
             guard dispatched else {
                 report("no automatic command retry or confirmation", true,

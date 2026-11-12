@@ -749,6 +749,14 @@ extension SelfTest {
         let longArrived = waitUntil(5) { !rm.isTyping && bytes().count > longMark && bytes().last == 0x0D }
         check("commands transport: long arguments cannot swallow the command name", longArrived && String(decoding: bytes().suffix(from: longMark), as: UTF8.self) == "/compact \u{1b}[200~" + arguments + "\u{1b}[201~\r")
 
+        let multilineMark = bytes().count
+        let multilineArguments = "Preserve the conversation token.\nKeep the summary brief."
+        rm.composer.textView.text = "/compact " + multilineArguments
+        _ = rm.send()
+        let multilineArrived = waitUntil(5) { !rm.isTyping && bytes().count > multilineMark && bytes().last == 0x0D }
+        check("commands transport: multiline compact arguments use one text paste and one submit",
+              multilineArrived && String(decoding: bytes().suffix(from: multilineMark), as: UTF8.self) == "/compact \u{1b}[200~" + multilineArguments + "\u{1b}[201~\r")
+
         let namespaceMark = bytes().count
         rm.composer.textView.text = "/example:task_name detail"
         _ = rm.send()

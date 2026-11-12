@@ -5,15 +5,22 @@ enum ReaderSubmissionGuard {
     static func refusal(screen: String, waiting: Bool, command: String?) -> String? {
         if waiting { return "The agent is waiting for an answer in the terminal." }
         let tail = screen.split(whereSeparator: \.isNewline).suffix(16).joined(separator: "\n")
-        let lower = tail.lowercased()
+        // Claude's /pe suggestions include /fewer-permission-prompts with the
+        // description "Pre-approve safe read-only commands". That is catalogue text,
+        // not an approval request. Exempt only described slash rows during a command;
+        // an actual trust/update/approval prompt on another line must still block.
+        let suggestionPattern = #"^\s*[›❯>]?\s*/[A-Za-z][A-Za-z0-9_:-]*[ \t]{2,}\S"#
+        let hasSuggestions = command != nil && tail.split(separator: "\n").contains {
+            $0.range(of: suggestionPattern, options: .regularExpression) != nil
+        }
+        let lower = tail.split(separator: "\n").filter {
+            !hasSuggestions || $0.range(of: suggestionPattern, options: .regularExpression) == nil
+        }.joined(separator: "\n").lowercased()
         let approval = ["allow once", "yes, allow", "do you want to proceed", "would you like to run", "approve", "permission required", "sign in", "log in"]
         if approval.contains(where: lower.contains) { return "Answer the permission or sign-in dialog in the terminal." }
         let state = TerminalScreen.analyze(screen)
         guard let menu = state.menu else { return nil }
-        if menu.kind == .menu, command != nil {
-            let suggestion = tail.range(of: #"(?m)^\s*[›❯>]?\s*/[A-Za-z][A-Za-z0-9_:-]*[ \t]{2,}\S"#, options: .regularExpression) != nil
-            if suggestion { return nil }
-        }
+        if menu.kind == .menu, hasSuggestions { return nil }
         return menu.title(agent: "Agent") + ". Input was held."
     }
 }
