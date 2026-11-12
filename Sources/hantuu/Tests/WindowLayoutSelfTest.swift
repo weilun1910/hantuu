@@ -1,15 +1,49 @@
 import AppKit
 import PDFKit
 import ScreenCaptureKit
+import WebKit
 
 /// Test sizes are logical window sizes, independent of the attached display.
 private final class LayoutSnapshotWindow: NSWindow {
     override func constrainFrameRect(_ frameRect: NSRect, to screen: NSScreen?) -> NSRect { frameRect }
 }
 
+private final class LayoutSnapshotLifetime {
+    weak var controller: MainWindowController?
+    weak var window: NSWindow?
+    weak var reader: NSView?
+    weak var code: NSView?
+
+    init(_ owner: MainWindowController) {
+        controller = owner
+        window = owner.window
+        reader = owner.mainArea.readerMode.reader?.view
+        code = owner.panel.code.page.webView
+    }
+
+    var released: Bool { controller == nil && reader == nil && code == nil && window?.isVisible != true }
+    var detail: String { "controller=\(controller != nil) reader=\(reader != nil) code=\(code != nil) visibleWindow=\(window?.isVisible == true)" }
+}
+
+private struct LayoutInkSamples {
+    var rect: NSRect
+    var ink = 0
+    var background = 0
+    var passes: Bool { ink >= 40 && background >= 100 }
+    var state: [String: Any] { ["pixelRect": NSStringFromRect(rect), "ink": ink, "background": background, "passes": passes] }
+}
+
+private struct LayoutWebPaintEvidence {
+    var name: String
+    var ready: Bool
+    var state: [String: Any]
+    var png: Data?
+}
+
 extension SelfTest {
     static func flexibleLayout(_ dir: URL) {
         layoutPolicyChecks()
+        layoutInkChecks()
         let root = dir.appendingPathComponent("flexible-layout", isDirectory: true)
         Paths.ensure(root)
         let previousData = Paths.dataDir
@@ -26,6 +60,32 @@ extension SelfTest {
         } else {
             print("SKIP  whole-window layout matrix: set HANTUU_LAYOUT_SNAPSHOTS=1 before layout acceptance")
         }
+    }
+
+    private static func layoutInkChecks() {
+        func sample(background: CGFloat?, foreground: CGFloat?, dark: Bool) -> LayoutInkSamples? {
+            guard let context = CGContext(data: nil, width: 128, height: 64, bitsPerComponent: 8, bytesPerRow: 0,
+                space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return nil }
+            context.clear(CGRect(x: 0, y: 0, width: 128, height: 64))
+            if let background {
+                context.setFillColor(CGColor(gray: background, alpha: 1))
+                context.fill(CGRect(x: 0, y: 0, width: 128, height: 64))
+            }
+            if let foreground {
+                context.setFillColor(CGColor(gray: foreground, alpha: 1))
+                context.fill(CGRect(x: 0, y: 0, width: 64, height: 32))
+            }
+            guard let image = context.makeImage() else { return nil }
+            return layoutInkSamples(NSBitmapImageRep(cgImage: image), pixels: NSRect(x: 0, y: 0, width: 128, height: 64), lightText: dark)
+        }
+        check("layout pixels: transparent and uniform captures cannot pass as text",
+              sample(background: nil, foreground: nil, dark: false)?.passes == false &&
+              sample(background: nil, foreground: nil, dark: true)?.passes == false &&
+              sample(background: 1, foreground: nil, dark: true)?.passes == false &&
+              sample(background: 0, foreground: nil, dark: false)?.passes == false)
+        check("layout pixels: foreground over a transparent native backing remains readable",
+              sample(background: nil, foreground: 0, dark: false)?.passes == true &&
+              sample(background: nil, foreground: 1, dark: true)?.passes == true)
     }
 
     private static func layoutPolicyChecks() {
@@ -261,7 +321,7 @@ extension SelfTest {
         let controller = MainWindowController(model: model, readerMode: mode, review: ReviewCenter(loadSavedState: false), window: window)
         window.isReleasedWhenClosed = false
         window.orderFrontRegardless()
-        defer { chat.follower?.stop(); terminal.destroy(); window.orderOut(nil); window.close() }
+        defer { closeLayoutFixture(controller, chat: chat, terminal: terminal) }
         controller.applyInitialWidths()
         let reader = controller.mainArea.readerMode
         reader.commandDiscoveryEnabled = false
@@ -314,87 +374,74 @@ extension SelfTest {
                 }
             }
         }
+        webContentRecoveryChecks(controller, chat: chat, code: documents.code)
+    }
+
+    private static func webContentRecoveryChecks(_ controller: MainWindowController, chat: Chat, code: URL) {
+        let model = controller.model
+        let reader = controller.mainArea.readerMode
+        if reader.mode.face(of: chat) != .reader { reader.mode.toggle(chat) }
+        model.openFile(code.path, line: nil)
+        model.panelVisible = true
+        controller.window?.setFrame(layoutSnapshotFrame(NSSize(width: 1280, height: 832)), display: true)
+        controller.mainArea.sync()
+        controller.applyLayout()
+        guard let page = reader.reader?.page else { check("layout recovery: reader exists", false); return }
+        let editor = controller.panel.code
+        let loaded = waitUntil(10) {
+            editor.render()
+            return page.ready && editor.page.ready &&
+                (js(page, "document.querySelectorAll('section.entry').length") as? Int ?? 0) >= 40 &&
+                (js(editor.page, "!!window.hantuu._view()") as? Bool) == true
+        }
+        check("layout recovery \(chat.agentID): fixture pages are ready", loaded)
+        guard loaded, let document = editor.selectedDoc else { return }
+        let token = "layout recovery buffer"
+        _ = js(editor.page, "(() => { const v=hantuu._view(); v.dispatch({changes:{from:v.state.doc.length,insert:'\\n// layout recovery buffer\\n'}}); return 0; })()")
+        let saved = waitUntil(5) { document.dirty && editor.recoveryStore.read(document.id)?.text.contains(token) == true }
+        check("layout recovery \(chat.agentID): unsaved fixture buffer is checkpointed", saved)
+        guard saved else { return }
+        let draft = reader.composer.textView.string
+        let readerTerminations = page.terminationCount
+        let editorTerminations = editor.page.terminationCount
+        page.webView.navigationDelegate?.webViewWebContentProcessDidTerminate?(page.webView)
+        editor.page.webView.navigationDelegate?.webViewWebContentProcessDidTerminate?(editor.page.webView)
+        check("layout recovery \(chat.agentID): the actual termination delegate invalidates both pages",
+              !page.ready && !editor.page.ready && page.terminationCount == readerTerminations + 1 &&
+              editor.page.terminationCount == editorTerminations + 1)
+        let restored = waitUntil(10) {
+            page.ready && editor.page.ready &&
+                (js(page, "document.querySelectorAll('section.entry').length") as? Int ?? 0) >= 40 &&
+                (js(editor.page, "hantuu._view()?.state.doc.toString().includes('layout recovery buffer')") as? Bool) == true
+        }
+        check("layout recovery \(chat.agentID): transcript, unsaved code and draft survive reload",
+              restored && reader.composer.textView.string == draft && editor.selectedDoc === document,
+              "readerReady=\(page.ready) editorReady=\(editor.page.ready) readerTerminations=\(page.terminationCount) editorTerminations=\(editor.page.terminationCount)")
     }
 
     private static func layoutWindowSnapshots(_ root: URL, documents: (pdf: URL, code: URL)) {
-        let pdf = documents.pdf
-        let code = documents.code
         let sizes = [NSSize(width: 1280, height: 832), NSSize(width: 1470, height: 956),
                      NSSize(width: 1512, height: 982), NSSize(width: 1728, height: 1117),
                      NSSize(width: 2560, height: 1440), NSSize(width: 0, height: 460)]
         var manifest: [[String: Any]] = []
         var renderedCount = 0
         for provider in ["claude", "codex"] {
-            guard let (model, chat, mode, terminal) = layoutFixture(root, provider: provider) else { continue }
-            let snapshotWindow = LayoutSnapshotWindow(contentRect: layoutSnapshotFrame(NSSize(width: 1320, height: 820)),
-                styleMask: [.titled, .closable, .resizable, .fullSizeContentView], backing: .buffered, defer: false)
-            let controller = MainWindowController(model: model, readerMode: mode, review: ReviewCenter(loadSavedState: false), window: snapshotWindow)
-            guard let window = controller.window else { terminal.destroy(); continue }
-            window.isReleasedWhenClosed = false
-            let reader = controller.mainArea.readerMode
-            reader.commandDiscoveryEnabled = false
-            reader.statusProvider = { _ in nil }
-            window.orderFrontRegardless()
-            controller.applyInitialWidths()
-            controller.mainArea.sync()
-            check("layout matrix \(provider): long conversation is ready", waitUntil(10) {
-                reader.refresh()
-                guard let page = reader.reader?.page, page.ready else { return false }
-                return (js(page, "document.querySelectorAll('section.entry').length") as? Int ?? 0) >= 30
-            })
-            reader.composer.textView.text = "Keep this draft while the panel changes size."
+            retainedLayoutPaintingChecks(root, provider: provider, documents: documents)
             for size in sizes {
                 for dark in (size.width == 1512 || size.width == 1728 ? [false, true] : [false]) {
-                    window.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
-                    GhosttyApp.shared?.setColorScheme(dark: dark)
                     for face in [ChatFace.reader, .terminal] {
-                        if mode.face(of: chat) != face { mode.toggle(chat) }
-                        for document in [pdf, code] {
-                            model.openFile(document.path, line: nil)
-                            _ = waitUntil(5) { controller.panel.code.render(); return controller.panel.code.selectedDoc != nil }
+                        for document in [documents.pdf, documents.code] {
                             for sidebar in [true, false] {
                                 for focus in [false, true] {
-                                    // Every cell starts from the same preferences. The transition
-                                    // checks separately exercise repeated changes without resets.
-                                    controller.handleLayoutRequest(.reset)
-                                    model.panelVisible = true
-                                    model.sidebarVisible = sidebar
-                                    controller.handleLayoutRequest(.panel)
-                                    if focus { controller.togglePanelFocus() }
-                                    controller.mainArea.sync()
-                                    controller.applyLayout()
-                                    let requested = size.width == 0 ? controller.minimumWindowSize : size
-                                    window.setFrame(layoutSnapshotFrame(requested), display: true)
-                                    controller.applyLayout()
-                                    if controller.effectiveLayout.single && !focus { controller.handleLayoutRequest(.chat) }
-                                    window.contentView?.layoutSubtreeIfNeeded()
-                                    RunLoop.main.run(until: Date().addingTimeInterval(0.35))
-                                    controller.mainArea.layoutTerminals()
-                                    let result = controller.effectiveLayout
-                                    let name = "layout-\(Int(requested.width))-\(face.rawValue)-\(document == pdf ? "pdf" : "code")-\(provider)-sidebar-\(sidebar ? "open" : "closed")-focus-\(focus ? "on" : "off")-\(dark ? "dark" : "light").png"
-                                    let chatWidth = controller.mainItem.isCollapsed ? 0 : controller.mainArea.view.frame.width
-                                    let panelWidth = controller.panelItem.isCollapsed ? 0 : controller.panel.view.frame.width
-                                    let floor = face == .reader ? WindowLayout.readerMinimum : terminal.minimumWidth(columns: 80)
-                                    check("layout frames: " + name, (chatWidth == 0 || chatWidth + 1 >= floor) && (panelWidth == 0 || panelWidth + 1 >= 560) && terminal.measuredColumns >= 80,
-                                          "chat=\(chatWidth) panel=\(panelWidth) terminal columns=\(terminal.measuredColumns)")
-                                    check("layout window size: " + name, abs(window.frame.width - requested.width) < 1 && abs(window.frame.height - requested.height) < 1,
-                                          "actual=\(window.frame.size)")
-                                    check("layout coverage: " + name, layoutCoversWindow(controller), "split=\(controller.split.view.frame), panes=\(controller.split.splitView.subviews.map(\.frame))")
-                                    var missing: [String] = []
-                                    let ready = waitUntil(10) {
-                                        missing = layoutMissingContent(controller, chat: chat, face: face, document: document)
-                                        return missing.isEmpty
+                                    let result = autoreleasepool {
+                                        layoutSnapshotCell(root, provider: provider, face: face, document: document,
+                                            size: size, dark: dark, sidebar: sidebar, focus: focus, panel: true)
                                     }
-                                    check("layout content: " + name, ready, missing.joined(separator: "; "))
-                                    let geometryReady = layoutCoversWindow(controller) && abs(window.frame.width - requested.width) < 1 && abs(window.frame.height - requested.height) < 1
-                                    check("layout final geometry: " + name, geometryReady, "window=\(window.frame) panes=\(controller.split.splitView.subviews.map(\.frame))")
-                                    let captured = ready && geometryReady && captureLayoutWindow(window, to: root.appendingPathComponent(name), pdfInk: layoutPDFRect(controller), textInk: layoutTextRects(controller, face: face))
-                                    check("layout snapshot: " + name, captured, ready ? "Window capture or PDF ink verification failed." : missing.joined(separator: "; "))
-                                    if captured { renderedCount += 1 }
-                                    manifest.append(["file": name, "requestedWidth": requested.width, "requestedHeight": requested.height, "minimumCase": size.width == 0,
-                                                     "width": window.frame.width, "height": window.frame.height, "captured": captured, "contentReady": ready, "missing": missing,
-                                                     "sidebar": result.sidebar, "chat": chatWidth, "panel": panelWidth,
-                                                     "single": result.single, "terminalColumns": terminal.measuredColumns])
+                                    guard let result else { continue }
+                                    manifest.append(result.record)
+                                    if result.captured { renderedCount += 1 }
+                                    check("layout resources released: " + result.name,
+                                          waitUntil(3) { result.lifetime.released }, result.lifetime.detail)
                                 }
                             }
                         }
@@ -402,69 +449,275 @@ extension SelfTest {
                 }
             }
             for face in [ChatFace.reader, .terminal] {
-                if mode.face(of: chat) != face { mode.toggle(chat) }
-                controller.handleLayoutRequest(.reset)
-                model.panelVisible = false
-                model.sidebarVisible = true
-                controller.mainArea.sync()
-                controller.applyLayout()
-                let minimum = controller.minimumWindowSize
-                window.setFrame(layoutSnapshotFrame(minimum), display: true)
-                controller.applyLayout()
-                let name = "layout-\(Int(minimum.width))-\(face.rawValue)-none-\(provider)-sidebar-open-focus-off-light.png"
-                window.appearance = NSAppearance(named: .aqua)
-                GhosttyApp.shared?.setColorScheme(dark: false)
-                var missing: [String] = []
-                let ready = waitUntil(10) {
-                    missing = layoutMissingContent(controller, chat: chat, face: face, document: pdf)
-                    return missing.isEmpty && layoutCoversWindow(controller)
+                let result = autoreleasepool {
+                    layoutSnapshotCell(root, provider: provider, face: face, document: documents.pdf,
+                        size: NSSize(width: 0, height: 460), dark: false, sidebar: true, focus: false, panel: false)
                 }
-                check("layout minimum without panel: " + name,
-                      ready && abs(window.frame.width - minimum.width) < 1 && abs(window.frame.height - minimum.height) < 1,
-                      missing.joined(separator: "; "))
-                let captured = ready && captureLayoutWindow(window, to: root.appendingPathComponent(name), textInk: layoutTextRects(controller, face: face))
-                check("layout snapshot: " + name, captured, missing.joined(separator: "; "))
-                if captured { renderedCount += 1 }
-                manifest.append(["file": name, "requestedWidth": minimum.width, "requestedHeight": minimum.height,
-                                 "width": window.frame.width, "height": window.frame.height, "captured": captured,
-                                 "minimumCase": true, "panel": 0, "chat": controller.mainArea.view.frame.width,
-                                 "terminalColumns": terminal.measuredColumns])
+                guard let result else { continue }
+                manifest.append(result.record)
+                if result.captured { renderedCount += 1 }
+                check("layout resources released: " + result.name,
+                      waitUntil(3) { result.lifetime.released }, result.lifetime.detail)
             }
-            controller.handleLayoutRequest(.reset)
-            if mode.face(of: chat) != .reader { mode.toggle(chat) }
-            model.sidebarVisible = true
-            model.readerWidth = 560
-            model.panelVisible = true
-            model.openFile(pdf.path, line: nil)
-            window.setFrame(layoutSnapshotFrame(NSSize(width: 1728, height: 1117)), display: true)
-            controller.mainArea.sync()
-            controller.applyLayout()
-            let original = controller.effectiveLayout
-            let originalPane = controller.panel.code.selectedDoc?.pane
-            controller.togglePanelFocus()
-            controller.togglePanelFocus()
-            check("layout \(provider): focus restores the exact split and viewer instance",
-                  controller.effectiveLayout == original && originalPane != nil && controller.panel.code.selectedDoc?.pane === originalPane)
-            window.setFrame(layoutSnapshotFrame(NSSize(width: 760, height: 460)), display: true)
-            controller.applyLayout()
-            window.setFrame(layoutSnapshotFrame(NSSize(width: 1728, height: 1117)), display: true)
-            controller.applyLayout()
-            check("layout \(provider): temporary compression preserves preferred widths and draft",
-                  controller.effectiveLayout == original && model.readerWidth == 560 && reader.composer.textView.string.contains("Keep this draft"))
-            controller.panel.code.openInNewWindow()
-            let detached = controller.panel.code.documentWindows.values.first
-            check("layout \(provider): document opens in its own window", detached?.window != nil && detached?.window !== window)
-            detached?.window?.performClose(nil)
-            check("layout \(provider): closing the document leaves its chat running", chat.terminal === terminal && !terminal.processExited && model.selectedChatID == chat.id)
-            chat.follower?.stop()
-            terminal.destroy()
-            window.orderOut(nil)
-            window.close()
         }
         if let data = try? JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys]) {
             try? data.write(to: root.appendingPathComponent("layout-manifest.json"))
         }
-        check("layout: all 260 whole-window combinations were rendered", manifest.count == 260 && renderedCount == 260, "attempted=\(manifest.count) captured=\(renderedCount)")
+        check("layout: all 260 whole-window combinations were rendered", manifest.count == 260 && renderedCount == 260,
+              "attempted=\(manifest.count) captured=\(renderedCount)")
+    }
+
+    private static func closeLayoutFixture(_ controller: MainWindowController, chat: Chat, terminal: TerminalView) {
+        chat.follower?.stop()
+        chat.discoveryTimer?.invalidate()
+        terminal.destroy()
+        // Stop remote loads and detach the old view tree before the next cell starts.
+        let pages: [WebPage?] = [controller.mainArea.readerMode.reader?.page, controller.panel.code.page, controller.panel.side.reader.page]
+        for page in pages.compactMap({ $0 }) {
+            page.onReady = nil
+            page.onMessage = nil
+            page.webView.navigationDelegate = nil
+            page.webView.stopLoading()
+            page.webView.configuration.userContentController.removeScriptMessageHandler(forName: "hantuu")
+        }
+        controller.window?.orderOut(nil)
+        controller.window?.close()
+        controller.window?.contentViewController = nil
+        controller.window = nil
+    }
+
+    private static func presentLayoutWindow(_ window: NSWindow) {
+        NSApp.activate()
+        window.makeKeyAndOrderFront(nil)
+        window.contentView?.layoutSubtreeIfNeeded()
+        window.contentView?.displayIfNeeded()
+    }
+
+    private static func layoutSnapshotCell(_ root: URL, provider: String, face: ChatFace, document: URL,
+        size: NSSize, dark: Bool, sidebar: Bool, focus: Bool, panel: Bool)
+        -> (name: String, record: [String: Any], captured: Bool, lifetime: LayoutSnapshotLifetime)? {
+        guard let (model, chat, mode, terminal) = layoutFixture(root, provider: provider) else { return nil }
+        let window = LayoutSnapshotWindow(contentRect: layoutSnapshotFrame(NSSize(width: 1320, height: 820)),
+            styleMask: [.titled, .closable, .resizable, .fullSizeContentView], backing: .buffered, defer: false)
+        let controller = MainWindowController(model: model, readerMode: mode, review: ReviewCenter(loadSavedState: false), window: window)
+        window.isReleasedWhenClosed = false
+        defer { closeLayoutFixture(controller, chat: chat, terminal: terminal) }
+        let reader = controller.mainArea.readerMode
+        reader.commandDiscoveryEnabled = false
+        reader.statusProvider = { _ in nil }
+        controller.applyInitialWidths()
+        if mode.face(of: chat) != face { mode.toggle(chat) }
+        model.openFile(document.path, line: nil)
+        model.sidebarVisible = sidebar
+        model.panelVisible = panel
+        if panel { controller.handleLayoutRequest(.panel) }
+        if focus { controller.togglePanelFocus() }
+        controller.mainArea.sync()
+        controller.applyLayout()
+        let requested = size.width == 0 ? controller.minimumWindowSize : size
+        window.setFrame(layoutSnapshotFrame(requested), display: true)
+        window.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
+        GhosttyApp.shared?.setColorScheme(dark: dark)
+        controller.applyLayout()
+        if controller.effectiveLayout.single && !focus { controller.handleLayoutRequest(.chat) }
+        reader.composer.textView.text = "Keep this draft while the panel changes size."
+        presentLayoutWindow(window)
+        RunLoop.main.run(until: Date().addingTimeInterval(0.2))
+        controller.mainArea.layoutTerminals()
+        let name = "layout-\(Int(requested.width))-\(face.rawValue)-\(panel ? (document.pathExtension == "pdf" ? "pdf" : "code") : "none")-\(provider)-sidebar-\(sidebar ? "open" : "closed")-focus-\(focus ? "on" : "off")-\(dark ? "dark" : "light").png"
+        var missing: [String] = []
+        let ready = waitUntil(10) {
+            missing = layoutMissingContent(controller, chat: chat, face: face, document: document)
+            return missing.isEmpty
+        }
+        check("layout content: " + name, ready, missing.joined(separator: "; "))
+        let chatWidth = controller.mainItem.isCollapsed ? 0 : controller.mainArea.view.frame.width
+        let panelWidth = controller.panelItem.isCollapsed ? 0 : controller.panel.view.frame.width
+        let floor = face == .reader ? WindowLayout.readerMinimum : terminal.minimumWidth(columns: 80)
+        check("layout frames: " + name, (chatWidth == 0 || chatWidth + 1 >= floor) &&
+              (panelWidth == 0 || panelWidth + 1 >= 560) && terminal.measuredColumns >= 80,
+              "chat=\(chatWidth) panel=\(panelWidth) terminal columns=\(terminal.measuredColumns)")
+        let geometryReady = layoutCoversWindow(controller) && abs(window.frame.width - requested.width) < 1 && abs(window.frame.height - requested.height) < 1
+        check("layout final geometry: " + name, geometryReady,
+              "requested=\(requested) window=\(window.frame) effective=\(controller.effectiveLayout)")
+        var evidence = prepareLayoutWebPaint(controller, face: face, rasterize: false)
+        check("layout WebKit visibility: " + name, evidence.allSatisfy(\.ready),
+              evidence.filter { !$0.ready }.map { "\($0.name): \($0.state)" }.joined(separator: "; "))
+        let url = root.appendingPathComponent(name)
+        let captured = ready && geometryReady && captureLayoutWindow(window, to: url,
+            pdfInk: layoutPDFRect(controller), textInk: layoutTextRects(controller, face: face))
+        if !captured {
+            evidence = prepareLayoutWebPaint(controller, face: face, rasterize: true)
+            saveLayoutWebEvidence(evidence, beside: url)
+        }
+        check("layout snapshot: " + name, captured, ready ? "See compositor and WebKit diagnostic artifacts." : missing.joined(separator: "; "))
+        let result = controller.effectiveLayout
+        let record: [String: Any] = ["file": name, "requestedWidth": requested.width, "requestedHeight": requested.height,
+            "minimumCase": size.width == 0, "width": window.frame.width, "height": window.frame.height,
+            "captured": captured, "contentReady": ready, "missing": missing, "sidebar": result.sidebar,
+            "chat": chatWidth, "panel": panelWidth, "single": result.single, "terminalColumns": terminal.measuredColumns,
+            "webKit": evidence.map { $0.state }]
+        return (name, record, captured, LayoutSnapshotLifetime(controller))
+    }
+
+    private static func retainedLayoutPaintingChecks(_ root: URL, provider: String, documents: (pdf: URL, code: URL)) {
+        guard let (model, chat, mode, terminal) = layoutFixture(root, provider: provider) else { return }
+        let window = LayoutSnapshotWindow(contentRect: layoutSnapshotFrame(NSSize(width: 1280, height: 832)),
+            styleMask: [.titled, .closable, .resizable, .fullSizeContentView], backing: .buffered, defer: false)
+        let controller = MainWindowController(model: model, readerMode: mode, review: ReviewCenter(loadSavedState: false), window: window)
+        window.isReleasedWhenClosed = false
+        window.appearance = NSAppearance(named: .aqua)
+        GhosttyApp.shared?.setColorScheme(dark: false)
+        defer { closeLayoutFixture(controller, chat: chat, terminal: terminal) }
+        let reader = controller.mainArea.readerMode
+        reader.commandDiscoveryEnabled = false
+        reader.statusProvider = { _ in nil }
+        controller.applyInitialWidths()
+        controller.mainArea.sync()
+        reader.composer.textView.text = "Keep this draft while the panel changes size."
+        let pdf = documents.pdf
+        controller.handleLayoutRequest(.reset)
+        if mode.face(of: chat) != .reader { mode.toggle(chat) }
+        model.sidebarVisible = true
+        model.readerWidth = 560
+        model.panelVisible = true
+        model.openFile(pdf.path, line: nil)
+        window.setFrame(layoutSnapshotFrame(NSSize(width: 1728, height: 1117)), display: true)
+        controller.mainArea.sync()
+        controller.applyLayout()
+        _ = waitUntil(5) { controller.panel.code.render(); return controller.panel.code.selectedDoc?.pane is PDFViewer }
+        let original = controller.effectiveLayout
+        let originalPane = controller.panel.code.selectedDoc?.pane
+        controller.togglePanelFocus()
+        controller.togglePanelFocus()
+        check("layout \(provider): focus restores the exact split and viewer instance",
+              controller.effectiveLayout == original && originalPane != nil && controller.panel.code.selectedDoc?.pane === originalPane)
+        window.setFrame(layoutSnapshotFrame(NSSize(width: 760, height: 460)), display: true)
+        controller.applyLayout()
+        window.setFrame(layoutSnapshotFrame(NSSize(width: 1728, height: 1117)), display: true)
+        controller.applyLayout()
+        check("layout \(provider): temporary compression preserves preferred widths and draft",
+              controller.effectiveLayout == original && model.readerWidth == 560 && reader.composer.textView.string.contains("Keep this draft"))
+        controller.panel.code.openInNewWindow()
+        let detached = controller.panel.code.documentWindows.values.first
+        check("layout \(provider): document opens in its own window", detached?.window != nil && detached?.window !== window)
+        detached?.window?.performClose(nil)
+        check("layout \(provider): closing the document leaves its chat running", chat.terminal === terminal && !terminal.processExited && model.selectedChatID == chat.id)
+        let shots = root.appendingPathComponent("retained-painting", isDirectory: true)
+        Paths.ensure(shots)
+        let phases: [(String, NSSize, Bool, URL)] = [
+            ("reader-pdf", NSSize(width: 1280, height: 832), false, documents.pdf),
+            ("reader-code", NSSize(width: 1280, height: 832), false, documents.code),
+            ("focused-code", NSSize(width: 1280, height: 832), true, documents.code),
+            ("resized-code", NSSize(width: 1470, height: 956), false, documents.code),
+            ("focused-code-14", NSSize(width: 1512, height: 982), true, documents.code),
+            ("restored-reader", NSSize(width: 1728, height: 1117), false, documents.code),
+            ("external-code", NSSize(width: 2560, height: 1440), false, documents.code)]
+        for (phase, size, focus, document) in phases {
+            if mode.face(of: chat) != .reader { mode.toggle(chat) }
+            // Hide and restore the same reader, then switch the same file viewer.
+            mode.toggle(chat)
+            controller.mainArea.sync()
+            RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+            mode.toggle(chat)
+            model.openFile(document.path, line: nil)
+            if model.layoutState.focused != focus { controller.togglePanelFocus() }
+            window.setFrame(layoutSnapshotFrame(size), display: true)
+            controller.mainArea.sync()
+            controller.applyLayout()
+            presentLayoutWindow(window)
+            let ready = waitUntil(10) { layoutMissingContent(controller, chat: chat, face: .reader, document: document).isEmpty }
+            let evidence = prepareLayoutWebPaint(controller, face: .reader, rasterize: false)
+            let url = shots.appendingPathComponent("layout-paint-\(provider)-\(phase).png")
+            let captured = ready && captureLayoutWindow(window, to: url, pdfInk: layoutPDFRect(controller), textInk: layoutTextRects(controller, face: .reader))
+            if !captured {
+                // Keep the original failure. A later software snapshot is diagnostic and
+                // must not repair the baseline used to accept retained-view painting.
+                let diagnostic = prepareLayoutWebPaint(controller, face: .reader, rasterize: true)
+                saveLayoutWebEvidence(diagnostic, beside: url)
+                let retry = layoutDiagnosticFolder(beside: url).appendingPathComponent("after-webkit.png")
+                let afterSoftware = ready && captureLayoutWindow(window, to: retry,
+                    pdfInk: layoutPDFRect(controller), textInk: layoutTextRects(controller, face: .reader))
+                print("layout retained diagnostic \(provider) \(phase): original=false afterSoftwareSnapshot=\(afterSoftware)")
+            }
+            check("layout retained WebKit \(provider): " + phase, ready && evidence.allSatisfy(\.ready) && captured,
+                  "The same views must paint after hide/show, resize, document changes and detached-window focus.")
+        }
+    }
+
+    private static func layoutWebSurfaces(_ controller: MainWindowController, face: ChatFace) -> [(String, WebPage)] {
+        var pages: [(String, WebPage)] = []
+        if !controller.mainItem.isCollapsed, face == .reader, let reader = controller.mainArea.readerMode.reader {
+            pages.append(("reader", reader.page))
+        }
+        if !controller.panelItem.isCollapsed, controller.panel.code.selectedDoc?.kind.usesPage == true {
+            pages.append(("code", controller.panel.code.page))
+        }
+        return pages
+    }
+
+    /// A software WebKit raster is evidence and a paint request, never a replacement for
+    /// the required compositor capture. The two paths must remain distinguishable.
+    private static func prepareLayoutWebPaint(_ controller: MainWindowController, face: ChatFace, rasterize: Bool) -> [LayoutWebPaintEvidence] {
+        guard let window = controller.window else { return [] }
+        presentLayoutWindow(window)
+        return layoutWebSurfaces(controller, face: face).map { name, page in
+            let view = page.webView
+            let nativeVisible = view.window === window && !view.isHiddenOrHasHiddenAncestor &&
+                !view.visibleRect.isEmpty && view.alphaValue >= 0.99
+            let animationScript = "(() => { const r=(window.__layoutPaintRevision||0)+1; window.__layoutPaintRevision=r; window.__layoutPaintFinished=0; requestAnimationFrame(() => requestAnimationFrame(() => { if (window.__layoutPaintRevision===r) window.__layoutPaintFinished=r; })); return r; })()"
+            let revision = js(page, animationScript) as? Int
+            let animated = revision.map { expected in waitUntil(3) { (js(page, "window.__layoutPaintFinished") as? Int) == expected } } ?? false
+            let diagnosticScript = "(() => { const e=document.querySelector('section.entry p')||document.querySelector('.cm-line'); const r=e?.getBoundingClientRect(); const s=e?getComputedStyle(e):null; return {url:location.href,visibility:document.visibilityState,focused:document.hasFocus(),entries:document.querySelectorAll('section.entry').length,codeLines:document.querySelectorAll('.cm-line').length,firstID:document.querySelector('section.entry')?.dataset.id||null,textRect:r?{x:r.x,y:r.y,width:r.width,height:r.height}:null,color:s?.color||null,background:getComputedStyle(document.body).backgroundColor}; })()"
+            var state: [String: Any] = ["name": name, "nativeVisible": nativeVisible,
+                "viewFrame": NSStringFromRect(view.frame), "viewBounds": NSStringFromRect(view.bounds),
+                "visibleRect": NSStringFromRect(view.visibleRect), "hiddenAncestor": view.isHiddenOrHasHiddenAncestor,
+                "alpha": view.alphaValue, "windowKey": window.isKeyWindow, "appActive": NSApp.isActive,
+                "occlusion": window.occlusionState.rawValue, "animationFrames": animated,
+                "terminationCount": page.terminationCount, "viewIdentity": String(describing: ObjectIdentifier(view)),
+                "dom": js(page, diagnosticScript) ?? "No DOM result"]
+            state["softwareSnapshotRequested"] = rasterize
+            if !rasterize { return LayoutWebPaintEvidence(name: name, ready: nativeVisible && animated, state: state, png: nil) }
+            let configuration = WKSnapshotConfiguration()
+            configuration.rect = view.bounds
+            var image: NSImage?
+            var failure: Error?
+            var complete = false
+            view.takeSnapshot(with: configuration) { result, error in image = result; failure = error; complete = true }
+            let finished = waitUntil(5) { complete }
+            var png: Data?
+            var rasterReady = false
+            if finished, let image, let cg = image.cgImage(forProposedRect: nil, context: nil, hints: nil) {
+                let bitmap = NSBitmapImageRep(cgImage: cg)
+                let sx = CGFloat(bitmap.pixelsWide) / max(1, view.bounds.width)
+                let sy = CGFloat(bitmap.pixelsHigh) / max(1, view.bounds.height)
+                let pixels = NSRect(x: 8 * sx, y: 8 * sy,
+                    width: max(0, CGFloat(bitmap.pixelsWide) - 16 * sx), height: max(0, CGFloat(bitmap.pixelsHigh) - 16 * sy))
+                let dark = window.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+                let samples = layoutInkSamples(bitmap, pixels: pixels, lightText: dark)
+                rasterReady = samples.passes
+                state["softwareRaster"] = samples.state
+                png = bitmap.representation(using: .png, properties: [:])
+            } else {
+                state["softwareError"] = failure?.localizedDescription ?? "No WebKit image before timeout"
+            }
+            state["softwareRasterReady"] = rasterReady
+            return LayoutWebPaintEvidence(name: name, ready: nativeVisible && animated && rasterReady, state: state, png: png)
+        }
+    }
+
+    private static func layoutDiagnosticFolder(beside url: URL) -> URL {
+        url.deletingLastPathComponent().appendingPathComponent("failed-captures", isDirectory: true)
+            .appendingPathComponent(url.deletingPathExtension().lastPathComponent, isDirectory: true)
+    }
+
+    private static func saveLayoutWebEvidence(_ evidence: [LayoutWebPaintEvidence], beside url: URL) {
+        let folder = layoutDiagnosticFolder(beside: url)
+        Paths.ensure(folder)
+        for item in evidence { if let png = item.png { try? png.write(to: folder.appendingPathComponent(item.name + "-webkit.png")) } }
+        if let data = try? JSONSerialization.data(withJSONObject: evidence.map(\.state), options: [.prettyPrinted, .sortedKeys]) {
+            try? data.write(to: folder.appendingPathComponent("webkit-state.json"))
+        }
     }
 
     private static func layoutCoversWindow(_ controller: MainWindowController) -> Bool {
@@ -558,35 +811,44 @@ extension SelfTest {
         }
     }
 
-    /// A loaded PDF is insufficient: require text ink inside its page in the actual capture.
-    private static func layoutHasInk(_ bitmap: NSBitmapImageRep, rect: NSRect, window: NSWindow, lightText: Bool = false) -> Bool {
-        guard let content = window.contentView, content.bounds.width > 0, content.bounds.height > 0 else { return false }
-        let sx = CGFloat(bitmap.pixelsWide) / content.bounds.width
-        let sy = CGFloat(bitmap.pixelsHigh) / content.bounds.height
-        let x0 = max(0, Int((rect.minX - content.bounds.minX) * sx))
-        let x1 = min(bitmap.pixelsWide, Int((rect.maxX - content.bounds.minX) * sx))
-        let top = content.isFlipped ? rect.minY - content.bounds.minY : content.bounds.maxY - rect.maxY
-        let y0 = max(0, Int(top * sy))
-        let y1 = min(bitmap.pixelsHigh, Int((top + rect.height) * sy))
-        guard x1 > x0, y1 > y0 else { return false }
-        var ink = 0
-        var background = 0
+    /// Inspect content-local regions in the actual compositor image, keeping their pixel
+    /// coordinates and sample counts available when a capture fails.
+    private static func layoutInkSamples(_ bitmap: NSBitmapImageRep, pixels: NSRect, lightText: Bool) -> LayoutInkSamples {
+        let x0 = max(0, Int(pixels.minX)), x1 = min(bitmap.pixelsWide, Int(pixels.maxX))
+        let y0 = max(0, Int(pixels.minY)), y1 = min(bitmap.pixelsHigh, Int(pixels.maxY))
+        var result = LayoutInkSamples(rect: NSRect(x: CGFloat(x0), y: CGFloat(y0),
+            width: CGFloat(max(0, x1 - x0)), height: CGFloat(max(0, y1 - y0))))
+        guard x1 > x0, y1 > y0 else { return result }
         for y in stride(from: y0, to: y1, by: 3) {
             for x in stride(from: x0, to: x1, by: 3) {
                 if let color = bitmap.colorAt(x: x, y: y)?.usingColorSpace(.sRGB) {
-                    let text = lightText
-                        ? max(color.redComponent, max(color.greenComponent, color.blueComponent)) > 0.65
-                        : max(color.redComponent, max(color.greenComponent, color.blueComponent)) < 0.45
-                    if text { ink += 1 }
-                    let paper = lightText
-                        ? max(color.redComponent, max(color.greenComponent, color.blueComponent)) < 0.35
-                        : min(color.redComponent, min(color.greenComponent, color.blueComponent)) > 0.75
-                    if paper { background += 1 }
-                    if ink >= 40 && background >= 100 { return true }
+                    // WebKit software snapshots may leave the native backing transparent.
+                    // Composite that alpha before sampling so transparency is never ink.
+                    let alpha = color.alphaComponent
+                    let backing: CGFloat = lightText ? 0.08 : 0.97
+                    let red = color.redComponent * alpha + backing * (1 - alpha)
+                    let green = color.greenComponent * alpha + backing * (1 - alpha)
+                    let blue = color.blueComponent * alpha + backing * (1 - alpha)
+                    let maximum = max(red, max(green, blue))
+                    let minimum = min(red, min(green, blue))
+                    if lightText ? maximum > 0.65 : maximum < 0.45 { result.ink += 1 }
+                    if lightText ? maximum < 0.35 : minimum > 0.75 { result.background += 1 }
+                    if result.passes { return result }
                 }
             }
         }
-        return false
+        return result
+    }
+
+    private static func layoutWindowInk(_ bitmap: NSBitmapImageRep, rect: NSRect, window: NSWindow, lightText: Bool = false) -> LayoutInkSamples {
+        guard let content = window.contentView, content.bounds.width > 0, content.bounds.height > 0 else {
+            return LayoutInkSamples(rect: .zero)
+        }
+        let sx = CGFloat(bitmap.pixelsWide) / content.bounds.width
+        let sy = CGFloat(bitmap.pixelsHigh) / content.bounds.height
+        let top = content.isFlipped ? rect.minY - content.bounds.minY : content.bounds.maxY - rect.maxY
+        return layoutInkSamples(bitmap, pixels: NSRect(x: (rect.minX - content.bounds.minX) * sx,
+            y: top * sy, width: rect.width * sx, height: rect.height * sy), lightText: lightText)
     }
 
     /// Capture only this process's scratch window, including the compositor's Metal layer.
@@ -596,9 +858,11 @@ extension SelfTest {
         var success = false
         var stage = "enumerating current process"
         var captureState = "listed=unknown isOnScreen=unknown isActive=unknown"
+        var lastBitmap: NSBitmapImageRep?
+        var samples: [[String: Any]] = []
         let windowState = "windowID=\(window.windowNumber) frame=\(window.frame) visible=\(window.isVisible) miniaturized=\(window.isMiniaturized) occlusion=\(window.occlusionState.rawValue)"
         func diagnose(_ reason: String, error: Error? = nil) {
-            var message = "Layout capture failed: \(url.lastPathComponent) stage=\(stage) \(windowState) \(captureState) reason=\(reason)"
+            var message = "Layout capture failed: \(url.lastPathComponent) stage=\(stage) \(windowState) \(captureState) reason=\(reason) samples=\(samples)"
             if let error {
                 let native = error as NSError
                 message += " errorDomain=\(native.domain) errorCode=\(native.code) description=\(native.localizedDescription) failureReason=\(native.localizedFailureReason ?? "none")"
@@ -607,77 +871,93 @@ extension SelfTest {
                 }
             }
             print(message)
+            let folder = layoutDiagnosticFolder(beside: url)
+            Paths.ensure(folder)
+            if let png = lastBitmap?.representation(using: .png, properties: [:]) {
+                try? png.write(to: folder.appendingPathComponent("compositor.png"))
+            }
+            let state: [String: Any] = ["file": url.lastPathComponent, "stage": stage, "window": windowState,
+                "capture": captureState, "reason": reason, "error": error.map { String(describing: $0) } ?? "none", "samples": samples]
+            if let data = try? JSONSerialization.data(withJSONObject: state, options: [.prettyPrinted, .sortedKeys]) {
+                try? data.write(to: folder.appendingPathComponent("compositor-state.json"))
+            }
         }
         let task = Task { @MainActor in
             do {
-                let content = try await SCShareableContent.currentProcess
-                guard !Task.isCancelled else { complete = true; return }
-                stage = "looking up window"
-                guard let target = content.windows.first(where: { $0.windowID == CGWindowID(window.windowNumber) }) else {
-                    captureState = "listed=false isOnScreen=unavailable isActive=unavailable enumeratedWindowIDs=\(content.windows.map(\.windowID))"
-                    diagnose("Requested window is absent from current-process shareable content.")
-                    complete = true
-                    return
-                }
-                captureState = "listed=true isOnScreen=\(target.isOnScreen) isActive=\(target.isActive) targetFrame=\(target.frame)"
-                let filter = SCContentFilter(desktopIndependentWindow: target)
-                captureState += " filterRect=\(filter.contentRect) pointPixelScale=\(filter.pointPixelScale)"
-                stage = "checking filter geometry"
-                guard abs(filter.contentRect.width - window.frame.width) < 1,
-                      abs(filter.contentRect.height - window.frame.height) < 1 else {
-                    diagnose("Filter dimensions differ from the requested window.")
-                    complete = true
-                    return
-                }
-                let configuration = SCStreamConfiguration()
-                configuration.width = Int((filter.contentRect.width * CGFloat(filter.pointPixelScale)).rounded())
-                configuration.height = Int((filter.contentRect.height * CGFloat(filter.pointPixelScale)).rounded())
-                configuration.showsCursor = false
-                configuration.ignoreShadowsSingleWindow = true
-                // Independent-window capture uses the full window bounds. Leave sourceRect
-                // unset so an oversized window is not cropped to its visible screen portion.
-                captureState += " requestedPixels=\(configuration.width)x\(configuration.height)"
-                var missingInk: [String] = []
                 let deadline = Date().addingTimeInterval(8)
-                for _ in 0..<30 {
+                var pending = "No matching compositor frame yet."
+                for _ in 0..<40 {
                     guard !Task.isCancelled else { complete = true; return }
-                    guard Date() < deadline else {
-                        diagnose("Capture deadline expired; missing " + missingInk.joined(separator: ", "))
-                        complete = true
-                        return
+                    guard Date() < deadline else { diagnose(pending); complete = true; return }
+                    // WindowServer geometry can lag setFrame, especially for consecutive
+                    // minimum-size windows. Obtain fresh metadata until the frame matches.
+                    stage = "enumerating current process"
+                    let content = try await SCShareableContent.currentProcess
+                    guard !Task.isCancelled else { complete = true; return }
+                    stage = "looking up window"
+                    guard let target = content.windows.first(where: { $0.windowID == CGWindowID(window.windowNumber) }) else {
+                        captureState = "listed=false isOnScreen=unavailable isActive=unavailable enumeratedWindowIDs=\(content.windows.map(\.windowID))"
+                        pending = "Requested window is absent from current-process shareable content."
+                        try await Task.sleep(nanoseconds: 50_000_000)
+                        continue
                     }
+                    captureState = "listed=true isOnScreen=\(target.isOnScreen) isActive=\(target.isActive) targetFrame=\(target.frame)"
+                    let filter = SCContentFilter(desktopIndependentWindow: target)
+                    captureState += " filterRect=\(filter.contentRect) pointPixelScale=\(filter.pointPixelScale)"
+                    stage = "checking filter geometry"
+                    guard abs(filter.contentRect.width - window.frame.width) < 1,
+                          abs(filter.contentRect.height - window.frame.height) < 1 else {
+                        pending = "WindowServer has not reported the requested dimensions yet."
+                        try await Task.sleep(nanoseconds: 50_000_000)
+                        continue
+                    }
+                    let configuration = SCStreamConfiguration()
+                    configuration.width = Int((filter.contentRect.width * CGFloat(filter.pointPixelScale)).rounded())
+                    configuration.height = Int((filter.contentRect.height * CGFloat(filter.pointPixelScale)).rounded())
+                    configuration.showsCursor = false
+                    configuration.ignoreShadowsSingleWindow = true
+                    captureState += " requestedPixels=\(configuration.width)x\(configuration.height)"
                     stage = "capturing independent window"
                     let image = try await SCScreenshotManager.captureImage(contentFilter: filter, configuration: configuration)
                     guard !Task.isCancelled else { complete = true; return }
+                    let bitmap = NSBitmapImageRep(cgImage: image)
+                    lastBitmap = bitmap
                     stage = "checking returned pixels"
                     guard image.width == configuration.width, image.height == configuration.height else {
                         diagnose("Returned pixels \(image.width)x\(image.height) differ from configured dimensions.")
                         complete = true
                         return
                     }
-                    let bitmap = NSBitmapImageRep(cgImage: image)
                     let dark = window.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-                    let pdfDrawn = pdfInk.map { layoutHasInk(bitmap, rect: $0, window: window) } ?? true
-                    missingInk = pdfDrawn ? [] : ["PDF page text"]
-                    for (name, rect) in textInk where !layoutHasInk(bitmap, rect: rect, window: window, lightText: dark) {
-                        missingInk.append(name + " text")
+                    samples = []
+                    var missing: [String] = []
+                    if let pdfInk {
+                        let result = layoutWindowInk(bitmap, rect: pdfInk, window: window)
+                        var state = result.state; state["name"] = "PDF"
+                        samples.append(state)
+                        if !result.passes { missing.append("PDF page text") }
                     }
-                    if missingInk.isEmpty {
+                    for (name, rect) in textInk {
+                        let result = layoutWindowInk(bitmap, rect: rect, window: window, lightText: dark)
+                        var state = result.state; state["name"] = name
+                        samples.append(state)
+                        if !result.passes { missing.append(name + " text") }
+                    }
+                    if missing.isEmpty {
                         stage = "encoding PNG"
                         guard let png = bitmap.representation(using: .png, properties: [:]) else {
-                            diagnose("PNG encoder returned no data.")
-                            complete = true
-                            return
+                            diagnose("PNG encoder returned no data."); complete = true; return
                         }
                         stage = "writing PNG"
                         try png.write(to: url)
                         success = true
                         break
                     }
+                    pending = "Capture deadline expired; missing " + missing.joined(separator: ", ")
                     stage = "waiting for drawn text"
                     try await Task.sleep(nanoseconds: 100_000_000)
                 }
-                if !success { diagnose("Missing " + missingInk.joined(separator: ", ")) }
+                if !success { diagnose(pending) }
             } catch {
                 if !Task.isCancelled { diagnose("ScreenCaptureKit or PNG operation threw.", error: error) }
             }

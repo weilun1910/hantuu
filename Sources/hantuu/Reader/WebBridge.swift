@@ -97,6 +97,7 @@ private final class WeakPageMessageHandler: NSObject, WKScriptMessageHandler {
 final class WebPage: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
     let webView: HantuuWebView
     private(set) var ready = false
+    private(set) var terminationCount = 0
     private var queue: [String] = []
     var onMessage: (([String: Any]) -> Void)?
     var onReady: (() -> Void)?
@@ -169,8 +170,11 @@ final class WebPage: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
         if url.scheme == "http" || url.scheme == "https" { NSWorkspace.shared.open(url) }
     }
 
-    func webView(_ webView: WKWebView, webContentProcessDidTerminate webView2: WKWebView) {
+    func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+        guard webView === self.webView else { return }
+        terminationCount += 1
         ready = false
+        Log.write("WebContent terminated for \(webView.identifier?.rawValue ?? "web view"); reloading its retained state.")
         webView.reload()
     }
 }
