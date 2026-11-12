@@ -11,6 +11,18 @@ extension SelfTest {
         check("panel feedback: revision and quote survive persistence", restored == c)
         let text = CommentMessage.build([c], folder: "/project")
         func line(_ object: [String: Any]) -> Data { try! JSONSerialization.data(withJSONObject: object) }
+        let wrapped = "\n\n<pasted_content id=\"0141\">\n" + text + "\n</pasted_content id=\"0141\">\n"
+        var pasteParser = ClaudeTranscriptParser()
+        let pasted = pasteParser.parse(line: line(["type": "user", "uuid": "pasted-review",
+            "message": ["role": "user", "content": wrapped]]))
+        var pastePending = PendingReaderMessages()
+        pastePending.enqueue(id: "review-paste", text: text, files: [], agentID: "claude", existing: [])
+        check("panel feedback Claude: native pasted envelope preserves canonical review and receipt",
+              pasted.first?.text == text && pastePending.reconcile(pasted).first?.replacesPendingID == "review-paste")
+        let mismatched = wrapped.replacingOccurrences(of: "</pasted_content id=\"0141\">", with: "</pasted_content id=\"9999\">")
+        check("panel feedback Claude: malformed and quoted envelopes stay visible",
+              ClaudePastedContent.unwrap(mismatched).contains("<pasted_content") &&
+              ClaudePastedContent.unwrap("Explain this: " + wrapped).contains("<pasted_content"))
         for agent in ["claude", "codex"] {
             var pending = PendingReaderMessages()
             var claude = ClaudeTranscriptParser()
@@ -33,17 +45,47 @@ extension SelfTest {
             let fresh = user("fresh")
             check("panel feedback \(agent): exact transcript acknowledgement", pending.reconcile(fresh).first?.replacesPendingID == "review")
             check("panel feedback \(agent): receipt consumes once", pending.reconcile(fresh).allSatisfy { $0.replacesPendingID == nil })
+
+            // First discovery attaches the identity for the send already in progress.
+            // A later switch must still discard the previous conversation's queue.
+            let app = AppModel()
+            let project = Project(path: dir.path)
+            let chat = Chat(projectID: project.id, agentID: agent)
+            chat.status = .ended
+            app.projects = [project]; app.chats = [chat]
+            app.transcriptLocations = TranscriptLocations(claude: dir, codex: dir)
+            let firstPath = dir.appendingPathComponent("review-first-\(agent).jsonl")
+            let nextPath = dir.appendingPathComponent("review-next-\(agent).jsonl")
+            try? Data().write(to: firstPath); try? Data().write(to: nextPath)
+            chat.pendingMessages.enqueue(id: "first-review", text: text, files: [], agentID: agent, existing: [])
+            app.followSession(chat, session: .init(id: "11111111-1111-4111-8111-111111111111", path: firstPath.path), verifiedCodex: agent == "codex")
+            check("panel feedback \(agent): first identity keeps the pending receipt", chat.pendingMessages.entries.count == 1)
+            let receipt = chat.pendingMessages.reconcile(user("first-session-receipt"))
+            check("panel feedback \(agent): first session acknowledges exactly once", receipt.first?.replacesPendingID == "first-review" && chat.pendingMessages.isEmpty)
+            chat.pendingMessages.enqueue(id: "old-review", text: text, files: [], agentID: agent, existing: [])
+            app.followSession(chat, session: .init(id: "22222222-2222-4222-8222-222222222222", path: nextPath.path), verifiedCodex: agent == "codex")
+            check("panel feedback \(agent): another session drops old pending feedback", chat.pendingMessages.isEmpty)
+            chat.follower?.stop()
         }
         let url = dir.appendingPathComponent("panel-feedback-fixture.json")
         let id = UUID()
         let batch = PanelFeedbackDelivery.Batch(id: "pending-review-test", chatID: id, comments: [c], text: text, state: .queued)
-        if let data = try? JSONEncoder.hantuu.encode([batch]) { try? data.write(to: url) }
+        let promoted = PanelFeedbackDelivery.Batch(id: "pending-review-promoted", chatID: id, comments: [c], text: text, state: .queued)
+        if let data = try? JSONEncoder.hantuu.encode([batch, promoted]) { try? data.write(to: url) }
         let service = PanelFeedbackDelivery(url: url)
         check("panel feedback: restart retains unconfirmed batch", service.latest(for: id)?.state == .failed && service.latest(for: id)?.comments == [c])
         service.acknowledge(id: batch.id, chatID: UUID())
         check("panel feedback: wrong chat cannot acknowledge", service.latest(for: id)?.state == .failed)
         service.acknowledge(id: batch.id, chatID: id)
-        check("panel feedback: matching receipt delivers", service.latest(for: id)?.state == .delivered)
+        check("panel feedback: matching receipt delivers", service.batches.first { $0.id == batch.id }?.state == .delivered)
+        let receiptModel = AppModel()
+        service.connect(receiptModel)
+        var combined = ReaderEntry(id: "combined-user", kind: .user, text: text)
+        combined.replacesPendingIDs = [promoted.id]
+        receiptModel.readerAppend.send((UUID(), [combined]))
+        check("panel feedback: batch receipt cannot acknowledge another chat", service.latest(for: id)?.state == .failed)
+        receiptModel.readerAppend.send((id, [combined]))
+        check("panel feedback: promoted batch receipt acknowledges its review", service.latest(for: id)?.state == .delivered)
         let mode = (try? FileManager.default.attributesOfItem(atPath: url.path)[.posixPermissions]) as? NSNumber
         check("panel feedback: receipts are owner-only", mode?.intValue == 0o600)
         panelFeedbackSnapshots(dir)

@@ -87,6 +87,7 @@ enum CodexTitleLookup {
 final class CodexTitleIdentityState {
     var hint: CodexTitleIdentity?
     var waiting = false
+    var blocksInput = false
     var generation = UUID()
     var cancellation: ChatHistoryCancellation?
     var retry: DispatchWorkItem?
@@ -109,7 +110,7 @@ final class CodexTitleIdentityState {
 }
 
 extension Chat {
-    var codexIdentityWaiting: Bool { agentID == "codex" && codexTitleIdentity.waiting }
+    var codexIdentityWaiting: Bool { agentID == "codex" && codexTitleIdentity.waiting && codexTitleIdentity.blocksInput }
 }
 
 extension AppModel {
@@ -131,17 +132,20 @@ extension AppModel {
             objectWillChange.send(); scheduleSave()
             return true
         }
-        let preserveSession = hint.preservesSession(chat.sessionID)
+        let hasPriorIdentity = chat.sessionID != nil || chat.transcriptPath != nil || state.hint != nil || state.blocksInput
+        let preserveSession = !hasPriorIdentity || hint.preservesSession(chat.sessionID)
         state.cancel(); state.hint = hint; state.attempts = 0
         if !hint.truncated, hint.matches(chat.sessionID), chat.transcriptPath != nil {
-            state.waiting = false
+            state.waiting = false; state.blocksInput = false
             objectWillChange.send(); scheduleSave()
             return true
         }
-        // Hide the reader while uniqueness is checked. A matching saved full UUID
-        // keeps its queued input and seen watermarks. The waiting flag blocks sending
-        // and ordinary discovery until verification or authoritative notify resolves it.
+        // Hide the reader while uniqueness is checked. A matching saved full UUID keeps
+        // its queued input and seen watermarks until native metadata verifies the title.
         state.waiting = true
+        // Codex exposes a new thread ID before it creates the rollout. Its first input
+        // must be allowed to create that file. Replacing an existing identity stays gated.
+        state.blocksInput = hasPriorIdentity
         chat.discoveryTimer?.invalidate(); chat.transcriptRecovery = nil
         chat.follower?.stop(); chat.follower = nil
         if !preserveSession { chat.sessionID = nil }
@@ -164,8 +168,17 @@ extension AppModel {
         guard chat.agentID == "codex" else { return true }
         let state = chat.codexTitleIdentity
         guard state.allows(session.id) else { return false }
-        state.cancel(); state.waiting = false
         return true
+    }
+
+    /// Only validated native metadata can release the input gate. A process-owned rollout
+    /// can supersede an old title, while later hook signals still obey the current hint.
+    func confirmCodexSession(_ chat: Chat, session: HookLineParser.Session) {
+        guard chat.agentID == "codex" else { return }
+        let state = chat.codexTitleIdentity
+        state.cancel()
+        if let hint = state.hint, !hint.matches(session.id) { state.hint = nil }
+        state.waiting = false; state.blocksInput = false
     }
 
     private func resolveCodexTitle(_ chat: Chat) {
@@ -188,7 +201,7 @@ extension AppModel {
                 switch outcome {
                 case let .found(id, path):
                     // followSession runs the same state-reset and follower path as notify.
-                    self.followSession(chat, session: HookLineParser.Session(id: id, path: path))
+                    self.followSession(chat, session: HookLineParser.Session(id: id, path: path), verifiedCodex: true)
                 case .cancelled: break
                 case .missing, .ambiguous, .incomplete:
                     state.attempts += 1

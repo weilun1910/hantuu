@@ -57,9 +57,13 @@ extension SelfTest {
         let mismatch = search(records: [local], native: false)
         check("history: wrong saved identity is not adopted", mismatch.hits.first?.record.identityVerified == false && mismatch.hits.first?.record.sessionID == "44444444-4444-4444-8444-444444444444" && mismatch.hits.first?.entries.isEmpty == true)
         if let verified = amber.hits.first?.record { check("history: revalidation checks identity and cwd", ChatHistoryIndex.verify(verified)) }
+        check("history: future appended text is initially absent", search("telescope").hits.isEmpty)
         let append = line(["type": "assistant", "sessionId": "11111111-1111-4111-8111-111111111111", "uuid": "later", "message": ["role": "assistant", "content": [["type": "text", "text": "Incremental telescope update"]]]])
         if let h = try? FileHandle(forWritingTo: claude) { try? h.seekToEnd(); try? h.write(contentsOf: append); try? h.close() }
-        check("history: appended messages are indexed without duplication", search("telescope").hits.first?.matchedMessageID == "later" && search("lighthouse").hits.first?.entries.filter { $0.id == "user-one" }.count == 1)
+        // Assistant content blocks have stable block IDs so multiple blocks can be linked.
+        let appended = search("telescope")
+        let repeated = search("telescope")
+        check("history: appended messages are indexed without duplication", appended.hits.first?.matchedMessageID == "later-0" && repeated.hits.first?.entries.filter { $0.id == "later-0" }.count == 1 && search("lighthouse").hits.first?.entries.filter { $0.id == "user-one" }.count == 1)
         let cancellation = ChatHistoryCancellation(); cancellation.cancel()
         let cancelled = index.search(records: [local], query: "", scope: .all, location: .all, folder: nil, includeNative: true, fullText: true, roots: roots, cancellation: cancellation)
         check("history: cancelled work stops before file scanning", cancelled.hits.isEmpty)

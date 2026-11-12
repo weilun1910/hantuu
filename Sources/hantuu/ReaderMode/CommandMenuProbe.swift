@@ -44,7 +44,12 @@ enum CommandMenuScreen {
         guard let input = input(screen, agent: agent) else { return false }
         if input.isEmpty { return true }
         // Codex paints this placeholder inside an otherwise empty composer.
-        return agent == "codex" && input == "Ask Codex to do anything"
+        if agent == "codex" { return input == "Ask Codex to do anything" }
+        // Claude's first empty prompt paints one of these suggestions. Match its complete
+        // templates, not an arbitrary sentence starting with Try or a queued-message hint.
+        guard agent == "claude" else { return false }
+        let suggestion = #"\ATry "(?:fix lint errors|fix typecheck errors|how do I log an error\?|create a util logging\.py that\.\.\.|how does [^"\r\n]+ work\?|refactor [^"\r\n]+|edit [^"\r\n]+ to\.\.\.|write a test for [^"\r\n]+)"\z"#
+        return input.range(of: suggestion, options: .regularExpression) != nil
     }
 
     static func safe(_ screen: String) -> Bool {

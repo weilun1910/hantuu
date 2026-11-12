@@ -872,13 +872,16 @@ final class AppModel: ObservableObject, TerminalEvents {
             chat.codexSessionRequest = token
             let previousID = chat.sessionID
             let previousPath = chat.transcriptPath
+            let titleGeneration = chat.codexTitleIdentity.generation
             let root = transcriptLocations.codex
             Log.write("transcript signal chat=\(chat.id) candidate=\(session.id ?? "unknown")")
             DispatchQueue.global(qos: .utility).async { [weak self, weak chat] in
                 let resolved = TranscriptLookup.validatedCodexSession(session, root: root)
                 DispatchQueue.main.async {
                     guard let self, let chat, chat.codexSessionRequest == token,
-                          chat.sessionID == previousID, chat.transcriptPath == previousPath else { return }
+                          chat.sessionID == previousID, chat.transcriptPath == previousPath,
+                          chat.codexTitleIdentity.generation == titleGeneration,
+                          self.codexTitleAllowsFollow(chat, session: session) else { return }
                     chat.codexSessionRequest = nil
                     guard let resolved else {
                         Log.write("transcript signal chat=\(chat.id) candidate=\(session.id ?? "unknown") result=unresolved-kept-current")
@@ -890,7 +893,9 @@ final class AppModel: ObservableObject, TerminalEvents {
             return
         }
         guard kind != .codex || session.path != nil else { return }
+        if kind == .codex { confirmCodexSession(chat, session: session) }
         let changedID = session.id != nil && session.id != chat.sessionID
+        let replacedSession = changedID && chat.sessionID != nil
         let path = session.path ?? (changedID ? nil : chat.transcriptPath)
         guard changedID || path != chat.transcriptPath || chat.follower == nil else { return }
         Log.write("transcript identity chat=\(chat.id) from=\(chat.sessionID ?? "unknown") to=\(session.id ?? chat.sessionID ?? "unknown") path=\(path ?? "pending")")
@@ -903,7 +908,7 @@ final class AppModel: ObservableObject, TerminalEvents {
         chat.readerWork = nil
         chat.liveEntries = []
         chat.firstPrompt = nil
-        if changedID {
+        if replacedSession {
             subagentBrowser.forget(chat.id)
             chat.pendingMessages.removeAll()
             chat.seenSessionID = nil

@@ -173,7 +173,7 @@ struct ClaudeTranscriptParser: TranscriptParser {
     }
 
     private func userText(_ raw: String, images: [String], id: String, time: String?) -> [ReaderEntry] {
-        let s = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        let s = ClaudePastedContent.unwrap(raw)
         if s.hasPrefix("<command-name>") || s.hasPrefix("<command-message>") {
             let name = Self.between(s, "<command-name>", "</command-name>") ?? "command"
             let args = Self.between(s, "<command-args>", "</command-args>") ?? ""

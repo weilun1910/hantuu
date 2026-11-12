@@ -47,11 +47,29 @@ extension SelfTest {
         model.acceptCodexTitle(chat, title: shortText + " | Saved title")
         check("codex title: revalidation hides history while preserving actual chat state", chat.codexIdentityWaiting && chat.transcriptPath == nil && chat.sessionID == first && chat.manualUnread && chat.seenCompletionKey == "saved-completion" && chat.pendingMessages.entries.count == 1)
         model.followSession(chat, session: HookLineParser.Session(id: first, path: firstFile.path))
-        check("codex title: verified same session restores follower and keeps state", !chat.codexIdentityWaiting && chat.transcriptPath == firstFile.path && chat.follower != nil && chat.manualUnread && chat.seenCompletionKey == "saved-completion" && chat.pendingMessages.entries.count == 1)
+        check("codex title: verified same session restores follower and keeps state", waitUntil(3) { !chat.codexIdentityWaiting && chat.transcriptPath == firstFile.path && chat.follower != nil } && chat.manualUnread && chat.seenCompletionKey == "saved-completion" && chat.pendingMessages.entries.count == 1)
         let follower = chat.follower
         model.acceptCodexTitle(chat, title: shortText + " | New automatic name")
         check("codex title: automatic rename keeps active follower and queued message", chat.follower === follower && !chat.codexIdentityWaiting && chat.pendingMessages.entries.count == 1 && chat.manualUnread)
         chat.follower?.stop()
+        chat.codexTitleIdentity.waiting = true
+        chat.codexTitleIdentity.blocksInput = true
+        model.followSession(chat, session: .init(id: first, path: firstFile.path), verifiedCodex: true)
+        check("codex title: verified unchanged rollout releases the composer gate", !chat.codexIdentityWaiting && !chat.codexTitleIdentity.waiting && chat.follower === follower)
+        let freshChat = Chat(projectID: project.id, agentID: "codex")
+        freshChat.status = .ended
+        model.chats.append(freshChat)
+        freshChat.pendingMessages.enqueue(id: "first-send", text: "First prompt", files: [], agentID: "codex", existing: [])
+        model.acceptCodexTitle(freshChat, title: shortText + " | New thread")
+        check("codex title: deferred first rollout permits input while identity is unresolved", freshChat.codexTitleIdentity.waiting && !freshChat.codexIdentityWaiting && freshChat.pendingMessages.entries.count == 1)
+        model.followSession(freshChat, session: .init(id: first, path: firstFile.path), verifiedCodex: true)
+        check("codex title: first verified rollout retains pending input", !freshChat.codexTitleIdentity.waiting && freshChat.pendingMessages.entries.count == 1 && freshChat.follower != nil)
+        model.acceptCodexTitle(freshChat, title: "77777777-7777-4777-8777-777777777777 | Different thread")
+        check("codex title: changing an established thread still blocks input and clears its queue", freshChat.codexIdentityWaiting && freshChat.pendingMessages.isEmpty)
+        model.followSession(freshChat, session: .init(id: "77777777-7777-4777-8777-777777777777", path: root.appendingPathComponent("missing.jsonl").path))
+        _ = waitUntil(3) { freshChat.codexSessionRequest == nil }
+        check("codex title: unverified hook cannot release the input gate", freshChat.codexIdentityWaiting && freshChat.follower == nil)
+        freshChat.follower?.stop()
         check("codex title: launch override is isolated to the command", AgentHooks.codexArguments(existingNotify: .none).contains(#"tui.terminal_title=["session-id","thread-name"]"#))
         check("codex title: exact native identity resolves", CodexTitleLookup.resolve(full, root: root) == .found(id: first, path: firstFile.path))
         check("codex title: unique truncated identity resolves", CodexTitleLookup.resolve(short, root: root) == .found(id: first, path: firstFile.path))

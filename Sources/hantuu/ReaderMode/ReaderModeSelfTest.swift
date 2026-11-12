@@ -553,6 +553,10 @@ extension SelfTest {
             w.makeFirstResponder(nil)
             (wv as? FocuslessWebView)?.onMouseDown?()
             check("focus: a click on the reader puts the keyboard back in the message box", w.firstResponder === rm.composer.textView)
+            _ = rm.reader?.interaction.message(["type": "focusRequested"])
+            check("focus: explicit reader controls can still take keyboard focus", wv.acceptsFirstResponder)
+            (wv as? FocuslessWebView)?.onMouseDown?()
+            check("focus: an ordinary click releases a prior control's keyboard focus", !wv.acceptsFirstResponder && w.firstResponder === rm.composer.textView)
         }
 
         func bytes() -> Data { (try? Data(contentsOf: sent)) ?? Data() }

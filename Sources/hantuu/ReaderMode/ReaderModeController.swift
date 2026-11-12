@@ -204,15 +204,9 @@ final class ReaderModeController: NSObject {
         let r = ReaderController(model: model, page: "reader.html?layout=main", identifier: "hantuu.reader.main", focusless: true)
         r.onSendNow = { [weak self] chatID, id in _ = self?.sendNow(chatID: chatID, id: id) }
         r.onFocusComposer = { [weak self] in self?.focusComposer() }
-        (r.page.webView as? FocuslessWebView)?.onMouseDown = { [weak self, weak r] in
-            r?.page.webView.evaluateJavaScript("!!document.activeElement?.closest('button,summary,input,textarea,select,a')") { interactive, _ in
-                guard let self, let r else { return }
-                if interactive as? Bool == true {
-                    (r.page.webView as? FocuslessWebView)?.allowsInteraction = true
-                    r.page.webView.window?.makeFirstResponder(r.page.webView)
-                } else { self.focusComposer() }
-            }
-        }
+        // Restore ordinary typing synchronously. The page requests focus for the actual
+        // clicked control; a previously focused DOM element is not evidence of this click.
+        (r.page.webView as? FocuslessWebView)?.onMouseDown = { [weak self] in self?.focusComposer() }
         // Files and pictures dropped anywhere on the reader go into the message box.
         (r.page.webView as? FocuslessWebView)?.onDropAttachments = { [weak self] content in
             guard let self, !self.composer.isHidden, self.composerMode != .none else { return false }

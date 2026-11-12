@@ -546,7 +546,7 @@ private final class LiveCheckSession {
             terminal.pressEscape()
             terminal.pressBackspace(times: prefix.count)
             guard wait(3, allowingMenu: true, until: { CommandMenuScreen.emptyInput(self.screen, agent: self.agent) }) else {
-                report("cleared suggestions", false); return
+                report("cleared suggestions", false, "input=\(CommandMenuScreen.input(screen, agent: agent) ?? "unrecognized"); \(String(screen.suffix(600)))"); return
             }
         }
         report("suggestions paged without submitting", !observed.isEmpty && !bounded,
@@ -561,7 +561,7 @@ private final class LiveCheckSession {
         reader.composer.textView.onCommandQuery?()
         let discovered = wait(100, allowingMenu: true) { reader.hasObservedCommands && !reader.isDiscoveringCommands }
         report("reader harvests its idle menu and restores input", discovered && CommandMenuScreen.emptyInput(screen, agent: agent),
-               String(screen.suffix(450)))
+               "identity waiting=\(chat.codexIdentityWaiting), probe active=\(reader.isDiscoveringCommands), composer=\(reader.composerMode); " + String(screen.suffix(450)))
         guard discovered else { return }
         let names = Set(reader.composer.textView.commandCatalog.filter { $0.sigil == "/" && $0.aliasOf == nil }.map(\.name))
         report("TUI commands present in reader", observed.subtracting(names).isEmpty,
@@ -739,20 +739,28 @@ private final class LiveCheckSession {
     func sendNow() {
         let token = "received" + UUID().uuidString.prefix(8).lowercased()
         let finished = "finished" + UUID().uuidString.prefix(8).lowercased()
-        let first = "Without tools, count slowly from 1 to 300, one number per line. Spell out each number and its square on that line. Finish with \(finished)."
+        let first = "Without tools or file access, write every integer from 1 to 400, one per line. After each integer write: this is the next number in the sequence. Do not abbreviate, summarize, or skip any lines. Finish with \(finished)."
         let second = "Stop counting now. Without tools, reply only \(token)."
         guard let chat else { return }
         func completedCount() -> Bool {
             chat.allEntries.contains { $0.kind == .assistant && $0.text.contains(finished) }
         }
+        let sentAt = Date()
         let sent = send(first)
-        let busy = sent && wait(45) {
-            TerminalScreen.analyze(self.screen).busy && self.reader?.isTyping == false &&
-                self.reader?.composerMode.isWorking == true && !completedCount()
+        var queued = false
+        var busyEvidence = ""
+        let busy = sent && wait(60) {
+            let state = self.center?.state(of: chat.id)
+            let screenBusy = TerminalScreen.analyze(self.screen).busy
+            guard !completedCount(), LiveCheckRules.canQueue(screenBusy: screenBusy,
+                turnActive: state?.turnActive == true, startedAt: state?.turnStartedAt, sentAt: sentAt,
+                typing: self.reader?.isTyping != false, composerWorking: self.reader?.composerMode.isWorking == true) else { return false }
+            busyEvidence = "screen busy=\(screenBusy), turn active=\(state?.turnActive == true); " + String(self.screen.suffix(450))
+            queued = self.send(second)
+            return true
         }
-        report("count is running before queueing", busy, String(screen.suffix(450)))
+        report("count is running before queueing", busy, busyEvidence.isEmpty ? String(screen.suffix(450)) : busyEvidence)
         guard busy, let reader, let page = reader.reader?.page else { return }
-        let queued = send(second)
         let id = chat.pendingMessages.entries.first(where: { $0.text == second })?.id
         let actionable = queued && wait(8) {
             reader.isTyping == false && !completedCount() &&

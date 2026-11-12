@@ -79,6 +79,14 @@ extension SelfTest {
         check("commands keys: namespace punctuation preserves shifted base keys", GhosttyInput.commandKey(":").code == 41 && GhosttyInput.commandKey(":").unshifted == 59 && GhosttyInput.commandKey(":").shift && GhosttyInput.commandKey("_").code == 27)
 
         check("commands probe: an empty first line does not erase a multiline draft", !CommandMenuScreen.emptyInput("❯ \n  unfinished second line\n────────\n? for shortcuts", agent: "claude") && !CommandMenuScreen.emptyInput("› \n  unfinished second line\nGPT-6 low", agent: "codex"))
+        for suggestion in ["fix lint errors", "fix typecheck errors", "how does <filepath> work?", "refactor src/main.swift",
+                           "how do I log an error?", "edit src/main.swift to...", "write a test for src/main.swift", "create a util logging.py that..."] {
+            let placeholder = "❯ Try \"\(suggestion)\"\n────────\n? for shortcuts"
+            check("commands probe: Claude first-prompt suggestion is empty input", CommandMenuScreen.emptyInput(placeholder, agent: "claude"))
+        }
+        check("commands probe: arbitrary Try text and queue hints remain drafts",
+              !CommandMenuScreen.emptyInput("❯ Try \"delete everything\"", agent: "claude") &&
+              !CommandMenuScreen.emptyInput("❯ Press up to edit queued messages", agent: "claude"))
         let aliases = CommandMenuScreen.reconcile(ReaderCommandCatalog.builtins(agent: "codex"), observed: [
             ReaderCommand(name: "side", description: "Side chat"), ReaderCommand(name: "exit", description: "Exit")
         ], complete: true)

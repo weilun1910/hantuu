@@ -46,6 +46,7 @@ final class PanelFeedbackDelivery: ObservableObject {
         model.readerAppend.sink { [weak self] chatID, entries in
             for entry in entries {
                 if let id = entry.replacesPendingID { self?.acknowledge(id: id, chatID: chatID) }
+                for id in entry.replacesPendingIDs ?? [] { self?.acknowledge(id: id, chatID: chatID) }
             }
         }.store(in: &subscriptions)
         timer?.invalidate()

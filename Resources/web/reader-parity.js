@@ -298,7 +298,10 @@
     if (banner.hidden) return;
     banner.append(node('span', '', payload.message || 'The conversation could not be refreshed.'), button('Retry', () => R.post({ type: 'retryReader' })), button('Show Terminal', () => R.post({ type: 'showTerminal' })));
   }
-  document.addEventListener('pointerdown', ev => { if (ev.target.closest('button, summary, input')) R.post({ type: 'focusRequested' }); }, true);
+  document.addEventListener('pointerdown', ev => {
+    const interactive = ev.target.closest('button, summary, input, textarea, select, a');
+    R.post({ type: interactive ? 'focusRequested' : 'composerFocus' });
+  }, true);
   window.ReaderParity = { setRequests, requestResult, openFind: openSearch, nextMatch: backwards => { if (!findbar || findbar.hidden) openSearch(); else move(backwards === true || backwards === -1 ? -1 : 1); }, closeFind: closeSearch, renderEntry, register, prune, refreshSearch, openSearch, closeSearch, setStatus,
     reset(id) { restore(); records.clear(); pinChecklist(null); if (chat !== id) { setRequests([]); expanded.clear(); closeSearch(); chat = id; } },
     searchText,
