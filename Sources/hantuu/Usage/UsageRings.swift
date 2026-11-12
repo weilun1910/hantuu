@@ -22,7 +22,8 @@ struct UsageRings: View {
                 let off = s == .claude && claudeOff
                 UsageRing(glyph: s.glyph,
                           left: r?.ringWindow?.leftPercent(at: center.now),
-                          tooltip: UsageFormat.tooltip(s, r, now: center.now, off: off))
+                          tooltip: UsageFormat.tooltip(s, r, now: center.now, off: off),
+                          awaitingRefresh: r?.ringWindow?.hasReset(at: center.now) == true)
             }
         }
         .contentShape(Rectangle())
@@ -33,7 +34,8 @@ struct UsageRings: View {
         .popover(isPresented: Binding(get: { hover.isOpen }, set: { open in
             if !open { dismiss() }
         }), arrowEdge: .top) {
-            UsageHoverCard(sources: sources, readings: readings, now: center.now, claudeOff: claudeOff)
+            UsageHoverCard(sources: sources, readings: readings, now: center.now, claudeOff: claudeOff,
+                           refresh: { center.refresh(force: true) })
                 .onHover { inside in
                     hover.cardChanged(inside, at: ProcessInfo.processInfo.systemUptime)
                     schedule()
@@ -131,9 +133,12 @@ struct UsageHoverCard: View {
     let readings: [UsageSource: UsageReading]
     let now: Date
     var claudeOff = false
+    var refresh: (() -> Void)? = nil
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
+            Text(readings.values.contains { $0.ringWindow?.isWeekly == false } ? "Reported allowance" : "Weekly allowance")
+                .font(.system(size: 11, weight: .medium)).foregroundStyle(.secondary)
             ForEach(sources, id: \.self) { source in
                 VStack(alignment: .leading, spacing: 4) {
                     Text(source.displayName)
@@ -150,6 +155,13 @@ struct UsageHoverCard: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .accessibilityElement(children: .combine)
             }
+            if let refresh {
+                Button("Re-read usage", action: refresh)
+                    .font(.system(size: 12))
+                Text("Reads the latest local reports. New limits may require another provider turn; this does not contact your account.")
+                    .font(.system(size: 11)).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
         .padding(14)
         .frame(width: 320, alignment: .leading)
@@ -163,6 +175,7 @@ struct UsageRing: View {
     /// 0 to 100, or nil when there's no reading.
     let left: Double?
     let tooltip: String
+    var awaitingRefresh = false
 
     /// Outer size: the strokes are inset, so nothing draws outside it.
     static let size: CGFloat = 15
@@ -185,7 +198,7 @@ struct UsageRing: View {
                 Circle().inset(by: Self.line / 2).stroke(Color.hInk(0.12, light: 0.1), lineWidth: Self.line)
                 Circle().inset(by: Self.line / 2)
                     .trim(from: 0, to: max(0, min(1, left / 100)))
-                    .stroke(tint, style: StrokeStyle(lineWidth: Self.line, lineCap: .round))
+                    .stroke(tint, style: StrokeStyle(lineWidth: Self.line, lineCap: .round, dash: awaitingRefresh ? [1, 2] : []))
                     .rotationEffect(.degrees(-90))
             } else {
                 // No reading: a dotted outline only.

@@ -326,6 +326,10 @@ final class ReaderModeController: NSObject {
     func refresh() {
         guard let chat = model.selectedChat, chat.id == shownChatID else { return }
         let live = isLive(chat)
+        if live, chat.codexIdentityWaiting {
+            apply(.blocked(title: "Waiting for session identity", detail: "The Codex session is being verified. You can inspect it in the terminal."), chat: chat)
+            return
+        }
         var screen = TerminalScreen.State()
         if live, let t = chat.terminal, mode.face(of: chat) == .reader {
             screen = TerminalScreen.analyze(t.activeScreenText())
@@ -542,6 +546,7 @@ final class ReaderModeController: NSObject {
     @discardableResult
     func send() -> Bool {
         guard let chat = model.selectedChat, chat.id == shownChatID, let t = chat.terminal else { return false }
+        guard !chat.codexIdentityWaiting else { return false }
         if waitingToSendAfterProbe { return false }
         if menuProbe != nil {
             cancelMenuProbe()
@@ -672,6 +677,13 @@ final class ReaderModeController: NSObject {
         typing = true
         let id = outbox[0].id
         let chat = model.chats.first { $0.id == outbox[0].chatID }
+        if chat?.codexIdentityWaiting == true, chat?.status != .ended {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
+                guard let self, self.outbox.first?.id == id else { return }
+                self.typeNext()
+            }
+            return
+        }
         guard canType(id) else {
             chat?.pendingMessages.remove(id: id)
             outbox.removeFirst()

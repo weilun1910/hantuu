@@ -10,6 +10,7 @@ extension SelfTest {
         statusArguments()
         statusHookCommands(dir)
         statusEngine(dir)
+        sidebarAttention(dir)
         statusSnapshots(dir)
         liveAgent(dir)   // only with HANTUU_LIVE_AGENT=claude or codex
     }

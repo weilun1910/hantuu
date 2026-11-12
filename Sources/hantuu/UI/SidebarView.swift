@@ -18,6 +18,8 @@ struct SidebarView: View {
             }
             .frame(height: 40)
 
+            SidebarHistoryControls()
+            ScrollViewReader { proxy in
             ScrollView {
                 VStack(alignment: .leading, spacing: 10) {
                     if !model.pinnedChats.isEmpty {
@@ -39,11 +41,25 @@ struct SidebarView: View {
                 .padding(.bottom, 12)
             }
             .scrollIndicators(.never)
+            .onChange(of: model.sidebarCursor) { _, target in
+                if let target { proxy.scrollTo(target.id, anchor: .center) }
+            }
+            .onChange(of: model.sidebarRevealRequest) { _, _ in
+                DispatchQueue.main.async {
+                    if let target = model.sidebarCursor { proxy.scrollTo(target.id, anchor: .center) }
+                }
+            }
+            }
+            ArchiveUndoBar()
 
             Rectangle().fill(Color.hDivider).frame(height: 1)
             SidebarFooter()
         }
         .background(Color.hChrome.ignoresSafeArea())
+        .background(SidebarKeyboardCapture(model: model).frame(width: 0, height: 0))
+        .sheet(isPresented: $model.historyPresented) {
+            ChatHistoryView(model: model, initialScope: model.historyScope) { model.historyPresented = false }
+        }
     }
 }
 
@@ -66,6 +82,16 @@ struct ProjectSection: View {
                     .foregroundStyle(Color.hSecondary)
                     .lineLimit(1)
                     .truncationMode(.middle)
+                if !project.folderExists {
+                    Image(systemName: "folder.badge.questionmark").foregroundStyle(Color.hSecondary)
+                        .help("Folder missing. Use Locate Folder in the project menu.")
+                } else if !project.expanded {
+                    let count = model.chats(in: project).count
+                    Text("\(count)").font(.system(size: 10)).foregroundStyle(Color.hTertiary)
+                    if model.chats(in: project).contains(where: { $0.activity.wantsAttention }) {
+                        Image(systemName: "circle.fill").font(.system(size: 5)).foregroundStyle(Color.hSecondary)
+                    }
+                }
                 Spacer(minLength: 4)
                 // Always in the hierarchy and only faded out: removing the button when the
                 // cursor left the row also dismissed its agent popover before you could reach it.
@@ -81,8 +107,8 @@ struct ProjectSection: View {
                     .menuIndicator(.hidden)
                     .frame(width: 22)
                 }
-                .opacity(hovering || menuOpen ? 1 : 0)
-                .allowsHitTesting(hovering || menuOpen)
+                .opacity(hovering || menuOpen || model.sidebarCursor == .project(project.id) ? 1 : 0)
+                .allowsHitTesting(hovering || menuOpen || model.sidebarCursor == .project(project.id))
             }
             .padding(.horizontal, 6)
             .frame(height: 24)
@@ -91,6 +117,7 @@ struct ProjectSection: View {
             .onHover { hovering = $0 }
             .contextMenu { projectMenu }
             .help(project.path)
+            .modifier(SidebarFocusOutline(target: .project(project.id)))
 
             if project.expanded {
                 let chats = model.unpinnedChats(in: project)
@@ -122,9 +149,15 @@ struct ProjectSection: View {
             model.newTerminalTab()
         }
         Divider()
+        if !project.folderExists {
+            Button("Locate Folder...") { model.locateProject(project) }
+        }
         Button("Reveal in Finder") { NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: project.path)]) }
         Divider()
+        Button("Rename Project...") { model.renameProject(project) }
+        if project.alias != nil { Button("Use Folder Name") { model.renameProject(project, reset: true) } }
         Button("Remove Project") { model.removeProject(project.id) }
+            .disabled(model.chats(in: project).contains { $0.launchPhase.isBusy })
     }
 }
 
@@ -149,6 +182,7 @@ struct PinnedSection: View {
             .frame(height: 24)
             .contentShape(Rectangle())
             .onTapGesture { withAnimation(.easeOut(duration: 0.15)) { model.togglePinnedExpanded() } }
+            .modifier(SidebarFocusOutline(target: .pinned))
 
             if model.pinnedExpanded {
                 ForEach(model.pinnedChats) { chat in
@@ -208,6 +242,7 @@ struct SubagentRow: View {
         .buttonStyle(.plain)
         .onHover { hovering = $0 }
         .help(agent.title + "\n" + agent.detail)
+        .modifier(SidebarFocusOutline(target: .child(chatID, agent.id)))
         .contextMenu {
             if let path = agent.transcript {
                 Button("Reveal Transcript in Finder") {
@@ -234,11 +269,15 @@ struct ChatRow: View {
         HStack(spacing: 9) {
             ActivityDot(activity: chat.activity).frame(width: 12)
             VStack(alignment: .leading, spacing: 1) {
-                Text(chat.displayTitle)
-                    .font(.system(size: 13))
-                    .foregroundStyle(selected ? Color.hText : Color.hText.opacity(chat.activity == .ended ? 0.62 : 0.88))
-                    .lineLimit(1)
-                    .truncationMode(.tail)
+                if model.renamingChatID == chat.id {
+                    ChatNameEditor(chat: chat)
+                } else {
+                    Text(chat.displayTitle)
+                        .font(.system(size: 13))
+                        .foregroundStyle(selected ? Color.hText : Color.hText.opacity(chat.activity == .ended ? 0.62 : 0.88))
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                }
                 // What the agent is doing: "Wants to run Bash: npm test", "Done 2m ago".
                 // A worktree chat's branch comes first (Sessions/).
                 HStack(spacing: 6) {
@@ -252,7 +291,14 @@ struct ChatRow: View {
                     WorktreeBranchLabel(chat: chat)
                         .font(.system(size: 11))
                         .foregroundStyle(Color.hTertiary)
-                    ActivityDetailText(chat: chat)
+                    if chat.launchPhase.label != nil {
+                        ChatLaunchDetail(chat: chat)
+                    } else {
+                        Text(chat.agent.name).font(.system(size: 10)).foregroundStyle(Color.hTertiary).lineLimit(1)
+                        if chat.agentID == "codex", chat.status != .ended, chat.sessionID == nil || chat.codexIdentityWaiting {
+                            Text("Waiting for session identity").font(.system(size: 11)).foregroundStyle(Color.hTertiary)
+                        } else { ActivityDetailText(chat: chat) }
+                    }
                 }
             }
             Spacer(minLength: 0)
@@ -286,17 +332,29 @@ struct ChatRow: View {
         .padding(.vertical, 5)
         .background(RoundedRectangle(cornerRadius: 6).fill(selected ? Color.hSelection : (hovering ? Color.hHover : .clear)))
         .contentShape(Rectangle())
+        .onTapGesture(count: 2) { model.renamingChatID = chat.id }
         .onTapGesture {
+            if model.renamingChatID == chat.id { return }
             if NSEvent.modifierFlags.contains(.option), model.subagentBrowser.count(for: chat.id) > 0 {
                 model.subagentBrowser.toggle(chat.id)
             } else { model.select(chat.id) }
         }
         .onHover { hovering = $0 }
+        .modifier(SidebarFocusOutline(target: .chat(chat.id)))
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel(chat.displayTitle + ", " + chat.agent.name)
+        .accessibilityAction(named: Text("Open chat")) { model.select(chat.id) }
+        .accessibilityAction(named: Text("Rename chat")) { model.renamingChatID = chat.id }
         .contextMenu {
+            Button("Rename...") { model.renamingChatID = chat.id }
+            if chat.userTitle != nil { Button("Reset to Automatic Name") { model.renameChat(chat, to: nil) } }
+            Button(chat.manualUnread || chat.activity == .doneUnseen ? "Mark Read" : "Mark Unread") {
+                StatusCenter.shared.setRead(chat: chat, read: chat.manualUnread || chat.activity == .doneUnseen)
+            }
             Button(chat.pinnedAt == nil ? "Pin Chat" : "Unpin Chat") { model.setPinned(chat, chat.pinnedAt == nil) }
             Divider()
             if chat.status == .ended {
-                Button(chat.sessionID != nil && chat.agent.resumeArguments(sessionID: "x") != nil ? "Resume" : "Start Again") { model.resume(chat) }
+                Button(chat.resumeOnRetry && chat.sessionID != nil && chat.agent.resumeArguments(sessionID: "x") != nil ? "Resume" : "Start Again") { model.resume(chat) }
             }
             Button(readerMode.face(of: chat) == .reader ? "Show Terminal" : "Show as Reader") {
                 model.select(chat.id)
@@ -306,7 +364,17 @@ struct ChatRow: View {
                 Button("Reveal Transcript in Finder") { NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: p)]) }
             }
             Divider()
-            Button(chat.status == .ended ? "Remove Chat" : "Close Chat") { model.closeChat(chat) }
+            if case .failed = chat.launchPhase {
+                Button("Retry Launch or Reconnect") { model.prepareChat(chat) }
+                Button("Reveal App Log") { NSWorkspace.shared.activateFileViewerSelecting([Paths.logFile]) }
+            }
+            if let worktree = chat.worktree, !FileManager.default.fileExists(atPath: worktree.directory) {
+                Button("Locate Worktree...") { model.locateWorktree(chat) }
+            }
+            if chat.status != .ended {
+                Button("Stop Agent") { model.stopChat(chat) }.disabled(chat.launchPhase.isBusy)
+            }
+            Button("Archive Chat") { model.archiveChat(chat) }.disabled(chat.launchPhase.isBusy)
         }
     }
 }

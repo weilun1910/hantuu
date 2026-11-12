@@ -15,6 +15,9 @@ extension AppModel {
         var live = Dictionary(SessionHelper.list().filter { !$0.exited }.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
         for chat in chats {
             guard let info = live.removeValue(forKey: chat.id.uuidString) else { continue }
+            // Archive never intentionally leaves a process alive. A crash during Stop must
+            // surface that process again rather than hiding it behind an archived row.
+            if chat.archivedAt != nil { chat.archivedAt = nil }
             reattach(chat, startedAt: Date(timeIntervalSince1970: info.created))
         }
         adoptOrphans(Array(live.values))

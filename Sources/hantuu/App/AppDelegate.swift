@@ -174,8 +174,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             chat.addItem(it)
         }
         chat.addItem(.separator())
-        chat.addItem(item("Next Chat That Needs You", #selector(jumpToNeedsYou), "j"))
+        chat.addItem(item("Next Chat Requiring Attention", #selector(jumpToNeedsYou), "j"))
         chat.addItem(item("Resume Chat", #selector(resumeChat), "t", [.command, .shift]))
+        SidebarMenuTarget.install(chat: chat, view: view)
         chatItem.submenu = chat
         main.addItem(chatItem)
 

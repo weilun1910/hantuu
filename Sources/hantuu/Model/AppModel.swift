@@ -5,7 +5,9 @@ struct Project: Codable, Identifiable, Hashable {
     var id = UUID()
     var path: String
     var expanded = true
-    var name: String { (path as NSString).lastPathComponent }
+    var alias: String?
+    var name: String { alias ?? (path as NSString).lastPathComponent }
+    var folderExists: Bool { FileManager.default.fileExists(atPath: path) }
 }
 
 enum ChatStatus: String, Codable {
@@ -32,6 +34,18 @@ final class Chat: ObservableObject, Identifiable {
     let createdAt: Date
     @Published var sessionID: String?
     @Published var terminalTitle = ""
+    @Published var userTitle: String?
+    @Published var archivedAt: Date?
+    @Published var seenSessionID: String?
+    @Published var seenThrough: Date?
+    @Published var seenCompletionKey: String?
+    @Published var manualUnread = false
+    @Published var lastSelectedAt: Date?
+    @Published var launchPhase: ChatLaunchPhase = .ready
+    var requestedWorktree = false
+    var resumeOnRetry = false
+    var launchToken = UUID()
+    var launchMonitor: Timer?
     @Published var status: ChatStatus = .running {
         didSet { if status == .ended { pendingMessages.removeAll() } }
     }
@@ -74,9 +88,11 @@ final class Chat: ObservableObject, Identifiable {
     }
 
     var agent: AgentDefinition { AgentCatalog.definition(agentID) }
+    var codexTitleIdentity = CodexTitleIdentityState()
 
     /// The terminal title (Claude Code sets one), cleaned of spinner glyphs.
     var displayTitle: String {
+        if let userTitle { return userTitle }
         let cleaned = Chat.cleanTitle(terminalTitle)
         if !cleaned.isEmpty, cleaned.lowercased() != agent.name.lowercased(), cleaned != agentID {
             return cleaned
@@ -140,6 +156,15 @@ struct SavedChat: Codable {
     var createdAt: Date
     var worktree: WorktreeInfo?
     var pinnedAt: Date?
+    var userTitle: String?
+    var archivedAt: Date?
+    var seenSessionID: String?
+    var seenThrough: Date?
+    var seenCompletionKey: String?
+    var manualUnread: Bool?
+    var lastSelectedAt: Date?
+    var requestedWorktree: Bool?
+    var resumeOnRetry: Bool?
 }
 
 /// What state.json holds: the sidebar, the chats and the window.
@@ -158,6 +183,7 @@ struct SavedState: Codable {
     var windowFrame: String?
     var sidebarWidth: Double?
     var panelWidth: Double?
+    var selectedChatID: UUID?
     var pinnedExpanded: Bool?
     var projectPanels: [String: ProjectPanelState]?
 
@@ -177,6 +203,7 @@ struct SavedState: Codable {
         panelWidth = get(.panelWidth)
         projectPanels = (get(.projectPanels) as [String: Lenient<ProjectPanelState>]?)?.compactMapValues(\.value)
         pinnedExpanded = get(.pinnedExpanded)
+        selectedChatID = get(.selectedChatID)
     }
 
     /// Nil only when the data isn't a JSON object at all.
@@ -198,6 +225,14 @@ enum AppActions {
 final class AppModel: ObservableObject, TerminalEvents {
     static let shared = AppModel()
 
+    @Published var historyPresented = false
+    @Published var historyScope: ChatHistoryScope = .active
+    @Published var renamingChatID: UUID?
+    @Published var sidebarKeyboardFocus = false
+    @Published var sidebarCursor: SidebarTarget?
+    @Published var sidebarRevealRequest = 0
+    @Published var lastArchivedID: UUID?
+    var navigation = ChatNavigation()
     @Published var projects: [Project] = []
     @Published var chats: [Chat] = []
     @Published var selectedChatID: UUID? {
@@ -235,9 +270,7 @@ final class AppModel: ObservableObject, TerminalEvents {
     var windowFrame: String?
     var sidebarWidth: Double?
     var panelWidth: Double?
-    /// Projects whose folder was missing at launch, and their chats. Not shown, but written
-    /// back on every save, so a folder that's away for a while (an unplugged drive, a renamed
-    /// parent) comes back with its chats.
+    /// Legacy preservation storage. Missing folders now remain visible for relocation.
     private var awayProjects: [Project] = []
     private var awayChats: [SavedChat] = []
 
@@ -267,14 +300,14 @@ final class AppModel: ObservableObject, TerminalEvents {
     }
 
     func project(_ id: UUID) -> Project? { projects.first { $0.id == id } }
-    func chats(in project: Project) -> [Chat] { chats.filter { $0.projectID == project.id } }
+    func chats(in project: Project) -> [Chat] { chats.filter { $0.projectID == project.id && $0.archivedAt == nil } }
 
     /// Pinned chats, from any project, in the order they were pinned.
     var pinnedChats: [Chat] {
-        chats.filter { $0.pinnedAt != nil }.sorted { ($0.pinnedAt ?? .distantPast) < ($1.pinnedAt ?? .distantPast) }
+        chats.filter { $0.pinnedAt != nil && $0.archivedAt == nil }.sorted { ($0.pinnedAt ?? .distantPast) < ($1.pinnedAt ?? .distantPast) }
     }
     /// A project's chats that aren't pinned. A pinned chat shows in Pinned instead.
-    func unpinnedChats(in project: Project) -> [Chat] { chats.filter { $0.projectID == project.id && $0.pinnedAt == nil } }
+    func unpinnedChats(in project: Project) -> [Chat] { chats.filter { $0.projectID == project.id && $0.pinnedAt == nil && $0.archivedAt == nil } }
     /// The sidebar top to bottom: Pinned, then each project's other chats. Cmd-1...9 follow it.
     var sidebarOrder: [Chat] { pinnedChats + projects.flatMap { unpinnedChats(in: $0) } }
 
@@ -317,6 +350,15 @@ final class AppModel: ObservableObject, TerminalEvents {
                 c.transcriptPath = sc.transcriptPath
                 c.worktree = sc.worktree
                 c.pinnedAt = sc.pinnedAt
+                c.userTitle = sc.userTitle
+                c.archivedAt = sc.archivedAt
+                c.seenSessionID = sc.seenSessionID
+                c.seenThrough = sc.seenThrough
+                c.seenCompletionKey = sc.seenCompletionKey
+                c.manualUnread = sc.manualUnread ?? false
+                c.lastSelectedAt = sc.lastSelectedAt
+                c.requestedWorktree = sc.requestedWorktree ?? false
+                c.resumeOnRetry = sc.resumeOnRetry ?? (sc.sessionID != nil)
                 if let p = sc.transcriptPath, FileManager.default.fileExists(atPath: p), let kind = c.agent.transcript {
                     attachFollower(c, url: URL(fileURLWithPath: p), kind: kind, live: false)
                 } else if c.sessionID != nil {
@@ -324,8 +366,9 @@ final class AppModel: ObservableObject, TerminalEvents {
                 }
                 chats.append(c)
             }
+            selectedChatID = chats.first { $0.id == s.selectedChatID && $0.archivedAt == nil }?.id
         }
-        selectedProjectID = projects.first?.id
+        selectedProjectID = selectedChat?.projectID ?? projects.first?.id
         restorePanelShells()
         persistenceEnabled = true
         // Agents that kept running in hantuu-session while the app was closed reattach.
@@ -414,8 +457,13 @@ final class AppModel: ObservableObject, TerminalEvents {
         s.chats = chats.map {
             SavedChat(id: $0.id, projectID: $0.projectID, agentID: $0.agentID, sessionID: $0.sessionID,
                       title: $0.terminalTitle, firstPrompt: $0.firstPrompt, transcriptPath: $0.transcriptPath,
-                      createdAt: $0.createdAt, worktree: $0.worktree, pinnedAt: $0.pinnedAt)
+                      createdAt: $0.createdAt, worktree: $0.worktree, pinnedAt: $0.pinnedAt,
+                      userTitle: $0.userTitle, archivedAt: $0.archivedAt, seenSessionID: $0.seenSessionID,
+                      seenThrough: $0.seenThrough, seenCompletionKey: $0.seenCompletionKey,
+                      manualUnread: $0.manualUnread, lastSelectedAt: $0.lastSelectedAt,
+                      requestedWorktree: $0.requestedWorktree, resumeOnRetry: $0.resumeOnRetry)
         } + awayChats.filter { sc in away.contains { $0.id == sc.projectID } }
+        s.selectedChatID = selectedChatID
         s.defaultAgentID = defaultAgentID
         s.pinnedExpanded = pinnedExpanded
         s.sidebarVisible = sidebarVisible
@@ -517,10 +565,10 @@ final class AppModel: ObservableObject, TerminalEvents {
     }
 
     func restoreProjectList(_ saved: SavedState) {
-        let here = saved.projects.filter { FileManager.default.fileExists(atPath: $0.path) }
-        projects = here
-        awayProjects = saved.projects.filter { p in !here.contains { $0.id == p.id } }
-        awayChats = saved.chats.filter { sc in awayProjects.contains { $0.id == sc.projectID } }
+        // Missing folders stay visible, with Locate Folder and read-only history available.
+        projects = saved.projects
+        awayProjects = []
+        awayChats = []
     }
 
     func restoreProjectPanels(_ saved: SavedState) {
@@ -573,7 +621,7 @@ final class AppModel: ObservableObject, TerminalEvents {
 
     private func restorePanelShells() {
         guard let g = GhosttyApp.shared else { return }
-        for project in projects {
+        for project in projects where project.folderExists {
             for saved in projectPanels[project.id]?.shells ?? [] {
                 let terminal = TerminalView(app: g.app, launch: .init(workingDirectory: saved.cwd ?? project.path), handlesChildExit: false)
                 terminal.events = self
@@ -614,6 +662,7 @@ final class AppModel: ObservableObject, TerminalEvents {
     }
 
     func removeProject(_ id: UUID) {
+        guard !chats.contains(where: { $0.projectID == id && $0.launchPhase.isBusy }) else { return }
         let running = chats.filter { $0.projectID == id && $0.status != .ended }
         if !running.isEmpty {
             let a = NSAlert()
@@ -675,32 +724,20 @@ final class AppModel: ObservableObject, TerminalEvents {
         // Claude Code gets a known session id so its transcript file is known up front.
         if def.id == "claude" { chat.sessionID = UUID().uuidString.lowercased() }
         let settings = SessionSettings.shared
-        if worktree == true || (worktree == nil && settings.usesWorktree(project.id) && settings.isGitRepo(project.id)) {
-            // Making the worktree can take a moment in a big repo, so the chat appears once it's ready.
-            Worktrees.createAsync(projectPath: project.path, chatID: chat.id) { [weak self] result in
-                switch result {
-                case .success(let wt):
-                    chat.worktree = wt
-                    self?.start(chat, def: def, in: project)
-                case .failure(let error):
-                    WorktreePrompt.showCreateFailed(error, project: project.name)
-                }
-            }
-            return
-        }
-        start(chat, def: def, in: project)
-    }
-
-    private func start(_ chat: Chat, def: AgentDefinition, in project: Project) {
-        launch(chat, argv: def.launchArguments(sessionID: chat.sessionID), in: project)
-        if let i = projects.firstIndex(where: { $0.id == project.id }) { projects[i].expanded = true }
+        chat.requestedWorktree = worktree == true || (worktree == nil && settings.usesWorktree(project.id) && settings.isGitRepo(project.id))
+        chat.status = .ended
         chats.append(chat)
         select(chat.id)
+        prepareChat(chat)
     }
 
     // Live checks use this same launch path with an explicit inexpensive model.
     func launch(_ chat: Chat, argv: [String], in project: Project) {
-        guard let g = GhosttyApp.shared else { return }
+        guard let g = GhosttyApp.shared else {
+            chat.launchPhase = .failed("The terminal engine is unavailable. Reopen hantuu and retry.")
+            return
+        }
+        chat.launchPhase = .starting
         let cwd = workingDirectory(of: chat)
         // The agent runs inside hantuu-session, so it outlives the app (Sessions/).
         let cmd = LoginShell.surfaceCommand(argv, session: SessionLaunch(chatID: chat.id, mode: .create(cwd: cwd)))
@@ -717,12 +754,17 @@ final class AppModel: ObservableObject, TerminalEvents {
         chat.startedAt = Date()
         terminalsChanged.send()
         beginTranscriptDiscovery(chat, cwd: cwd)
+        monitorLaunch(chat)
     }
 
     /// Reconnects a chat to its agent, which kept running in hantuu-session. The session
     /// replays recent output and nudges the agent to redraw.
     func reattach(_ chat: Chat, startedAt: Date? = nil) {
-        guard let g = GhosttyApp.shared else { return }
+        guard let g = GhosttyApp.shared else {
+            chat.launchPhase = .failed("The terminal engine is unavailable. Reopen hantuu and retry.")
+            return
+        }
+        chat.launchPhase = .reconnecting
         let cwd = workingDirectory(of: chat)
         let cmd = LoginShell.surfaceCommand([], session: SessionLaunch(chatID: chat.id, mode: .attach))
         Log.write("reattach chat=\(chat.id) cmd=\(cmd)")
@@ -737,47 +779,30 @@ final class AppModel: ObservableObject, TerminalEvents {
         terminalsChanged.send()
         // Same agent process, so its transcript keeps growing where it was.
         beginTranscriptDiscovery(chat, cwd: cwd, replayEvents: true)
+        monitorLaunch(chat)
     }
 
     func resume(_ chat: Chat) {
-        guard let project = project(chat.projectID) else { return }
-        // Only the terminal was lost (the agent is still in its session): reconnect to it.
-        if SessionHelper.isAlive(chat.id) {
-            chat.terminal?.destroy()
-            chat.terminal = nil
-            reattach(chat)
-            readerReload.send(chat.id)
-            select(chat.id)
-            return
-        }
-        if let wt = chat.worktree, !FileManager.default.fileExists(atPath: wt.directory) {
-            WorktreePrompt.showMissing(wt)
-            return
-        }
-        let def = chat.agent
-        let argv: [String]
-        if let sid = chat.sessionID, let r = def.resumeArguments(sessionID: sid) {
-            argv = r
-        } else {
-            argv = def.launchArguments(sessionID: def.id == "claude" ? (chat.sessionID ?? UUID().uuidString.lowercased()) : nil)
-        }
-        chat.terminal?.destroy()
-        chat.terminal = nil
-        // Both agents append to their existing transcript when resumed by session ID.
-        // A later hook can redirect the reader if the agent changes conversations.
-        launch(chat, argv: argv, in: project)
-        readerReload.send(chat.id)
+        guard !chat.launchPhase.isBusy, chat.archivedAt == nil else { return }
         select(chat.id)
+        prepareChat(chat)
     }
 
-    func select(_ id: UUID?) {
+    func select(_ id: UUID?, focus: Bool = true) {
+        if let id, !chats.contains(where: { $0.id == id && $0.archivedAt == nil }) { return }
+        recordNavigationBeforeLeaving()
         if subagentBrowser.selection != nil { subagentBrowser.selection = nil }
         selectedChatID = id
         if let c = selectedChat {
             selectedProjectID = c.projectID
-            if c.status == .needsYou, NSApp.isActive { c.status = .running }
-            if let t = c.terminal { focusRequest.send(t) }
+            c.lastSelectedAt = Date()
+            revealChat(c)
+            sidebarCursor = .chat(c.id)
+            if focus, let t = c.terminal { focusRequest.send(t) }
         }
+        recordNavigationDestination()
+        StatusCenter.shared.refreshVisibleConversation()
+        scheduleSave()
     }
 
     func selectChat(index: Int) {
@@ -798,36 +823,13 @@ final class AppModel: ObservableObject, TerminalEvents {
     }
 
     func closeChat(_ chat: Chat) {
-        let running = chat.status != .ended && chat.terminal.map { !$0.processExited } == true
-        var choice = WorktreePrompt.CloseChoice.keepWorktree
-        if let wt = chat.worktree {
-            choice = WorktreePrompt.confirmClose(agentName: chat.agent.name, worktree: wt, running: running)
-            if choice == .cancel { return }
-        } else if running && Self.closingInterrupts(chat) {
-            let a = NSAlert()
-            a.messageText = "Close this chat?"
-            a.informativeText = "\(chat.agent.name) is still running. Closing the chat stops it. The transcript stays on disk."
-            a.addButton(withTitle: "Close")
-            a.addButton(withTitle: "Cancel")
-            guard a.runModal() == .alertFirstButtonReturn else { return }
-        }
-        let ordered = sidebarOrder
-        let idx = ordered.firstIndex(where: { $0.id == chat.id })
-        if case .deleteWorktree(let force) = choice, let wt = chat.worktree {
-            // Once the agent has stopped, so nothing is still writing into the worktree.
-            teardown(chat) { WorktreePrompt.report(Worktrees.remove(wt, force: force), wt) }
-        } else {
-            teardown(chat)
-        }
-        chats.removeAll { $0.id == chat.id }
-        if selectedChatID == chat.id {
-            let rest = sidebarOrder
-            if let idx, !rest.isEmpty { select(rest[min(idx, rest.count - 1)].id) } else { selectedChatID = nil }
-        }
-        terminalsChanged.send()
+        archiveChat(chat)
     }
 
     private func teardown(_ chat: Chat, then: (() -> Void)? = nil) {
+        chat.codexTitleIdentity.cancel()
+        chat.launchMonitor?.invalidate()
+        chat.launchToken = UUID()
         sideChats.forget(chat.id)
         subagentBrowser.forget(chat.id)
         chat.discoveryTimer?.invalidate()
@@ -859,6 +861,8 @@ final class AppModel: ObservableObject, TerminalEvents {
 
     /// Hooks follow the agent's active conversation, including an in-terminal resume or clear.
     func followSession(_ chat: Chat, session: HookLineParser.Session, verifiedCodex: Bool = false) {
+        // The rollout the Codex process itself holds open is proof enough; title guards are for hook-only signals.
+        guard verifiedCodex || codexTitleAllowsFollow(chat, session: session) else { return }
         guard let kind = chat.agent.transcript else { return }
         if kind == .codex, !verifiedCodex {
             // A legacy completion event may belong to a child. Resolve its main transcript
@@ -899,7 +903,14 @@ final class AppModel: ObservableObject, TerminalEvents {
         chat.readerWork = nil
         chat.liveEntries = []
         chat.firstPrompt = nil
-        if changedID { chat.pendingMessages.removeAll() }
+        if changedID {
+            subagentBrowser.forget(chat.id)
+            chat.pendingMessages.removeAll()
+            chat.seenSessionID = nil
+            chat.seenThrough = nil
+            chat.seenCompletionKey = nil
+            chat.manualUnread = false
+        }
         if let id = session.id { chat.sessionID = id }
         chat.transcriptPath = path
         if let path {
@@ -936,6 +947,7 @@ final class AppModel: ObservableObject, TerminalEvents {
     }
 
     func checkTranscriptRecovery(_ chat: Chat, cwd: String, now: Date = Date()) {
+        guard !(chat.agentID == "codex" && chat.codexTitleIdentity.waiting) else { return }
         guard let kind = chat.agent.transcript, let recovery = chat.transcriptRecovery,
               !recovery.pending else { return }
         let size = chat.follower.flatMap {
@@ -1011,6 +1023,7 @@ final class AppModel: ObservableObject, TerminalEvents {
             self.readerAppend.send((chat.id, chat.pendingMessages.reconcile(fresh)))
         }
         chat.follower = f
+        chat.resumeOnRetry = true
         Log.write("transcript chat=\(chat.id) path=\(url.path) reason=attach")
         f.start(follow: live)
     }
@@ -1144,6 +1157,7 @@ final class AppModel: ObservableObject, TerminalEvents {
 
     func terminalTitleDidChange(_ view: TerminalView, title: String) {
         if let c = chat(for: view) {
+            if c.agentID == "codex", acceptCodexTitle(c, title: title) { return }
             c.terminalTitle = title
             objectWillChange.send()
             scheduleSave()
@@ -1179,8 +1193,11 @@ final class AppModel: ObservableObject, TerminalEvents {
 
     func terminalChildDidExit(_ view: TerminalView, code: Int) {
         guard let c = chat(for: view) else { return }
+        c.codexTitleIdentity.cancel()
         c.status = .ended
         c.exitCode = code
+        c.launchMonitor?.invalidate()
+        c.launchPhase = code == 0 ? .ready : .failed("Agent exited with code \(code). View the terminal for details, then retry.")
         objectWillChange.send()
         Log.write("chat=\(c.id) exited code=\(code)")
         scheduleSave()

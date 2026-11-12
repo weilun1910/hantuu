@@ -100,7 +100,7 @@ extension SelfTest {
         check("usage: a reset tomorrow says tomorrow", reset(thu) == "resets tomorrow 1:00 PM", "\(reset(thu) ?? "nil")")
         check("usage: a reset within a day counts down", reset(now.addingTimeInterval(7800)) == "resets in 2h 10m"
               && reset(now.addingTimeInterval(1500)) == "resets in 25m" && reset(now.addingTimeInterval(3600)) == "resets in 1h")
-        check("usage: a reset that already happened", reset(now.addingTimeInterval(-1500)) == "reset 25m ago")
+        check("usage: a reset that already happened", reset(now.addingTimeInterval(-1500)) == "reset expected 25m ago")
 
         check("usage: ages", UsageFormat.age(30) == "just now" && UsageFormat.age(300) == "5m ago"
               && UsageFormat.age(3 * 3600 + 200) == "3h ago" && UsageFormat.age(3 * 86400) == "3d ago")
@@ -122,8 +122,8 @@ extension SelfTest {
         check("usage: a recent reading doesn't", !tip(.codex, justStale).contains("As of"))
         let resetSince = UsageReading(windows: [UsageWindow(usedPercent: 91, minutes: 10080, resetsAt: now.addingTimeInterval(-7200))],
                                       observedAt: now.addingTimeInterval(-86400))
-        check("usage: a window that reset since the reading starts over",
-              resetSince.ringWindow?.leftPercent(at: now) == 100 && tip(.codex, resetSince) == "Codex: 100% of weekly left, reset 2h ago\nAs of 24h ago", tip(.codex, resetSince))
+        check("usage: a passed reset preserves the reported allowance and requests refresh",
+              resetSince.ringWindow?.leftPercent(at: now) == 9 && tip(.codex, resetSince) == "Codex: Awaiting refresh - last reported 9% of weekly left, reset expected 2h ago\nAs of 24h ago", tip(.codex, resetSince))
         check("usage: no reading says why", tip(.claude, nil).hasPrefix("Claude Code: No reading yet.") && tip(.codex, nil).hasPrefix("Codex: No reading yet."))
         let offTip = UsageFormat.tooltip(.claude, nil, now: now, off: true)
         check("usage: Claude turned off says how to turn it on", offTip.hasPrefix("Claude Code: Off.") && offTip.contains("Settings")
@@ -471,6 +471,7 @@ extension SelfTest {
         }
         let healthy: [UsageSource: UsageReading] = [.claude: reading(weeklyUsed: 18, fiveHourUsed: 60), .codex: reading(weeklyUsed: 27)]
         let low: [UsageSource: UsageReading] = [.claude: reading(weeklyUsed: 88, fiveHourUsed: 95), .codex: reading(weeklyUsed: 97.5, age: 4 * 3600)]
+        let expired: [UsageSource: UsageReading] = [.codex: UsageReading(windows: [UsageWindow(usedPercent: 91, minutes: 10080, resetsAt: now.addingTimeInterval(-3600))], observedAt: now.addingTimeInterval(-7200))]
         let unknown: [UsageSource: UsageReading] = [.codex: reading(weeklyUsed: 27)]
         let center = UsageCenter.shared
 
@@ -496,6 +497,8 @@ extension SelfTest {
         let footerSize = NSSize(width: 260, height: 38), narrow = NSSize(width: 200, height: 38)
 
         var ok = true
+        ok = render(UsageHoverCard(sources: [.codex], readings: expired, now: now, refresh: {}), size: NSSize(width: 320, height: 230), name: "usage-awaiting-refresh-dark.png", dark: true) && ok
+        ok = render(UsageHoverCard(sources: [.codex], readings: expired, now: now, refresh: {}), size: NSSize(width: 320, height: 230), name: "usage-awaiting-refresh-light.png", dark: false) && ok
         center.preview(healthy, now: now)
         ok = render(footer(), size: footerSize, name: "usage-footer-dark.png", dark: true) && ok
         ok = render(footer(), size: footerSize, name: "usage-footer-light.png", dark: false) && ok

@@ -203,6 +203,7 @@ enum AgentHooks {
             "-c", "tui.notifications=" + tomlArray(["approval-requested", "plan-mode-prompt", "async-question"]),
             "-c", "tui.notification_method=\"osc9\"",
             "-c", "tui.notification_condition=\"always\"",
+            "-c", "tui.terminal_title=" + tomlArray(["session-id", "thread-name"]),
         ]
         switch existingNotify {
         case .none:

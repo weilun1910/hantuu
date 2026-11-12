@@ -34,9 +34,9 @@ struct UsageWindow: Equatable {
 
     func hasReset(at now: Date) -> Bool { resetsAt.map { $0 <= now } ?? false }
 
-    /// What's left, 0 to 100. Once the window has reset since the reading, it starts over.
+    /// Last reported allowance, 0 to 100. A reset deadline is not a fresh reading.
     func leftPercent(at now: Date) -> Double {
-        hasReset(at: now) ? 100 : max(0, min(100, 100 - usedPercent))
+        max(0, min(100, 100 - usedPercent))
     }
 
     /// "weekly", "5-hour", "24-hour", "30-day".
@@ -145,7 +145,7 @@ enum UsageFormat {
     static func reset(_ date: Date?, now: Date, calendar: Calendar = .current, locale: Locale = .current) -> String? {
         guard let date else { return nil }
         let delta = date.timeIntervalSince(now)
-        if delta <= 0 { return "reset \(age(-delta))" }
+        if delta <= 0 { return "reset expected \(age(-delta))" }
         if delta < 24 * 3600 { return "resets in \(span(delta))" }
         let time = DateFormatter()
         time.locale = locale
@@ -181,7 +181,7 @@ enum UsageFormat {
             return [off && source == .claude ? ClaudeUsage.offReason : source.noReadingReason]
         }
         func line(_ w: UsageWindow, head: String) -> String {
-            var s = head
+            var s = w.hasReset(at: now) ? "Awaiting refresh - last reported " + head : head
             if let r = reset(w.resetsAt, now: now, calendar: calendar, locale: locale) { s += ", \(r)" }
             return s
         }
@@ -490,7 +490,7 @@ final class UsageCenter: ObservableObject {
     }
 
     /// Reads on a background queue and publishes on the main one.
-    func refresh() {
+    func refresh(force: Bool = false) {
         let extra = (model?.chats ?? []).filter { $0.agentID == UsageSource.codex.rawValue }.compactMap(\.transcriptPath)
         let sessions = codexSessions, claude = claudeDir
         let prune = Date().timeIntervalSince(lastPrune) > 3600
@@ -498,6 +498,7 @@ final class UsageCenter: ObservableObject {
         queue.async { [weak self] in
             guard let self else { return }
             let now = Date()
+            if force { self.cache.removeAll() }
             let codex = self.newestCodex(sessions: sessions, extra: extra, now: now)
             let claude = ClaudeUsage.latest(in: claude, now: now, prune: prune)
             DispatchQueue.main.async {

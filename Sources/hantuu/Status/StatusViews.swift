@@ -99,13 +99,13 @@ struct NeedsYouButton: View {
             let dot = Color(nsColor: needs ? Theme.needsYou : Theme.doneUnseen)
             Button { open.toggle() } label: {
                 ViewThatFits(in: .horizontal) {
-                    label(dot: dot, text: "\(ids.count) need\(ids.count == 1 ? "s" : "") you")
+                    label(dot: dot, text: "Attention \(ids.count)")
                     label(dot: dot, text: "\(ids.count)")
                 }
             }
             .buttonStyle(.plain)
             .onHover { hovering = $0 }
-            .help("Chats that need you  ⌘J jumps to the next one")
+            .help("Chats needing input or review  ⌘J jumps to the next one")
             .popover(isPresented: $open, arrowEdge: .bottom) {
                 NeedsYouList { open = false }
                     .environmentObject(model)
@@ -138,7 +138,7 @@ struct NeedsYouList: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
-            Text("Needs you")
+            Text("Attention")
                 .font(.system(size: 11))
                 .foregroundStyle(Color.hTertiary)
                 .padding(.horizontal, 8)
@@ -216,7 +216,7 @@ struct NotificationSettingsSection: View {
             Toggle("Also when a chat finishes", isOn: $settings.notifyWhenDone)
                 .disabled(!settings.notificationsEnabled)
         } header: { Text("Notifications") } footer: {
-            Text("Only for chats you aren't looking at. Permission requests and questions quote what the agent asked. The Dock badge counts chats that need you.")
+            Text("Only for chats you aren't looking at. Permission requests and questions quote what the agent asked. The Dock badge counts chats needing input or review.")
                 .font(.system(size: 11)).foregroundStyle(.secondary)
         }
     }

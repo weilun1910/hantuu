@@ -107,10 +107,15 @@ extension AppModel {
     func selectSubagent(_ agentID: String, in chatID: UUID) {
         guard chats.contains(where: { $0.id == chatID }),
               subagentBrowser.open[chatID]?.contains(where: { $0.id == agentID }) == true else { return }
-        // Keep the right panel and file routing on the owning chat's project.
+        // Install the child selection first, so status never acknowledges the hidden parent.
+        recordNavigationBeforeLeaving()
+        subagentBrowser.select(agentID, in: chatID)
         selectedChatID = chatID
         selectedProjectID = selectedChat?.projectID
-        subagentBrowser.select(agentID, in: chatID)
+        if let chat = selectedChat { chat.lastSelectedAt = Date(); revealChat(chat) }
+        sidebarCursor = .child(chatID, agentID)
+        recordNavigationDestination()
+        StatusCenter.shared.refreshVisibleConversation()
     }
 
     @discardableResult

@@ -76,6 +76,9 @@ enum SelfTest {
         projectPanels(workdir)
         browserTab(workdir)
         subagentBrowser(workdir) // sidebar navigation and read-only child transcripts
+        sidebarParity(workdir)
+        chatHistory(workdir)
+        codexSessionIdentity(workdir)
         fileViewer(workdir) // the Code tab as a file viewer and editor (FileViewer/FileViewerSelfTest.swift)
         panelRecovery(workdir)
         usage(workdir)    // usage limits and the footer rings (Usage/UsageSelfTest.swift)

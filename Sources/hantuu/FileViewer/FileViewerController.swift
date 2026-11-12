@@ -797,8 +797,8 @@ struct FileViewerBar: View {
         switch b {
         case .recovery:
             HStack(spacing: 6) {
-                Button("Compare") { viewer.compareRecovery() }.buttonStyle(SmallBarButtonStyle(prominent: false))
-                Button("Restore") { viewer.restoreRecovery() }.buttonStyle(SmallBarButtonStyle(prominent: true))
+                Button("Compare") { state.viewer?.compareRecovery() }.buttonStyle(SmallBarButtonStyle(prominent: false))
+                Button("Restore") { state.viewer?.restoreRecovery() }.buttonStyle(SmallBarButtonStyle(prominent: true))
             }
         case .changedOnDisk:
             HStack(spacing: 6) {

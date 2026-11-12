@@ -112,7 +112,7 @@ final class SubagentReaderController {
         guard back || escape else { return event }
         if escape, reader.interaction.handle(event) == nil { return nil }
         if escape, reader.mediaKeys.handle(event) == nil { return nil }
-        _ = model.backFromSubagent()
+        if back { model.navigateHistory(-1) } else { _ = model.backFromSubagent() }
         return nil
     }
 }

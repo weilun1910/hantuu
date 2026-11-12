@@ -104,7 +104,7 @@ extension SelfTest {
         let awayModel = AppModel()
         awayModel.restoreProjectList(withAway)
         awayModel.restoreProjectPanels(withAway)
-        check("project panel: temporarily missing projects retain their saved panel", !awayModel.projects.contains { $0.id == away.id } && awayModel.savedProjectPanels()[away.id.uuidString]?.codeTabs?.count == 2)
+        check("project panel: missing projects stay visible and retain their saved panel", awayModel.projects.contains { $0.id == away.id } && awayModel.savedProjectPanels()[away.id.uuidString]?.codeTabs?.count == 2)
         let old = SavedState.read(Data(#"{"panelTab":"Changes","projects":[],"chats":[]}"#.utf8))
         check("project panel: an old state without project panels still loads", old != nil && old?.projectPanels == nil)
         let damaged = """

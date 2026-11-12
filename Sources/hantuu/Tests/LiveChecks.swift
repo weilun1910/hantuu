@@ -6,7 +6,7 @@ import GhosttyKit
 /// parsing and selection rules below. No fixture test launches an agent or reads its home.
 enum LiveCheckRules {
     static let agents = ["claude", "codex"]
-    static let features = ["slash", "queued", "send-now", "relaunch", "subagents", "reader", "review"]
+    static let features = ["slash", "queued", "send-now", "relaunch", "subagents", "reader", "review", "sidebar"]
 
     static func codexModel(for feature: String, configured: String?) -> String {
         configured ?? (feature == "subagents" ? "gpt-6.1-sol" : "gpt-6-luna")
@@ -159,7 +159,7 @@ extension SelfTest {
         guard let raw = env["HANTUU_LIVE"], !raw.isEmpty else { return }
         guard let agents = LiveCheckRules.selection(env["HANTUU_LIVE_AGENTS"], allowed: LiveCheckRules.agents),
               let features = LiveCheckRules.selection(env["HANTUU_LIVE_FEATURES"], allowed: LiveCheckRules.features) else {
-            check("live configuration: selectors", false, "Use claude,codex and slash,queued,send-now,relaunch,subagents,reader,review.")
+            check("live configuration: selectors", false, "Use claude,codex and slash,queued,send-now,relaunch,subagents,reader,review,sidebar.")
             return
         }
         let folder = URL(fileURLWithPath: raw).standardizedFileURL.resolvingSymlinksInPath()
@@ -210,6 +210,7 @@ extension SelfTest {
                 case "subagents": probe.subagents()
                 case "reader": probe.readerParity()
                 case "review": probe.reviewFeedback()
+                case "sidebar": probe.sidebar()
                 default: break
                 }
             }
@@ -839,6 +840,66 @@ private final class LiveCheckSession {
         report("find keyboard handlers reveal hidden real output and Esc restores disclosure", dom["found"] as? Bool == true && dom["restored"] as? Bool == true)
         report("SKIP live approval/question response: manual interaction required", true,
                "This harness never answers a safety prompt. Provider request fixtures cover correlation and one-shot responses separately.")
+    }
+
+    /// A live session exercises metadata against its actual transcript. Model calls are
+    /// limited to one short reply; archive and restore never send text to the provider.
+    func sidebar() {
+        guard let app = model, let chat else { return }
+        let priorTerminal = chat.terminal
+        let priorPID = SessionHelper.info(chat.id)?.child
+        app.prepareChat(chat, resuming: true)
+        let reconnected = SelfTest.waitUntil(30) {
+            guard let terminal = chat.terminal, terminal !== priorTerminal, let host = self.host else { return false }
+            if terminal.superview !== host {
+                priorTerminal?.removeFromSuperview()
+                terminal.frame = host.bounds
+                host.addSubview(terminal, positioned: .below, relativeTo: self.reader?.root)
+                self.layout()
+            }
+            return SessionHelper.info(chat.id)?.child == priorPID && SessionHelper.info(chat.id)?.attached == true
+        }
+        report("retry reattaches the same owned process", reconnected && priorPID != nil)
+        guard reconnected else { return }
+        let token = "sidebar" + UUID().uuidString.prefix(8).lowercased()
+        let sent = send("Without tools, reply only \(token).")
+        let answered = sent && wait(120) { self.reply(token) && self.reader?.composerMode == .ready && !TerminalScreen.analyze(self.screen).busy }
+        report("provider reply available for history search", answered)
+        guard answered, let session = chat.sessionID, let path = chat.transcriptPath else { return }
+        if agent == "codex" {
+            report("configured terminal title resolves the native Codex identity", chat.codexTitleIdentity.hint?.matches(session) == true && !chat.codexTitleIdentity.waiting)
+        }
+        app.renameChat(chat, to: "Saved sidebar check")
+        chat.terminalTitle = "Changed provider suggestion"
+        report("manual name survives provider title update", chat.displayTitle == "Saved sidebar check")
+        let record = ChatHistoryRecord(localChatID: chat.id, agentID: agent, sessionID: session,
+                                       title: chat.displayTitle, cwd: folder.path, transcriptPath: path)
+        var result: ChatHistoryResult?
+        DispatchQueue.global(qos: .userInitiated).async {
+            let found = ChatHistoryIndex().search(records: [record], query: token, scope: .all,
+                                                  location: .folder, folder: self.folder.path,
+                                                  includeNative: false, fullText: true)
+            DispatchQueue.main.async { result = found }
+        }
+        let searched = SelfTest.waitUntil(10) { result != nil }
+        report("history matches exact provider identity and message", searched && result?.hits.count == 1 && result?.hits.first?.record.sessionID == session && result?.hits.first?.matchedMessageID != nil)
+        center?.setRead(chat: chat, read: false)
+        report("manual unread uses same live chat", chat.manualUnread && chat.activity == .doneUnseen)
+        center?.setRead(chat: chat, read: true)
+        var stopped = false
+        app.stopChat(chat) { app.finishArchive(chat); stopped = true }
+        let archived = SelfTest.waitUntil(15) { stopped || chat.launchPhase.label?.contains("still running") == true }
+        report("archive stops helper and retains transcript identity", archived && stopped && SessionHelper.info(chat.id) == nil && chat.archivedAt != nil && chat.sessionID == session && chat.transcriptPath == path && FileManager.default.fileExists(atPath: path))
+        guard stopped else { return }
+        app.save()
+        let saved = (try? Data(contentsOf: Paths.stateFile)).flatMap(SavedState.read)?.chats.first { $0.id == chat.id }
+        report("archive and manual name persist", saved?.archivedAt != nil && saved?.userTitle == "Saved sidebar check")
+        app.restoreChat(chat)
+        report("restore returns row without launching process", chat.archivedAt == nil && chat.status == .ended && chat.terminal == nil && SessionHelper.info(chat.id) == nil && app.selectedChatID == chat.id)
+        app.focusSidebar()
+        _ = app.sidebarKey(115)
+        _ = app.sidebarKey(119)
+        report("sidebar Home and End stay on visible rows", app.visibleSidebarTargets.contains(app.sidebarCursor ?? .pinned))
     }
 
     func subagents() {

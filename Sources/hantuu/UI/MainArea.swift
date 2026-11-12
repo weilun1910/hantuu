@@ -109,6 +109,18 @@ final class MainAreaController: NSViewController {
         return readerMode.focusTarget(for: requested)
     }
 
+    func focusVisibleConversation() {
+        sync()
+        if model.subagentBrowser.selection != nil {
+            view.window?.makeFirstResponder(subagentReader?.reader.view)
+        } else if !readerMode.root.isHidden {
+            if readerMode.composer.isHidden { view.window?.makeFirstResponder(readerMode.reader?.view) }
+            else { readerMode.focusComposer() }
+        } else {
+            view.window?.makeFirstResponder(model.selectedChat?.terminal)
+        }
+    }
+
     func sync() {
         let terminals = model.chats.compactMap { $0.terminal }
         let selected = model.selectedChat
@@ -148,7 +160,7 @@ struct ChatHeader: View {
                     IconButton(symbol: "sidebar.left", help: "Show Sidebar  ⌘0") { model.sidebarVisible = true }
                 }
                 if let selected = model.subagentBrowser.selection, let chat = model.selectedChat {
-                    IconButton(symbol: "chevron.left", help: "Back to parent chat  ⌘[") { _ = model.backFromSubagent() }
+                    IconButton(symbol: "chevron.left", help: "Back to parent chat") { _ = model.backFromSubagent() }
                     Text(selected.agent.title).font(.system(size: 13, weight: .medium)).foregroundStyle(Color.hText).lineLimit(1)
                     Button { _ = model.backFromSubagent() } label: {
                         Text("Subagent of \(chat.displayTitle)").font(.system(size: 12)).foregroundStyle(Color.hSecondary).lineLimit(1)
@@ -203,9 +215,9 @@ struct EndedBar: View {
                     .font(.system(size: 12))
                     .foregroundStyle(Color.hSecondary)
                 Spacer()
-                Button(chat.sessionID != nil && chat.agent.resumeArguments(sessionID: "x") != nil ? "Resume" : "Start Again") { model.resume(chat) }
+                Button(chat.resumeOnRetry && chat.sessionID != nil && chat.agent.resumeArguments(sessionID: "x") != nil ? "Resume" : "Start Again") { model.resume(chat) }
                     .buttonStyle(BarButtonStyle(prominent: true))
-                Button(chat.terminal == nil ? "Remove" : "Close") { model.closeChat(chat) }
+                Button("Archive") { model.closeChat(chat) }
                     .buttonStyle(BarButtonStyle(prominent: false))
             }
             .padding(.horizontal, 14)
