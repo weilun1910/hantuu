@@ -141,18 +141,21 @@ final class InsightsFollower {
         parser = InsightsParser(kind: kind)
     }
 
-    func poll() -> SessionInsights {
-        guard let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
-              let size = (attrs[.size] as? NSNumber)?.uint64Value else { return parser.insights }
+    func poll() -> SessionInsights { (try? pollChecked()) ?? parser.insights }
+
+    func pollChecked() throws -> SessionInsights {
+        let attrs = try FileManager.default.attributesOfItem(atPath: url.path)
+        let size = (attrs[.size] as? NSNumber)?.uint64Value ?? 0
         if size < offset {
             offset = 0
             partial = Data()
             parser = InsightsParser(kind: parser.kind)
         }
-        guard size > offset, let h = try? FileHandle(forReadingFrom: url) else { return parser.insights }
+        let h = try FileHandle(forReadingFrom: url)
         defer { try? h.close() }
-        do { try h.seek(toOffset: offset) } catch { return parser.insights }
-        let data = (try? h.readToEnd()) ?? Data()
+        guard size > offset else { return parser.insights }
+        try h.seek(toOffset: offset)
+        let data = try h.readToEnd() ?? Data()
         offset += UInt64(data.count)
         let buf = partial + data
         var start = buf.startIndex

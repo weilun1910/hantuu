@@ -50,7 +50,8 @@ extension SelfTest {
         model.select(b1.id)
         check("project panel: a new project starts on Overview with no files", model.panelTab == .overview && model.codeTabs.isEmpty)
         check("project panel: visibility and width stay global", model.panelVisible && model.panelWidth == 620)
-        check("project panel: Files and Changes start empty", review.expanded.isEmpty && review.filter.isEmpty && review.selectedPath == nil && review.filesScroll == 0 && review.base == .uncommitted)
+        check("project panel: Files and Changes start empty", review.expanded.isEmpty && review.filter.isEmpty && review.selectedPath == nil && review.filesScroll == 0 && review.selectedFilePath == nil && review.changes.isEmpty && review.repositories.isEmpty && review.tree == nil && review.changesScroll == 0)
+        check("project panel: a new project starts with the Unstaged comparison", review.base == .unstaged)
         model.openFile(file.path, line: nil)
         let betaFile = model.codeTabs[0].id
         check("project panel: the same outside file has a separate document in each project", betaFile != first)

@@ -64,8 +64,27 @@ enum Ports {
         return path.isEmpty ? nil : path
     }
 
-    static func listening(in folder: String) -> [ListeningPort] {
+    struct ReadError: LocalizedError {
+        var message: String
+        var errorDescription: String? { message }
+    }
+
+    static func decode(_ result: Git.Result) -> Result<[Listener], ReadError> {
+        // lsof uses exit 1 for no matches as well as errors. Only an empty, silent
+        // exit 1 is a clean empty scan. Diagnostics must never look like no listeners.
+        let diagnostic = result.err.trimmingCharacters(in: .whitespacesAndNewlines)
+        if diagnostic.isEmpty && (result.ok || (result.status == 1 && result.out.isEmpty)) {
+            return .success(parseLsof(result.text))
+        }
+        return .failure(ReadError(message: diagnostic.isEmpty ? "Port scan failed (exit \(result.status))." : diagnostic))
+    }
+
+    static func readListening(in folder: String) -> Result<[ListeningPort], ReadError> {
         let r = Process.capture("/usr/sbin/lsof", ["-nP", "-iTCP", "-sTCP:LISTEN", "-F", "pcn"], in: nil, timeout: 6)
-        return match(parseLsof(r.text), folder: folder, cwd: cwd(of:))
+        return decode(r).map { match($0, folder: folder, cwd: cwd(of:)) }
+    }
+
+    static func listening(in folder: String) -> [ListeningPort] {
+        (try? readListening(in: folder).get()) ?? []
     }
 }

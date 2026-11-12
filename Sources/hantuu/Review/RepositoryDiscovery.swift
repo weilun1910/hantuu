@@ -20,6 +20,7 @@ enum RepositoryDiscovery {
         /// Linked worktrees of this repository inside the chat's folder. They're counted
         /// rather than listed, so one repository doesn't show up five times.
         var worktreeCount: Int
+        var worktreePaths: [String] = []
         var id: String { root }
     }
 
@@ -27,6 +28,7 @@ enum RepositoryDiscovery {
         var repositories: [Repository] = []
         var directoriesVisited = 0
         var truncated = false
+        var errors: [String] = []
     }
 
     /// What git says about a folder with a .git entry.
@@ -43,12 +45,19 @@ enum RepositoryDiscovery {
         var found: [Found] = []
         func walk(_ path: String, relative: String, depth: Int) {
             guard result.directoriesVisited < maxDirectories else { result.truncated = true; return }
-            // A folder that can't be read (permissions) is skipped.
-            guard let dir = opendir(path) else { return }
+            guard let dir = opendir(path) else {
+                result.errors.append("Could not list \(path): \(String(cString: strerror(errno)))")
+                return
+            }
             result.directoriesVisited += 1
             var children: [String] = []
             var hasGit = false
-            while let entry = readdir(dir) {
+            while true {
+                errno = 0
+                guard let entry = readdir(dir) else {
+                    if errno != 0 { result.errors.append("Could not finish listing \(path): \(String(cString: strerror(errno)))") }
+                    break
+                }
                 let type = entry.pointee.d_type
                 let name = withUnsafeBytes(of: entry.pointee.d_name) {
                     String(decoding: $0.prefix(Int(entry.pointee.d_namlen)), as: UTF8.self)
@@ -62,9 +71,10 @@ enum RepositoryDiscovery {
             closedir(dir)
             // Nothing inside a repository is searched: its submodules and nested checkouts
             // belong to it.
-            if hasGit, let repo = identify(path, relative: relative) {
-                found.append(repo)
-                return
+            if hasGit {
+                do {
+                    if let repo = try identify(path, relative: relative) { found.append(repo); return }
+                } catch { result.errors.append(error.localizedDescription) }
             }
             for name in children.sorted() {
                 let child = (path as NSString).appendingPathComponent(name)
@@ -83,12 +93,13 @@ enum RepositoryDiscovery {
             // Git's own list also finds worktrees in hidden folders like .claude/worktrees,
             // which the walk skips.
             let listed = Git.run(["worktree", "list", "--porcelain", "-z"], in: main.root, timeout: 5)
+            if !listed.ok { result.errors.append("Could not list worktrees in \(main.root): \(listed.err)") }
             for field in GitParse.split0(listed.out) where field.hasPrefix("worktree ") {
                 let path = canonical(String(field.dropFirst("worktree ".count)))
                 guard path != main.root, path.hasPrefix(inside), isDirectory(path) else { continue }
                 worktrees.insert(path)
             }
-            result.repositories.append(Repository(root: main.root, relativePath: main.relativePath, worktreeCount: worktrees.count))
+            result.repositories.append(Repository(root: main.root, relativePath: main.relativePath, worktreeCount: worktrees.count, worktreePaths: worktrees.sorted()))
         }
         result.repositories.sort { $0.relativePath.localizedStandardCompare($1.relativePath) == .orderedAscending }
         return result
@@ -96,10 +107,12 @@ enum RepositoryDiscovery {
 
     /// One git call. A broken .git (a deleted worktree's file, say) isn't a repository, and
     /// the walk carries on into the folder instead.
-    private static func identify(_ path: String, relative: String) -> Found? {
+    private static func identify(_ path: String, relative: String) throws -> Found? {
         let r = Git.run(["rev-parse", "--path-format=absolute", "--show-toplevel", "--git-dir", "--git-common-dir"], in: path, timeout: 5)
         let lines = r.text.split(separator: "\n").map(String.init)
-        guard r.ok, lines.count == 3, canonical(lines[0]) == canonical(path) else { return nil }
+        guard r.ok else { throw GitReviewError(message: "Could not identify repository at \(path): \(r.err)") }
+        guard lines.count == 3 else { throw GitReviewError(message: "Git returned incomplete repository metadata for \(path).") }
+        guard canonical(lines[0]) == canonical(path) else { return nil }
         return Found(root: lines[0], relativePath: relative, gitDir: canonical(lines[1]), commonDir: canonical(lines[2]))
     }
 
@@ -130,7 +143,7 @@ final class RepositoryDiscoveryCache {
         if let cached = entries[folder] { return cached }
         let result = RepositoryDiscovery.discover(folder: folder)
         if entries.count >= 32 { entries.removeAll() }
-        entries[folder] = result
+        if result.errors.isEmpty { entries[folder] = result }
         return result
     }
 }
@@ -143,6 +156,7 @@ struct RepositoryChanges: Identifiable, Equatable {
     /// Everything since the branch left the default branch, or the uncommitted changes when
     /// there's no default branch to compare with.
     var branch: [ChangedFile]
+    var scanError: String? = nil
     var id: String { repository.id }
     var hasChanges: Bool { !uncommitted.isEmpty || !branch.isEmpty }
 
@@ -151,9 +165,48 @@ struct RepositoryChanges: Identifiable, Equatable {
     static func scan(_ repository: RepositoryDiscovery.Repository) -> RepositoryChanges? {
         guard let info = RepoInfo.load(folder: repository.root) else { return nil }
         let env = Git.readOnlyIndex(root: info.root)
-        let uncommitted = ChangeScanner.uncommitted(info, env: env)
-        let branch = info.mergeBase.map { ChangeScanner.branch(info, base: $0, env: env) } ?? uncommitted
-        return RepositoryChanges(repository: repository, info: info, uncommitted: uncommitted, branch: branch)
+        do {
+            let files = try readChanges(info) { Git.run($0, in: info.root, extraEnv: env) }
+            return RepositoryChanges(repository: repository, info: info, uncommitted: files.uncommitted, branch: files.branch)
+        } catch {
+            return RepositoryChanges(repository: repository, info: info, uncommitted: [], branch: [], scanError: error.localizedDescription)
+        }
+    }
+
+    /// Injectable command boundary keeps failures testable without a live checkout.
+    static func readChanges(_ info: RepoInfo, run: ([String]) -> Git.Result) throws -> (uncommitted: [ChangedFile], branch: [ChangedFile]) {
+        func checked(_ args: [String]) throws -> Data {
+            let result = run(args)
+            guard result.ok else {
+                throw GitReviewError(message: "Could not read \(info.root): " + (result.err.isEmpty ? "Git \(args[0]) failed (exit \(result.status))." : result.err))
+            }
+            return result.out
+        }
+        func counts(_ input: [ChangedFile], base: String) throws -> [ChangedFile] {
+            let data = try checked(["diff", "--numstat", "-z", "-M", "--no-ext-diff", "--no-textconv", base, "--"])
+            let byPath = Dictionary(GitParse.numstat(data).map { ($0.path, $0) }, uniquingKeysWith: { _, b in b })
+            var files = input.sorted { $0.path.localizedStandardCompare($1.path) == .orderedAscending }
+            for i in files.indices {
+                if let n = byPath[files[i].path] {
+                    files[i].added = n.added
+                    files[i].deleted = n.deleted
+                    if files[i].oldPath == nil { files[i].oldPath = n.oldPath }
+                } else if files[i].isUntracked, i < ChangeScanner.maxFiles {
+                    files[i].added = GitParse.countLines(atPath: (info.root as NSString).appendingPathComponent(files[i].path))
+                    if files[i].added != nil { files[i].deleted = 0 }
+                } else if files[i].status == "D" { files[i].added = 0 }
+            }
+            return Array(files.prefix(ChangeScanner.maxFiles))
+        }
+        let status = try checked(["status", "--porcelain=v1", "-z", "--untracked-files=all"])
+        let local = GitParse.status(status)
+        let uncommitted = try counts(local, base: info.headRef)
+        guard let base = info.mergeBase else { return (uncommitted, uncommitted) }
+        let names = try checked(["diff", "--name-status", "-z", "-M", "--no-ext-diff", "--no-textconv", base, "--"])
+        var branch = GitParse.nameStatus(names)
+        let tracked = Set(branch.map(\.path))
+        branch += local.filter { $0.isUntracked && !tracked.contains($0.path) }
+        return (uncommitted, try counts(branch, base: base))
     }
 
     /// Repositories with changes first, then by path.

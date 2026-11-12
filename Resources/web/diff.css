@@ -139,3 +139,15 @@ button.primary:disabled { opacity: 0.4; cursor: default; }
 
 .large { text-align: center; padding: 72px 24px; color: var(--tertiary); font-size: 13px; }
 .large button { margin-top: 14px; }
+
+.code { position: relative; }
+.line-comment { opacity: 0; position: absolute; left: 0; top: 0; padding: 0 3px; z-index: 2; }
+tr:hover .line-comment, .line-comment:focus-visible { opacity: 1; }
+.note-head button { font-size: 11px; padding: 2px 6px; }
+.note pre { white-space: pre-wrap; opacity: .7; }
+.draft-recovery textarea { width: 100%; min-height: 70px; box-sizing: border-box; }
+.diff-tools { position: sticky; top: 0; z-index: 5; display: flex; flex-wrap: wrap; gap: 5px; padding: 6px; background: var(--bg, Canvas); border-bottom: 1px solid rgba(128,128,128,.25); }
+.diff-tools button, .diff-tools input { font: 11px -apple-system, sans-serif; }
+.diff-tools input { min-width: 90px; flex: 1; }
+.nowrap td.code { white-space: pre; overflow-wrap: normal; }
+tr.find-match td { outline: 1px solid rgba(var(--sel),.65); }

@@ -7,11 +7,16 @@ struct FilesView: View {
     @EnvironmentObject var review: ReviewCenter
 
     var body: some View {
-        Group {
+        VStack(spacing: 0) {
+            if review.folder != nil {
+                PanelReadStatus(state: review.filesReadState, source: "Files") { review.refreshTree() }.padding(10)
+            }
             if review.folder == nil {
                 EmptyNote(title: "Pick a chat to browse its files")
             } else if let tree = review.tree {
                 FileTreeList(tree: tree)
+            } else if review.filesReadState.error != nil {
+                EmptyNote(title: "Files unavailable", detail: "Retry to read this checkout.")
             } else {
                 Color.hChrome
             }
@@ -34,6 +39,9 @@ struct FileTreeList: View {
                     let hits = tree.matches(review.filter)
                     ForEach(hits) { n in
                         FileRow(node: n, depth: 0, showDirectory: true, changed: changed[n.path], dirChanged: false, expanded: false)
+                    }
+                    if hits.count == 400 {
+                        Text("Showing the first 400 matches. Refine the filter to see more.").font(.system(size: 11)).foregroundStyle(Color.hTertiary)
                     }
                     if hits.isEmpty {
                         Text("No files match").font(.system(size: 12)).foregroundStyle(Color.hTertiary).padding(.top, 24)
@@ -125,7 +133,7 @@ struct FileRow: View {
                 NSPasteboard.general.clearContents()
                 NSPasteboard.general.setString(absolute, forType: .string)
             }
-            Button("Insert Path into Chat") { review.insertPath(absolute) }.disabled(!review.canSend)
+            Button("Insert Path into Chat") { review.insertPath(absolute) }.disabled(review.chatID == nil)
         }
     }
 

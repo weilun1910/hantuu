@@ -291,7 +291,7 @@ struct ShellTab: View {
     let selected: Bool
 
     var body: some View {
-        SubTab(title: shell.title, selected: selected, help: model.project(shell.projectID)?.path ?? "",
+        SubTab(title: shell.title + " | " + FileViewerController.abbreviate(shell.checkoutPath) + (shell.recreated ? " | Recreated" : ""), selected: selected, help: shell.checkoutPath + (shell.recreated ? "\nRecreated shell. Previous commands and scrollback were not resumed." : ""),
                select: {
                    model.selectedShellID[shell.projectID] = shell.id
                    model.focusRequest.send(shell.terminal)

@@ -420,18 +420,30 @@ extension SelfTest {
             check("nested: each repository has its own diff", false)
             return
         }
-        check("nested: a repository with only committed work opens on Branch, the others on Uncommitted",
-              first.base == .uncommitted && other.base == .branch && other.changes.map(\.path) == ["source.txt"])
+        check("nested: a repository with only committed work opens on Branch, local edits on Unstaged",
+              waitUntil(15) { first.changesLoaded && other.changesLoaded } &&
+              first.base == .unstaged && other.base == .branch && other.changes.map(\.path) == ["source.txt"])
         check("nested: the first open repository's selected file shows its diff below the list",
               center.focusedRepository == primary.path && first.activeTab == .changes && other.activeTab == nil && first.showsSelection && !other.showsSelection)
         other.select("source.txt")
         check("nested: picking a file in another repository moves the diff to it",
               center.focusedRepository == second.path && other.activeTab == .changes && first.activeTab == nil && !first.showsSelection)
         first.select("source.txt")
+        var refreshedFirst = false
+        var refreshedOther = false
+        first.refreshGit { refreshedFirst = true }
+        other.refreshGit { refreshedOther = true }
+        check("nested: background refreshes preserve the selected repository",
+              waitUntil(15) { refreshedFirst && refreshedOther } && center.focusedRepository == primary.path && first.activeTab == .changes && other.activeTab == nil)
         other.base = .uncommitted
-        check("nested: each repository keeps its own comparison", other.changes.isEmpty && first.base == .uncommitted && first.changes.count == 1)
+        check("nested: each repository keeps its own comparison",
+              waitUntil(15) { other.gitSnapshot?.scope == .uncommitted && !other.gitReadState.loading } &&
+              other.changes.isEmpty && first.base == .unstaged && first.changes.count == 1 && center.focusedRepository == primary.path)
         other.base = .branch
         first.select("source.txt")
+        check("nested: a comparison finishing preserves a later file selection",
+              waitUntil(15) { other.gitSnapshot?.scope == .branch && !other.gitReadState.loading } &&
+              other.changes.map(\.path) == ["source.txt"] && center.focusedRepository == primary.path)
         first.addComment(path: "source.txt", side: "new", start: 2, end: 2, quoted: ["primary change"], body: "Keep this change.")
         other.addComment(path: "source.txt", side: "new", start: 2, end: 2, quoted: ["second change"], body: "Explain this change.")
         let message = CommentMessage.build(center.currentComments, folder: parent.path)
@@ -466,9 +478,13 @@ extension SelfTest {
             check("snapshot: nested repositories in \(name) mode", render(container, to: shots.appendingPathComponent("nested-repositories-\(name).png")))
         }
         window.appearance = NSAppearance(named: .darkAqua)
+        var refreshedClosed = false
+        first.refreshGit { refreshedClosed = true }
         center.toggleRepository(primary.path)
         center.showCleanRepositories = true
         check("nested: closing the section whose diff shows moves the diff to the next open one", center.focusedRepository == second.path && other.activeTab == .changes)
+        check("nested: a closed section's pending refresh cannot reclaim the diff",
+              waitUntil(15) { refreshedClosed } && center.focusedRepository == second.path && other.activeTab == .changes && first.activeTab == nil)
         _ = waitUntil(8) { other.diffPage.page.ready }
         RunLoop.main.run(until: Date().addingTimeInterval(0.6))
         check("snapshot: nested repositories with one folded and the clean one listed",
@@ -665,8 +681,11 @@ extension SelfTest {
         // Wait for this file's rows, not just any rows: the page can still be showing the file
         // that was selected before.
         let rendered = waitUntil(8) { page.ready && (js(page, "Array.from(document.querySelectorAll('tr.add')).some(t => t.textContent.includes('isWhitespace')) ? 1 : 0") as? Int ?? 0) == 1 }
-        check("panel: Changes lists files and renders the first diff", rendered && center.changes.count == 5 && center.selectedPath == "Sources/Parser.swift",
+        check("panel: Changes lists unstaged files and renders the first diff", rendered && center.base == .unstaged &&
+              Set(center.changes.map(\.path)) == ["gone.txt", "Sources/Parser.swift", "Sources/Tokenizer.swift", "Tests/ParserTests.swift"] && center.selectedPath == "Sources/Parser.swift",
               "\(center.changes.map(\.path)) selected=\(center.selectedPath ?? "nil")")
+        check("panel: the staged rename remains in the separate Staged list",
+              center.gitSnapshot?.staged.map(\.path) == ["docs/notes.txt"])
         let hl = js(page, "document.querySelectorAll('table.diff .hljs-keyword').length") as? Int ?? 0
         check("panel: diff is highlighted with line numbers", hl > 0 && (js(page, "document.querySelector('tr.add td.ln.n').textContent") as? String ?? "") != "")
 
@@ -712,15 +731,19 @@ extension SelfTest {
         _ = waitUntil(6) { !center.changes.contains { $0.path == "data/big.txt" } }
         center.selectedPath = "Sources/Parser.swift"
 
-        // Send to Agent: one bracketed paste, then a real Return key.
-        check("comments: Send is available for a running chat", center.canSend)
+        // This capture-only terminal is not a ready provider and has no reader transport.
+        // It must retain feedback instead of issuing a direct terminal paste/Return.
+        // Opt-in LiveChecks 'review' verifies actual delivery for Claude and Codex.
+        let pendingBefore = center.currentComments
+        let capturedBefore = (try? Data(contentsOf: sent)) ?? Data()
+        let previousReader = ReaderModeController.main
+        ReaderModeController.main = nil
         center.sendComments()
-        let typed = waitUntil(5) { ((try? Data(contentsOf: sent)) ?? Data()).count > 60 && ((try? Data(contentsOf: sent)) ?? Data()).last == 0x0D }
-        let bytes = String(decoding: (try? Data(contentsOf: sent)) ?? Data(), as: UTF8.self)
-        check("comments: sent as one bracketed paste followed by Return", typed && bytes.hasPrefix("\u{1b}[200~Please address this review comment") && bytes.hasSuffix("\u{1b}[201~\r")
-              && bytes.contains("Parser.swift:") && bytes.contains("> ") && bytes.contains("Use a CharacterSet here"), bytes.debugDescription)
-        check("comments: cleared once sent", center.currentComments.isEmpty)
+        ReaderModeController.main = previousReader
         RunLoop.main.run(until: Date().addingTimeInterval(0.3))
+        check("comments: unavailable reader retains comments", !pendingBefore.isEmpty && center.currentComments == pendingBefore)
+        check("comments: unavailable reader never pastes or presses Return", ((try? Data(contentsOf: sent)) ?? Data()) == capturedBefore)
+        check("comments: unavailable reader exposes recoverable failure", PanelFeedbackDelivery.shared.latest(for: chat.id)?.state == .failed)
 
         model.panelTab = .files
         center.expanded = ["Sources", "Tests"]

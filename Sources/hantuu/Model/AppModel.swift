@@ -102,6 +102,8 @@ final class PanelShell: ObservableObject, Identifiable {
     let projectID: UUID
     let terminal: TerminalView
     @Published var title = "Shell"
+    var recreated = false
+    var checkoutPath: String { terminal.currentDirectory ?? "" }
     init(id: UUID = UUID(), projectID: UUID, terminal: TerminalView) {
         self.id = id
         self.projectID = projectID
@@ -562,7 +564,7 @@ final class AppModel: ObservableObject, TerminalEvents {
         pruneProjectPanels()
         for p in projects {
             var state = projectPanels[p.id] ?? ProjectPanelState()
-            state.shells = shells(in: p.id).map { SavedPanelShell(id: $0.id, title: $0.title) }
+            state.shells = shells(in: p.id).map { SavedPanelShell(id: $0.id, title: $0.title, cwd: $0.checkoutPath) }
             state.selectedShellID = selectedShellID[p.id]
             projectPanels[p.id] = state
         }
@@ -573,10 +575,11 @@ final class AppModel: ObservableObject, TerminalEvents {
         guard let g = GhosttyApp.shared else { return }
         for project in projects {
             for saved in projectPanels[project.id]?.shells ?? [] {
-                let terminal = TerminalView(app: g.app, launch: .init(workingDirectory: project.path), handlesChildExit: false)
+                let terminal = TerminalView(app: g.app, launch: .init(workingDirectory: saved.cwd ?? project.path), handlesChildExit: false)
                 terminal.events = self
                 let shell = PanelShell(id: saved.id, projectID: project.id, terminal: terminal)
                 shell.title = saved.title
+                shell.recreated = true
                 shells.append(shell)
             }
             selectedShellID[project.id] = projectPanels[project.id]?.selectedShellID
@@ -1016,7 +1019,8 @@ final class AppModel: ObservableObject, TerminalEvents {
 
     func newTerminalTab() {
         guard let g = GhosttyApp.shared, let project = currentProject else { return }
-        let tv = TerminalView(app: g.app, launch: .init(workingDirectory: project.path), handlesChildExit: false)
+        let cwd = selectedChat.map { workingDirectory(of: $0) } ?? project.path
+        let tv = TerminalView(app: g.app, launch: .init(workingDirectory: cwd), handlesChildExit: false)
         let shell = PanelShell(projectID: project.id, terminal: tv)
         tv.events = self
         shells.append(shell)
@@ -1028,6 +1032,14 @@ final class AppModel: ObservableObject, TerminalEvents {
     }
 
     func closeShell(_ shell: PanelShell) {
+        if shell.terminal.needsConfirmQuit {
+            let alert = NSAlert()
+            alert.messageText = "Close terminal with running work?"
+            alert.informativeText = "Closing this shell stops its foreground work.\n\(shell.checkoutPath)"
+            alert.addButton(withTitle: "Cancel")
+            alert.addButton(withTitle: "Close Terminal").hasDestructiveAction = true
+            guard alert.runModal() == .alertSecondButtonReturn else { return }
+        }
         defer { scheduleSave() }
         shell.terminal.destroy()
         let siblings = shells.filter { $0.projectID == shell.projectID }

@@ -19,6 +19,8 @@ struct EditorPayload: Encodable {
     var base: String
     var links: [DetectedPath]
     var position: EditorPosition?
+    var recoveryText: String?
+    var generation: String
 }
 
 /// One open tab's file, as the viewer keeps it.
@@ -39,6 +41,8 @@ final class FileDoc {
     /// The editor page has this tab's document.
     var inPage = false
     var dirty = false
+    var recovery: EditorRecoveryRecord?
+    var recoveryPending = false
     /// The tab's last line request the page has scrolled to (CodeTab.lineRequest).
     var shownLineRequest = 0
     /// The file changed on disk while you had unsaved changes. Holds what's on disk now.
@@ -66,6 +70,7 @@ final class FileDoc {
 
 /// The quiet bar above the selected tab, when there's something to say.
 enum FileBanner: Equatable {
+    case recovery(String)
     case changedOnDisk(String)
     case deleted(String, dirty: Bool)
     case note(symbol: String, text: String)
@@ -93,6 +98,8 @@ final class FileViewerController: NSObject, ObservableObject {
     private(set) var docs: [UUID: FileDoc] = [:]
     @Published private(set) var banner: FileBanner? { didSet { barState.banner = banner } }
     private let barState = FileViewerBarState()
+    let recoveryStore = EditorRecoveryStore()
+    private var generation = UUID().uuidString
     private var shownKey = ""
     private var bag = Set<AnyCancellable>()
 
@@ -124,6 +131,10 @@ final class FileViewerController: NSObject, ObservableObject {
         ])
         fill(content, with: page.webView)
         model.fileViewer = self
+        recoveryStore.onError = { [weak self] id, error in
+            self?.docs[id]?.error = "Recovery could not be saved: \(error.localizedDescription)"
+            self?.updateBanner()
+        }
         page.onReady = { [weak self] in self?.pageLoaded() }
         page.onMessage = { [weak self] msg in self?.handle(msg) }
         model.$codeTabs.combineLatest(model.$selectedCodeTabID)
@@ -166,9 +177,14 @@ final class FileViewerController: NSObject, ObservableObject {
 
     /// The page reloaded (first load, or its process restarted): it has no documents now.
     private func pageLoaded() {
-        for d in docs.values where d.inPage {
+        generation = UUID().uuidString
+        for d in docs.values {
             d.inPage = false
-            if d.dirty { setDirty(d, false) }
+            if d.dirty {
+                recoveryStore.flush(d.id)
+                d.recovery = recoveryStore.read(d.id)
+                d.recoveryPending = d.recovery != nil
+            }
         }
         shownKey = ""
         render()
@@ -183,6 +199,7 @@ final class FileViewerController: NSObject, ObservableObject {
     }
 
     func render() {
+        for tab in model.allCodeTabs where docs[tab.id] == nil { _ = makeDoc(tab) }
         let open = Set(model.allCodeTabs.map(\.id))
         for (id, d) in docs where !open.contains(id) { drop(d) }
         guard let tab = selectedTab else {
@@ -229,6 +246,12 @@ final class FileViewerController: NSObject, ObservableObject {
     private func makeDoc(_ tab: CodeTab) -> FileDoc {
         let d = FileDoc(id: tab.id, path: tab.path, kind: tab.kind)
         docs[tab.id] = d
+        if let r = recoveryStore.read(tab.id), r.path == tab.path, r.projectID == projectID(for: tab.id) {
+            d.recovery = r
+            if d.kind == .missing { d.kind = .text; d.deleted = true }
+            d.recoveryPending = true
+            setDirty(d, true)
+        }
         if d.kind != .missing && d.kind != .directory {
             d.watch = FileWatch(path: d.realPath) { [weak self, weak d] in
                 guard let self, let d else { return }
@@ -246,6 +269,7 @@ final class FileViewerController: NSObject, ObservableObject {
         d.pane?.removeFromSuperview()
         d.pane = nil
         if d.inPage { page.call("close", d.id.uuidString) }
+        recoveryStore.remove(d.id)
         docs[d.id] = nil
     }
 
@@ -254,7 +278,7 @@ final class FileViewerController: NSObject, ObservableObject {
         d.loading = true
         let path = d.path, kind = d.kind
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            let load = TextFile.read(path)
+            let load = TextFile.read(path) ?? d.recovery.map { TextLoad(text: $0.baseline) }
             let links = kind == .markdown ? PathDetector.detect(in: load?.text ?? "", base: (path as NSString).deletingLastPathComponent) : []
             DispatchQueue.main.async {
                 guard let self, self.docs[d.id] === d else { return }
@@ -284,9 +308,9 @@ final class FileViewerController: NSObject, ObservableObject {
         default: nil
         }
         return EditorPayload(id: d.id.uuidString, path: d.path, name: d.name, text: load.text, preview: preview,
-                             mode: tab.preview && preview != nil ? "preview" : "source", readOnly: load.readOnly != nil,
+                             mode: tab.preview && preview != nil ? "preview" : "source", readOnly: load.readOnly != nil || d.recoveryPending,
                              wrap: Self.wraps(d.path), eol: load.eol, line: tab.line, base: (d.path as NSString).deletingLastPathComponent,
-                             links: d.links, position: tab.editorPosition)
+                             links: d.links, position: tab.editorPosition, recoveryText: d.recovery?.text, generation: generation)
     }
 
     private func makePane(_ d: FileDoc) -> FileViewerPane {
@@ -356,6 +380,7 @@ final class FileViewerController: NSObject, ObservableObject {
     private func bannerFor(_ d: FileDoc?) -> FileBanner? {
         guard let d else { return nil }
         if let e = d.error { return .error(e) }
+        if d.recoveryPending { return .recovery(d.name) }
         if d.pendingDisk != nil { return .changedOnDisk(d.name) }
         if d.deleted { return .deleted(d.name, dirty: d.dirty) }
         if d.kind.usesPage, d.failure == nil, let load = d.load {
@@ -396,8 +421,23 @@ final class FileViewerController: NSObject, ObservableObject {
                   let raw = msg["position"], let data = try? JSONSerialization.data(withJSONObject: raw),
                   let position = try? JSONDecoder().decode(EditorPosition.self, from: data) else { return }
             model.setEditorPosition(id, position)
+        case "recovery":
+            guard msg["generation"] as? String == generation,
+                  let id = (msg["id"] as? String).flatMap(UUID.init), let d = docs[id], !d.recoveryPending,
+                  let text = msg["text"] as? String, let baseline = msg["baseline"] as? String,
+                  let project = projectID(for: id) else { return }
+            if text == baseline {
+                d.recovery = nil
+                recoveryStore.remove(id)
+            } else {
+                let record = EditorRecoveryRecord(projectID: project, documentID: id, path: d.path, realPath: d.realPath, text: text, baseline: baseline, baselineFingerprint: EditorRecoveryRecord.fingerprint(baseline), updated: Date())
+                d.recovery = record
+                recoveryStore.put(record)
+            }
+            setDirty(d, text != baseline)
         case "dirty":
             guard let id = (msg["id"] as? String).flatMap(UUID.init), let d = docs[id] else { return }
+            guard msg["generation"] as? String == generation, !d.recoveryPending else { return }
             setDirty(d, msg["dirty"] as? Bool ?? false)
         case "conflict":
             // A reload arrived as you were typing: keep your edits and show the bar.
@@ -463,7 +503,6 @@ final class FileViewerController: NSObject, ObservableObject {
             return
         }
         if d.dirty {
-            d.load = fresh
             d.links = links
             d.pendingDisk = fresh
             updateBanner()
@@ -497,6 +536,10 @@ final class FileViewerController: NSObject, ObservableObject {
     /// Reload from the bar: what's on disk replaces your unsaved changes.
     func reloadFromDisk() {
         guard let d = selectedDoc, let fresh = d.pendingDisk ?? (d.deleted ? nil : TextFile.read(d.path)) else { return }
+        d.recovery = nil
+        d.recoveryPending = false
+        recoveryStore.remove(d.id)
+        setDirty(d, false)
         apply(fresh, links: d.links, to: d, force: true)
     }
 
@@ -515,10 +558,55 @@ final class FileViewerController: NSObject, ObservableObject {
         updateBanner()
     }
 
+    private func projectID(for id: UUID) -> UUID? {
+        if model.codeTabs.contains(where: { $0.id == id }) { return model.currentProject?.id }
+        return model.projectPanels.first { $0.value.codeTabs?.contains(where: { $0.id == id }) == true }?.key
+    }
+
+    func restoreRecovery() {
+        guard let d = selectedDoc, let record = d.recovery else { return }
+        d.recoveryPending = false
+        if let disk = TextFile.read(d.path) {
+            d.load = disk
+            d.pendingDisk = record.matchesDisk(disk.text) && record.realPath == TextFile.realPath(d.path) ? nil : disk
+        }
+        page.call("close", d.id.uuidString)
+        d.inPage = false
+        shownKey = ""
+        render()
+        setDirty(d, true)
+    }
+
+    func compareRecovery() {
+        guard let d = selectedDoc, let recovery = d.recovery else { return }
+        let alert = NSAlert()
+        alert.messageText = "Recovered changes and current disk file"
+        alert.informativeText = "Left: recovered text. Right: current disk. Restore keeps your text unsaved."
+        let row = NSStackView()
+        row.orientation = .horizontal
+        row.spacing = 12
+        row.frame = NSRect(x: 0, y: 0, width: 680, height: 340)
+        for text in [recovery.text, TextFile.read(d.path)?.text ?? "File unavailable"] {
+            let scroll = NSScrollView()
+            scroll.hasVerticalScroller = true
+            let view = NSTextView(frame: NSRect(x: 0, y: 0, width: 330, height: 340))
+            view.string = text
+            view.isEditable = false
+            view.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
+            scroll.documentView = view
+            row.addArrangedSubview(scroll)
+            scroll.widthAnchor.constraint(equalToConstant: 334).isActive = true
+        }
+        alert.accessoryView = row
+        alert.addButton(withTitle: "Restore unsaved changes")
+        alert.addButton(withTitle: "Cancel")
+        if alert.runModal() == .alertFirstButtonReturn { restoreRecovery() }
+    }
+
     // MARK: Saving
 
     var canSaveSelected: Bool {
-        guard let d = selectedDoc, d.kind.usesPage, d.failure == nil, let load = d.load, load.readOnly == nil else { return false }
+        guard let d = selectedDoc, !d.recoveryPending, d.pendingDisk == nil, d.kind.usesPage, d.failure == nil, let load = d.load, load.readOnly == nil else { return false }
         return d.dirty || d.deleted
     }
 
@@ -530,7 +618,7 @@ final class FileViewerController: NSObject, ObservableObject {
     /// Saves a tab's editor text to its file. Checks the disk first: if the file changed since
     /// it was loaded and you haven't seen that, the bar shows instead and nothing is written.
     func save(_ id: UUID, completion: @escaping (Bool) -> Void) {
-        guard let d = docs[id], d.kind.usesPage, d.inPage, let load = d.load, load.readOnly == nil else { return completion(false) }
+        guard let d = docs[id], !d.recoveryPending, d.pendingDisk == nil, d.kind.usesPage, d.inPage, let load = d.load, load.readOnly == nil else { return completion(false) }
         if d.pendingDisk == nil, let fp = FileFingerprint.of(d.realPath), fp != d.fingerprint {
             if let fresh = TextFile.read(d.path), fresh.text != load.text {
                 d.load = fresh
@@ -545,6 +633,13 @@ final class FileViewerController: NSObject, ObservableObject {
         page.webView.evaluateJavaScript("hantuu.snapshot(\(Self.jsString(id.uuidString)))") { [weak self] result, _ in
             guard let self, let snap = result as? [String: Any], let text = snap["text"] as? String,
                   let token = (snap["token"] as? NSNumber)?.intValue, self.docs[id] === d else { return completion(false) }
+            guard d.pendingDisk == nil, TextFile.realPath(d.path) == d.realPath,
+                  (FileFingerprint.of(d.realPath) == d.fingerprint || (d.deleted && FileFingerprint.of(d.realPath) == nil)) else {
+                d.pendingDisk = TextFile.read(d.path)
+                d.error = "The file changed before saving. Review the disk changes first."
+                self.updateBanner()
+                return completion(false)
+            }
             do {
                 let fp = try TextFile.save(text, bom: load.bom, to: d.path, realPath: d.realPath)
                 d.load?.text = text
@@ -626,7 +721,9 @@ final class FileViewerController: NSObject, ObservableObject {
         guard !tabs.isEmpty else { return true }
         switch ask(tabs) {
         case .cancel: return false
-        case .discard: return true
+        case .discard:
+            for tab in tabs { recoveryStore.remove(tab.id) }
+            return true
         case .save:
             if saveAllAndWait(tabs.map(\.id)) { return true }
             let a = NSAlert()
@@ -670,6 +767,7 @@ struct FileViewerBar: View {
 
     private func symbol(_ b: FileBanner) -> String {
         switch b {
+        case .recovery: return "arrow.counterclockwise"
         case .changedOnDisk: return "arrow.triangle.2.circlepath"
         case .deleted: return "trash"
         case .note(let s, _): return s
@@ -687,6 +785,7 @@ struct FileViewerBar: View {
 
     private func text(_ b: FileBanner) -> String {
         switch b {
+        case .recovery(let name): return "Unsaved changes recovered for \(name)."
         case .changedOnDisk(let name): return "\(name) changed on disk."
         case .deleted(let name, let dirty): return dirty ? "\(name) was deleted. Save to put it back." : "\(name) was deleted."
         case .note(_, let t): return t
@@ -696,6 +795,11 @@ struct FileViewerBar: View {
 
     @ViewBuilder private func buttons(_ b: FileBanner) -> some View {
         switch b {
+        case .recovery:
+            HStack(spacing: 6) {
+                Button("Compare") { viewer.compareRecovery() }.buttonStyle(SmallBarButtonStyle(prominent: false))
+                Button("Restore") { viewer.restoreRecovery() }.buttonStyle(SmallBarButtonStyle(prominent: true))
+            }
         case .changedOnDisk:
             HStack(spacing: 6) {
                 Button("Keep Mine") { state.viewer?.keepMine() }.buttonStyle(SmallBarButtonStyle(prominent: false))

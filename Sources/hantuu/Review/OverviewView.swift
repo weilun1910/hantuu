@@ -98,10 +98,28 @@ struct OverviewCards: View {
                 if !review.work.subagents.isEmpty { AgentsCard(agents: review.work.subagents, savedExpanded: overviewBinding(\.expandedAgents, fallback: []), savedShowAll: overviewBinding(\.allAgents, fallback: false)).id(chat.projectID) }
                 if !review.work.tasks.isEmpty { BackgroundTasksCard(tasks: review.work.tasks, savedShowAll: overviewBinding(\.allTasks, fallback: false)).id(chat.projectID) }
                 if let s = review.overviewSummary, s.files > 0, review.hasRepositories { changes(s) }
-                if let pr = review.pr { PullRequestCard(pr: pr) }
-                if let i = review.insights, let used = i.contextUsed, let window = i.contextWindow { context(used: used, window: window, guess: i.windowIsGuess) }
+                if review.repositoryPullRequests.isEmpty {
+                    pullRequest(review.pr, state: review.prReadState)
+                } else {
+                    ForEach(review.repositoryPullRequests) { entry in
+                        VStack(alignment: .leading, spacing: 5) {
+                            Text(ReviewFormat.tilde(entry.root)).font(.system(size: 11)).foregroundStyle(Color.hTertiary)
+                            pullRequest(entry.pr, state: entry.readState)
+                        }
+                    }
+                }
+                if let i = review.insights, let used = i.contextUsed, let window = i.contextWindow {
+                    context(used: used, window: window, guess: i.windowIsGuess)
+                } else {
+                    ReviewCard(title: "Context") {
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text("Context usage is not reported in this transcript.").font(.system(size: 12)).foregroundStyle(Color.hSecondary)
+                            PanelReadStatus(state: review.insightsReadState, source: "Transcript") { review.refreshInsights() }
+                        }
+                    }
+                }
                 if let plan = review.insights?.plan, !plan.isEmpty { PlanCard(items: plan) }
-                if !review.ports.isEmpty { PortsCard(ports: review.ports) }
+                PortsCard(ports: review.ports, readState: review.portsReadState) { review.refreshPorts() }
             }
             .padding(14)
             .background(PanelScrollMemory(key: chat.projectID.uuidString, offset: model.overviewScroll(project: chat.projectID)) { value in
@@ -110,6 +128,24 @@ struct OverviewCards: View {
         }
         .scrollIndicators(.automatic)
         .background(Color.hChrome)
+    }
+
+    @ViewBuilder
+    private func pullRequest(_ pr: PullRequestInfo?, state: PanelReadState) -> some View {
+        if let pr {
+            PullRequestCard(pr: pr, readState: state, retry: { review.refreshPullRequest() }, addFailures: {
+                _ = ReaderModeController.main?.addPanelFeedbackToDraft(pr.failingChecksContext, chatID: chat.id)
+            })
+        } else {
+            ReviewCard(title: "Pull request") {
+                VStack(alignment: .leading, spacing: 6) {
+                    if state.lastSuccess != nil {
+                        Text("No pull request found for this branch.").font(.system(size: 12)).foregroundStyle(Color.hSecondary)
+                    }
+                    PanelReadStatus(state: state, source: "GitHub CLI") { review.refreshPullRequest() }
+                }
+            }
+        }
     }
 
     private func overviewBinding<Value>(_ keyPath: WritableKeyPath<OverviewPanelState, Value?>, fallback: Value) -> Binding<Value> {
@@ -188,6 +224,7 @@ struct OverviewCards: View {
                 }
                 .frame(height: 3)
                 Text("\(used.formatted()) tokens in use").font(.system(size: 11.5)).foregroundStyle(Color.hTertiary)
+                PanelReadStatus(state: review.insightsReadState, source: "Transcript") { review.refreshInsights() }
             }
         }
         .help(guess ? "The window size is a guess: the transcript doesn't say which context size the model runs with." : "")
@@ -196,6 +233,9 @@ struct OverviewCards: View {
 
 struct PullRequestCard: View {
     let pr: PullRequestInfo
+    var readState: PanelReadState? = nil
+    var retry: (() -> Void)? = nil
+    var addFailures: (() -> Void)? = nil
     static let maxChecks = 8
 
     var body: some View {
@@ -233,6 +273,11 @@ struct PullRequestCard: View {
                 }
                 .buttonStyle(.plain)
                 .padding(.top, 2)
+                if pr.checks.contains(where: { $0.state == .failure }), let addFailures {
+                    Button("Add failing checks to message", action: addFailures)
+                        .buttonStyle(.plain).font(.system(size: 12)).foregroundStyle(Color.hLink)
+                }
+                if let readState { PanelReadStatus(state: readState, source: "GitHub CLI", retry: retry) }
             }
         }
     }
@@ -317,10 +362,17 @@ struct PlanCard: View {
 
 struct PortsCard: View {
     let ports: [ListeningPort]
+    var readState: PanelReadState? = nil
+    var retry: (() -> Void)? = nil
     var body: some View {
         ReviewCard(title: "Ports") {
             VStack(alignment: .leading, spacing: 2) {
                 ForEach(ports) { p in PortRow(port: p) }
+                if ports.isEmpty, readState?.lastSuccess != nil {
+                    Text("No listeners detected in this checkout.").font(.system(size: 12)).foregroundStyle(Color.hSecondary)
+                }
+                Text("Matched by process working directory.").font(.system(size: 11)).foregroundStyle(Color.hTertiary)
+                if let readState { PanelReadStatus(state: readState, source: "Local TCP scan", retry: retry) }
             }
         }
     }
@@ -358,5 +410,31 @@ struct OverviewBar: View {
             IconButton(symbol: "arrow.clockwise", size: 11.5, help: "Refresh") { review.refreshNow() }
         }
         .padding(.horizontal, 4)
+    }
+}
+
+/// Refresh never hides the last successful value; failure labels it stale and retriable.
+struct PanelReadStatus: View {
+    let state: PanelReadState
+    let source: String
+    var retry: (() -> Void)? = nil
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 6) {
+                Text("\(source) | \(state.label)")
+                if let date = state.lastSuccess {
+                    Text(date, style: .time).help("Last successful read")
+                }
+                Spacer(minLength: 0)
+                if let retry {
+                    Button(state.error == nil ? "Refresh" : "Retry", action: retry)
+                        .buttonStyle(.plain).foregroundStyle(Color.hLink).disabled(state.loading)
+                }
+            }
+            if let error = state.error {
+                Text(error).foregroundStyle(Color.hPending).fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .font(.system(size: 11)).foregroundStyle(Color.hTertiary)
     }
 }

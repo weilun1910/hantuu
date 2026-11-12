@@ -33,6 +33,7 @@ struct ProjectPanelState: Codable {
 struct SavedPanelShell: Codable {
     var id: UUID
     var title: String
+    var cwd: String? = nil
 }
 
 struct SavedCodeTab: Codable {

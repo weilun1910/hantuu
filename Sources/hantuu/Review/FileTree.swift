@@ -26,38 +26,58 @@ struct FileTree {
     static let maxFiles = 20_000
     static let skippedFolders: Set<String> = [".git", "node_modules", ".build"]
 
-    /// Paths of every file, relative to `folder`, plus whether the list was cut short.
+    /// Compatibility helpers for existing callers. UI reads use the throwing API.
     static func listFiles(folder: String, inRepo: Bool) -> (paths: [String], truncated: Bool) {
+        (try? listFilesChecked(folder: folder, inRepo: inRepo)) ?? ([], false)
+    }
+
+    static func listFilesChecked(folder: String, inRepo: Bool) throws -> (paths: [String], truncated: Bool) {
         if inRepo {
-            let r = Git.run(["ls-files", "-co", "--exclude-standard", "-z"], in: folder, timeout: 20)
-            if r.ok {
-                // Tracked files deleted from disk are still in the index; leave them out.
-                var seen = Set(GitParse.split0(Git.run(["ls-files", "-d", "-z"], in: folder, timeout: 20).out))
-                let paths = GitParse.split0(r.out).filter { seen.insert($0).inserted }
-                return (Array(paths.prefix(maxFiles)), paths.count > maxFiles)
+            func read(_ args: [String]) throws -> Data {
+                let result = Git.run(args, in: folder, timeout: 20)
+                guard result.ok else { throw GitReviewError(message: result.err.isEmpty ? "Git could not list files." : result.err) }
+                return result.out
             }
+            let data = try read(["ls-files", "-co", "--exclude-standard", "-z"])
+            var seen = Set(GitParse.split0(try read(["ls-files", "-d", "-z"])))
+            let paths = GitParse.split0(data).filter { seen.insert($0).inserted }
+            return (Array(paths.prefix(maxFiles)), paths.count > maxFiles)
         }
-        return walk(folder)
+        return try walkChecked(folder)
     }
 
     static func walk(_ folder: String) -> (paths: [String], truncated: Bool) {
+        (try? walkChecked(folder)) ?? ([], false)
+    }
+
+    static func walkChecked(_ folder: String) throws -> (paths: [String], truncated: Bool) {
         let base = URL(fileURLWithPath: folder, isDirectory: true)
-        guard let e = FileManager.default.enumerator(at: base, includingPropertiesForKeys: [.isDirectoryKey, .isSymbolicLinkKey], options: []) else { return ([], false) }
+        // Validate the root as well: enumeration can report nothing for a missing root.
+        let attrs = try FileManager.default.attributesOfItem(atPath: folder)
+        guard (attrs[.type] as? FileAttributeType) == .typeDirectory else {
+            throw GitReviewError(message: "The selected folder is unavailable.")
+        }
+        var readError: Error?
+        guard let e = FileManager.default.enumerator(at: base, includingPropertiesForKeys: [.isDirectoryKey, .isSymbolicLinkKey], options: [], errorHandler: { _, error in
+            readError = error
+            return false
+        }) else { throw GitReviewError(message: "Could not list this folder.") }
         var out: [String] = []
         let prefix = base.standardizedFileURL.path.count + 1
         for case let url as URL in e {
             let name = url.lastPathComponent
-            let values = try? url.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
-            if values?.isDirectory == true {
-                if skippedFolders.contains(name) { e.skipDescendants() }
+            let values = try url.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
+            if values.isDirectory == true {
+                if skippedFolders.contains(name) || values.isSymbolicLink == true { e.skipDescendants() }
                 continue
             }
             if name == ".DS_Store" { continue }
-            let p = url.standardizedFileURL.path
-            guard p.count > prefix else { continue }
-            out.append(String(p.dropFirst(prefix)))
+            let path = url.standardizedFileURL.path
+            guard path.count > prefix else { continue }
+            out.append(String(path.dropFirst(prefix)))
             if out.count >= maxFiles { return (out, true) }
         }
+        if let readError { throw readError }
         return (out, false)
     }
 

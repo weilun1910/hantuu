@@ -64,6 +64,9 @@ enum SelfTest {
         reader(workdir)
         sessions(workdir) // Sessions/SessionSelfTest.swift
         review(workdir)
+        panelGit(workdir)
+        panelFeedback(workdir)
+        panelFreshness(workdir)
         status(workdir)   // agent states, hooks, notifications, snapshots (Status/StatusSelfTest.swift)
         readerMode(workdir) // settings, the message box, Stop, the banner, snapshots (ReaderMode/ReaderModeSelfTest.swift)
         readerCommands(workdir)
@@ -74,6 +77,7 @@ enum SelfTest {
         browserTab(workdir)
         subagentBrowser(workdir) // sidebar navigation and read-only child transcripts
         fileViewer(workdir) // the Code tab as a file viewer and editor (FileViewer/FileViewerSelfTest.swift)
+        panelRecovery(workdir)
         usage(workdir)    // usage limits and the footer rings (Usage/UsageSelfTest.swift)
         keepAwake(workdir)  // the lid-shut switch, its limits, the crash check (Tests/KeepAwakeSelfTest.swift)
         liveChecksLogic(workdir)

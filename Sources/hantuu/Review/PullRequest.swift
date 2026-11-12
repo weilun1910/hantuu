@@ -85,16 +85,56 @@ enum GitHubCLI {
         return nil
     }()
 
-    /// nil when gh is missing, the folder has no PR, or gh fails for any reason.
-    static func pullRequest(folder: String) -> PullRequestInfo? {
-        guard let gh = path else { return nil }
+    struct ReadError: LocalizedError {
+        var message: String
+        var errorDescription: String? { message }
+    }
+
+    /// Only gh's explicit branch-not-found response means a successful empty result.
+    static func decode(_ result: Git.Result) -> Result<PullRequestInfo?, ReadError> {
+        if result.ok {
+            guard let pr = PullRequestInfo.parse(result.out) else {
+                return .failure(ReadError(message: "GitHub returned an unreadable pull request response."))
+            }
+            return .success(pr)
+        }
+        let detail = result.err.trimmingCharacters(in: .whitespacesAndNewlines)
+        if result.status == 1 && detail.hasPrefix("no pull requests found for branch ") { return .success(nil) }
+        if result.status == 4 || detail.contains("gh auth login") || detail.contains("HTTP 401") {
+            return .failure(ReadError(message: "GitHub authentication is required. Sign in with gh auth login, then retry."))
+        }
+        return .failure(ReadError(message: detail.isEmpty ? "GitHub lookup failed (exit \(result.status))." : detail))
+    }
+
+    static func readPullRequest(folder: String) -> Result<PullRequestInfo?, ReadError> {
+        guard let gh = path else { return .failure(ReadError(message: "GitHub CLI is unavailable. Install gh to read pull requests.")) }
         var env = ProcessInfo.processInfo.environment
         env["GH_PROMPT_DISABLED"] = "1"
         env["GH_NO_UPDATE_NOTIFIER"] = "1"
         env["NO_COLOR"] = "1"
         env["GIT_OPTIONAL_LOCKS"] = "0"
         let r = Process.capture(gh, ["pr", "view", "--json", PullRequestInfo.fields], in: folder, env: env, timeout: 20)
-        guard r.ok else { return nil }
-        return PullRequestInfo.parse(r.out)
+        return decode(r)
+    }
+}
+
+// Compatibility for callers which do not display read state.
+extension GitHubCLI {
+    static func pullRequest(folder: String) -> PullRequestInfo? { try? readPullRequest(folder: folder).get() }
+}
+
+struct RepositoryPullRequest: Identifiable {
+    var root: String
+    var pr: PullRequestInfo?
+    var readState = PanelReadState()
+    var id: String { root }
+}
+
+extension PullRequestInfo {
+    var failingChecksContext: String {
+        let failures = checks.filter { $0.state == .failure }.map { check in
+            "- " + check.name + (check.url.map { "\n  " + $0 } ?? "")
+        }.joined(separator: "\n")
+        return "Please investigate the failing checks for PR #\(number): \(title)\n\(url)\n\(failures)"
     }
 }

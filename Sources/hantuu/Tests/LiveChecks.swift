@@ -6,7 +6,7 @@ import GhosttyKit
 /// parsing and selection rules below. No fixture test launches an agent or reads its home.
 enum LiveCheckRules {
     static let agents = ["claude", "codex"]
-    static let features = ["slash", "queued", "send-now", "relaunch", "subagents", "reader"]
+    static let features = ["slash", "queued", "send-now", "relaunch", "subagents", "reader", "review"]
 
     static func codexModel(for feature: String, configured: String?) -> String {
         configured ?? (feature == "subagents" ? "gpt-6.1-sol" : "gpt-6-luna")
@@ -159,7 +159,7 @@ extension SelfTest {
         guard let raw = env["HANTUU_LIVE"], !raw.isEmpty else { return }
         guard let agents = LiveCheckRules.selection(env["HANTUU_LIVE_AGENTS"], allowed: LiveCheckRules.agents),
               let features = LiveCheckRules.selection(env["HANTUU_LIVE_FEATURES"], allowed: LiveCheckRules.features) else {
-            check("live configuration: selectors", false, "Use claude,codex and slash,queued,send-now,relaunch,subagents,reader.")
+            check("live configuration: selectors", false, "Use claude,codex and slash,queued,send-now,relaunch,subagents,reader,review.")
             return
         }
         let folder = URL(fileURLWithPath: raw).standardizedFileURL.resolvingSymlinksInPath()
@@ -209,6 +209,7 @@ extension SelfTest {
                 case "relaunch": probe.relaunch()
                 case "subagents": probe.subagents()
                 case "reader": probe.readerParity()
+                case "review": probe.reviewFeedback()
                 default: break
                 }
             }
@@ -660,6 +661,59 @@ private final class LiveCheckSession {
         report("Send now reconciles its bubble and receives the requested answer", answered &&
                countUser(second) == 1 && countUser(second, pending: true) == 0,
                "delivered=\(countUser(second)), pending=\(countUser(second, pending: true)).")
+    }
+
+    /// Opt-in only. Uses the production panel service and its reader transport, never
+    /// terminal.submit. Both providers run this same retained-comment/receipt contract.
+    func reviewFeedback() {
+        guard safe(), let app = model, let chat, let reader else { return }
+        let service = PanelFeedbackDelivery(url: dir.appendingPathComponent("live-review-\(chat.id).json"))
+        let wrongChat = UUID()
+        let rejectedComment = ReviewComment(root: folder.path, path: "review-fixture.txt", side: "new",
+            start: 1, end: 1, quoted: ["fixture"], body: "Do not send this stale-chat review.", revision: "fixture-1")
+        let wrong = service.send(comments: [rejectedComment], folder: folder.path, chatID: wrongChat, model: app) { _ in
+            self.report("stale-chat callback must never run", false)
+        }
+        report("stale chat is rejected without pending input", !wrong && chat.pendingMessages.isEmpty && service.latest(for: wrongChat)?.state == .failed)
+        guard !wrong else { return }
+
+        for busy in [false, true] {
+            if busy {
+                let sent = send("Without tools, count from 1 to 90, one number per line, then say done.")
+                let working = sent && wait(45) {
+                    TerminalScreen.analyze(self.screen).busy && self.reader?.isTyping == false && self.reader?.composerMode.isWorking == true
+                }
+                report("review queue starts during real work", working)
+                guard working else { return }
+            }
+            let token = "review" + UUID().uuidString.prefix(8).lowercased()
+            let draft = "Keep my unfinished composer draft " + token
+            reader.composer.textView.text = draft
+            let c = ReviewComment(root: folder.path, path: "review-fixture.txt", side: "new", start: 1, end: 1,
+                quoted: ["This is a synthetic review anchor; do not access a file."],
+                body: "This is a delivery test. Do not use tools or change files. Reply only \(token).", revision: "fixture-1")
+            var retained = [c]
+            var receipts = 0
+            let sent = service.send(comments: retained, folder: folder.path, chatID: chat.id, model: app) { delivered in
+                receipts += 1
+                retained.removeAll { delivered.contains($0) }
+            }
+            let batch = service.latest(for: chat.id)
+            report("\(busy ? "queued" : "idle") review retains comments and draft before acknowledgement",
+                sent && retained == [c] && reader.composer.textView.string == draft && receipts == 0 &&
+                batch?.state == (busy ? .queued : .sending) && chat.pendingMessages.entries.contains { $0.id == batch?.id })
+            guard sent, let batch else { return }
+            let delivered = wait(120) {
+                service.latest(for: chat.id)?.state == .delivered && self.reply(token) &&
+                self.reader?.composerMode == .ready && !TerminalScreen.analyze(self.screen).busy
+            }
+            report("\(busy ? "queued" : "idle") review removes only after matching receipt",
+                delivered && receipts == 1 && retained.isEmpty && !chat.pendingMessages.entries.contains { $0.id == batch.id })
+            report("review routes once to owning chat and preserves composer",
+                delivered && chat.allEntries.filter { $0.kind == .user && $0.text == batch.text }.count == 1 &&
+                reader.composer.textView.string == draft && countUser(batch.text, pending: true) == 0)
+            guard delivered else { return }
+        }
     }
 
     func relaunch() {

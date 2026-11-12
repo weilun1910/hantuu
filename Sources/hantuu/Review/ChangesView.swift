@@ -4,13 +4,15 @@ import SwiftUI
 /// Changes: the changed files on top, the selected file's diff below, and the pending
 /// comments at the bottom.
 struct ChangesView: View {
+    @ObservedObject private var delivery = PanelFeedbackDelivery.shared
     @EnvironmentObject var model: AppModel
     @EnvironmentObject var review: ReviewCenter
 
     var body: some View {
         VStack(spacing: 0) {
+            if review.repo != nil || review.gitReadState.error != nil { GitReviewToolbar() }
             content
-            if !review.currentComments.isEmpty || review.flash != nil {
+            if !review.currentComments.isEmpty || review.flash != nil || delivery.latest(for: review.chatID) != nil {
                 Rectangle().fill(Color.hDivider).frame(height: 1)
                 CommentBar()
             }
@@ -22,7 +24,9 @@ struct ChangesView: View {
         if review.folder == nil {
             EmptyNote(title: "Pick a chat to review its changes")
         } else if !review.repoChecked {
-            Color.hChrome
+            EmptyNote(title: "Loading changes")
+        } else if review.gitReadState.error != nil && review.gitSnapshot == nil {
+            EmptyNote(title: "Changes unavailable", detail: review.gitReadState.error)
         } else if review.repo == nil, !review.repositories.isEmpty {
             NestedChangesView()
         } else if review.repo == nil {
@@ -30,7 +34,7 @@ struct ChangesView: View {
                 ? "Changes stopped looking after \(RepositoryDiscovery.maxDirectories.formatted()) folders. Open a smaller folder to see its repositories."
                 : "Changes looks in this folder and up to four folders down, skipping hidden and build folders.")
         } else if review.changesLoaded && review.changes.isEmpty {
-            EmptyNote(title: review.base == .branch ? "No changes against \(review.baseLabel)" : "No uncommitted changes",
+            EmptyNote(title: "No \(review.base.title.lowercased()) changes",
                       detail: review.base == .uncommitted && review.repo?.mergeBase != nil ? "Branch shows everything since \(review.repo?.defaultBranch ?? "the base")." : nil)
         } else {
             GeometryReader { g in
@@ -41,6 +45,7 @@ struct ChangesView: View {
                         FileBar(file: f)
                         Rectangle().fill(Color.hDivider).frame(height: 1)
                     }
+                    GitHunkControls()
                     DiffWebView(webView: review.diffPage.view)
                 }
             }
@@ -59,7 +64,7 @@ struct ChangedFileList: View {
     var body: some View {
         ScrollView {
             LazyVStack(spacing: 0) {
-                ForEach(review.changes) { f in
+                ForEach(review.visibleChanges) { f in
                     ChangedFileRow(file: f, selected: f.path == review.selectedPath, viewed: review.isViewed(f)).id(f.path)
                 }
             }
@@ -92,6 +97,9 @@ struct ChangedFileRow: View {
             }
             .lineLimit(1)
             Spacer(minLength: 6)
+            if ReviewCenter.isGenerated(file.path) {
+                Text("generated").font(.system(size: 10)).foregroundStyle(Color.hTertiary)
+            }
             if viewed {
                 Image(systemName: "checkmark").font(.system(size: 9.5, weight: .semibold)).foregroundStyle(Color.hTertiary).help("Viewed")
             }
@@ -111,7 +119,12 @@ struct ChangedFileRow: View {
             Button("Open in Code") { review.open(file) }
             Button(viewed ? "Mark as Not Viewed" : "Mark as Viewed") { review.toggleViewed(file) }
             Divider()
-            Button("Revert…") { review.confirmRevert(file) }.disabled(!review.hasUncommittedChanges(file))
+            if review.base == .unstaged {
+                Button("Stage file") { review.confirmGitAction(.stage(file)) }.disabled(!review.gitActionsAvailable)
+                Button("Discard unstaged changes...") { review.confirmRevert(file) }.disabled(!review.gitActionsAvailable)
+            } else if review.base == .staged {
+                Button("Unstage file") { review.confirmGitAction(.unstage(file)) }.disabled(!review.gitActionsAvailable)
+            }
             Divider()
             Button("Copy Path") {
                 NSPasteboard.general.clearContents()
@@ -158,7 +171,7 @@ struct FileBar: View {
 
     var body: some View {
         let viewed = review.isViewed(file)
-        let canRevert = review.hasUncommittedChanges(file)
+        let canRevert = review.base == .unstaged && review.gitActionsAvailable
         HStack(spacing: 4) {
             Text(file.oldPath.map { "\($0) → \(file.path)" } ?? file.path)
                 .font(.system(size: 12))
@@ -183,7 +196,7 @@ struct FileBar: View {
                 review.open(file, line: nil)
             }
             .disabled(file.status == "D")
-            IconButton(symbol: "arrow.uturn.backward", size: 11.5, help: canRevert ? "Revert…" : "No uncommitted changes to revert") {
+            IconButton(symbol: "arrow.uturn.backward", size: 11.5, help: canRevert ? "Discard unstaged changes" : "Switch to Unstaged to discard changes") {
                 review.confirmRevert(file)
             }
             .disabled(!canRevert)
@@ -198,39 +211,65 @@ struct FileBar: View {
 /// "3 comments" and Send to Agent, shown while comments are waiting.
 struct CommentBar: View {
     @EnvironmentObject var review: ReviewCenter
-    // Redraws when the chat starts or ends, so Send follows whether it can type into it.
     @EnvironmentObject var model: AppModel
+    @ObservedObject private var delivery = PanelFeedbackDelivery.shared
+    @State private var expanded = false
 
     var body: some View {
-        let n = review.currentComments.count
-        HStack(spacing: 8) {
-            if let flash = review.flash, n == 0 {
-                Image(systemName: "checkmark").font(.system(size: 11, weight: .semibold)).foregroundStyle(Color.hAdded)
-                Text(flash).font(.system(size: 12)).foregroundStyle(Color.hSecondary)
-            } else {
-                Image(systemName: "text.bubble").font(.system(size: 12)).foregroundStyle(Color.hSecondary)
-                Text(n == 1 ? "1 comment" : "\(n) comments").font(.system(size: 12)).foregroundStyle(Color.hText)
-            }
-            Spacer()
-            if n > 0 {
-                Button("Clear") {
-                    let a = NSAlert()
-                    a.messageText = n == 1 ? "Clear this comment?" : "Clear \(n) comments?"
-                    a.informativeText = "They haven't been sent to the agent."
-                    a.addButton(withTitle: "Clear")
-                    a.addButton(withTitle: "Cancel")
-                    if a.runModal() == .alertFirstButtonReturn { review.clearComments() }
-                }
-                .buttonStyle(BarButtonStyle(prominent: false))
-                Button("Send to Agent  ⌘↩") { review.sendComments() }
+        let comments = review.currentComments
+        let batch = delivery.latest(for: review.chatID)
+        let pending = batch?.state == .queued || batch?.state == .sending
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                Button("\(comments.count) comments") { expanded.toggle() }
+                Spacer()
+                if let batch { Text(batch.state.rawValue.capitalized).font(.system(size: 11)).help(batch.detail ?? "") }
+                Menu {
+                    Button("Add to message") { review.addCommentsToMessage() }
+                    Button("Copy review") {
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(CommentMessage.build(comments, folder: review.folder ?? ""), forType: .string)
+                    }
+                    Button("Clear comments") {
+                        let alert = NSAlert()
+                        alert.messageText = "Clear pending review comments?"
+                        alert.informativeText = "These comments have not been acknowledged by the agent."
+                        alert.addButton(withTitle: "Clear")
+                        alert.addButton(withTitle: "Cancel")
+                        if alert.runModal() == .alertFirstButtonReturn { review.clearComments() }
+                    }
+                } label: { Image(systemName: "ellipsis") }
+                .disabled(comments.isEmpty || pending)
+                Button(batch?.state == .failed ? "Retry review" : "Send review") { review.sendComments() }
                     .buttonStyle(BarButtonStyle(prominent: true))
-                    .disabled(!review.canSend)
-                    .opacity(review.canSend ? 1 : 0.45)
-                    .help(review.canSend ? "Types the comments into the chat as one message" : "The chat isn't running. Resume it to send comments.")
+                    .disabled(comments.isEmpty || pending || !review.canSend)
+            }
+            if let detail = batch?.detail { Text(detail).font(.system(size: 11)).foregroundStyle(Color.hSecondary) }
+            if expanded {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 8) {
+                        ForEach(comments) { c in
+                            HStack(alignment: .top) {
+                                VStack(alignment: .leading) {
+                                    Text("\(c.path):\(c.lineLabel)").font(.system(size: 11, weight: .medium))
+                                    Text(c.body).font(.system(size: 12)).textSelection(.enabled)
+                                    if !c.quoted.isEmpty {
+                                        Text(c.quoted.joined(separator: "\n")).font(.system(size: 11, design: .monospaced)).foregroundStyle(Color.hTertiary).textSelection(.enabled)
+                                    }
+                                    if let revision = c.revision, revision != review.gitSnapshot?.fingerprints[c.path] {
+                                        Text("Earlier revision - original quote retained").font(.system(size: 10)).foregroundStyle(Color.hTertiary)
+                                    }
+                                }
+                                Spacer()
+                                Button("Edit") { review.editCommentPrompt(c) }
+                                Button("Remove") { review.removeComment(id: c.id) }
+                            }
+                        }
+                    }
+                }.frame(maxHeight: 150)
             }
         }
-        .padding(.horizontal, 12)
-        .frame(height: 38)
+        .padding(.horizontal, 12).padding(.vertical, 8)
         .background(Color.hChrome)
     }
 }
@@ -242,7 +281,6 @@ struct ChangesBar: View {
     var refresh = true
 
     var body: some View {
-        let canBranch = review.repo?.mergeBase != nil
         let nested = review.repo == nil && !review.repositories.isEmpty
         HStack(spacing: 8) {
             if nested {
@@ -250,13 +288,11 @@ struct ChangesBar: View {
                     .font(.system(size: 11.5)).foregroundStyle(Color.hTertiary)
                     .padding(.leading, 4)
             } else {
-                HStack(spacing: 0) {
-                    ModeButton(title: "Uncommitted", selected: review.base == .uncommitted) { review.base = .uncommitted }
-                        .help("Changes since the last commit")
-                    ModeButton(title: "Branch", selected: review.base == .branch) { if canBranch { review.base = .branch } }
-                        .opacity(canBranch ? 1 : 0.4)
-                        .help(canBranch ? "Everything since this branch left \(review.repo?.defaultBranch ?? "the default branch")" : "No default branch to compare with")
-                }
+                Menu(review.base.title) {
+                    ForEach([DiffBase.unstaged, .staged, .branch, .commit, .uncommitted], id: \.rawValue) { scope in
+                        Button(scope.title) { review.base = scope }
+                    }
+                }.font(.system(size: 11.5))
             }
             if review.repo != nil, review.changesLoaded, !review.changes.isEmpty {
                 let s = review.changes.summary
@@ -299,8 +335,8 @@ struct NestedChangesView: View {
     }
 
     private var sections: some View {
-        let changed = review.repositories.filter(\.hasChanges)
-        let clean = review.repositories.filter { !$0.hasChanges }
+        let changed = review.repositories.filter { entry in review.repositoryCenters[entry.id]?.gitSnapshot.map { !$0.files.isEmpty } ?? entry.hasChanges }
+        let clean = review.repositories.filter { entry in review.repositoryCenters[entry.id]?.gitSnapshot.map { $0.files.isEmpty } ?? !entry.hasChanges }
         // Lines go above each row but the first, so the list never ends on a line of its
         // own next to the one above the diff.
         return ScrollView {
@@ -364,6 +400,8 @@ struct FocusedDiff: View {
                 FileBar(file: f)
                 Rectangle().fill(Color.hDivider).frame(height: 1)
             }
+            GitReviewToolbar()
+            GitHunkControls()
             DiffWebView(webView: review.diffPage.view)
         }
     }
@@ -435,15 +473,30 @@ struct RepositoryChangesSection: View {
             }
             .help(help)
             if expanded {
-                ChangesBar(refresh: false).padding(.horizontal, 8).frame(height: Self.barHeight)
+                HStack {
+                    ChangesBar(refresh: false)
+                    if !entry.repository.worktreePaths.isEmpty {
+                        Menu("Checkout") {
+                            ForEach([entry.repository.root] + entry.repository.worktreePaths, id: \.self) { path in
+                                Button(path) { review.chooseCheckout(path) }
+                            }
+                        }.font(.system(size: 11))
+                    }
+                }.padding(.horizontal, 8).frame(height: Self.barHeight)
+                if let error = review.gitReadState.error {
+                    Text(error).font(.system(size: 11)).foregroundStyle(Color.hRemoved).padding(.horizontal, 10)
+                }
+                if review.gitReadState.loading && review.gitSnapshot == nil {
+                    Text("Loading checkout...").font(.system(size: 11)).foregroundStyle(Color.hTertiary)
+                }
                 if review.changes.isEmpty {
-                    Text(review.base == .branch ? "No changes against \(review.baseLabel)" : "No uncommitted changes")
+                    Text("No \(review.base.title.lowercased()) changes")
                         .font(.system(size: 12)).foregroundStyle(Color.hTertiary)
                         .frame(maxWidth: .infinity, minHeight: Self.emptyHeight, alignment: .topLeading)
                         .padding(.leading, 26)
                 } else {
                     LazyVStack(spacing: 0) {
-                        ForEach(review.changes) { f in
+                        ForEach(review.visibleChanges) { f in
                             ChangedFileRow(file: f, selected: f.path == review.selectedPath && review.showsSelection, viewed: review.isViewed(f))
                         }
                     }
@@ -454,7 +507,7 @@ struct RepositoryChangesSection: View {
     }
 
     private var detail: String {
-        let branch = entry.info.branch ?? "detached HEAD"
+        let branch = review.repo?.branch ?? entry.info.branch ?? "detached HEAD"
         switch entry.repository.worktreeCount {
         case 0: return branch
         case 1: return "\(branch), 1 worktree"
@@ -465,6 +518,6 @@ struct RepositoryChangesSection: View {
     private var help: String {
         let path = ReviewFormat.tilde(entry.info.root)
         guard entry.repository.worktreeCount > 0 else { return path }
-        return "\(path)\nIts worktrees aren't listed here. Open a worktree's folder as a project to review it."
+        return "\(path)\nChoose a worktree from the checkout menu in its diff."
     }
 }

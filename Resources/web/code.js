@@ -341,12 +341,17 @@
     const d = docs.get(viewID);
     if (!d) return;
     setDirty(viewID, d, !u.state.doc.eq(d.baseline));
+    reportRecovery(viewID, d, u.state);
   });
+
+  function reportRecovery(id, d, state) {
+    R.post({ type: "recovery", id, generation: d.meta.generation, text: state.doc.toString(), baseline: d.baseline.toString() });
+  }
 
   function setDirty(id, d, dirty) {
     if (dirty === d.dirty) return;
     d.dirty = dirty;
-    R.post({ type: 'dirty', id, dirty });
+    R.post({ type: 'dirty', id, dirty, generation: d.meta.generation });
   }
 
   function stateOf(id) {
@@ -555,15 +560,16 @@
     open(p) {
       park();
       const old = docs.get(p.id);
-      let state = makeState(p, p.text);
+      const baseline = makeState(p, p.text).doc;
+      let state = makeState(p, p.recoveryText == null ? p.text : p.recoveryText);
       if (p.position && p.position.ranges && p.position.ranges.length) {
         const clamp = (n) => Math.max(0, Math.min(state.doc.length, n || 0));
         const ranges = p.position.ranges.map((r) => S.EditorSelection.range(clamp(r.anchor), clamp(r.head)));
         state = state.update({ selection: S.EditorSelection.create(ranges, Math.max(0, Math.min(p.position.mainIndex || 0, ranges.length - 1))) }).state;
       }
-      const d = { meta: p, state, baseline: state.doc, dirty: false, mode: p.mode || 'source', saves: new Map(), previewScroll: p.position ? p.position.previewTop || 0 : 0, position: p.position };
+      const d = { meta: p, state, baseline, dirty: p.recoveryText != null, mode: p.mode || 'source', saves: new Map(), previewScroll: p.position ? p.position.previewTop || 0 : 0, position: p.position };
       docs.set(p.id, d);
-      if (old && old.dirty) R.post({ type: 'dirty', id: p.id, dirty: false });
+
       if (viewID === p.id) viewID = null;
       currentID = p.id;
       render(p.id, p.line);
@@ -621,6 +627,7 @@
       d.baseline = doc;
       if (p.links) d.meta.links = p.links;
       setDirty(p.id, d, !stateOf(p.id).doc.eq(doc));
+      reportRecovery(p.id, d, stateOf(p.id));
     },
     // Keep Mine: what's on disk becomes what your text is compared against.
     rebase(p) {
@@ -629,6 +636,7 @@
       const st = stateOf(p.id);
       d.baseline = st.toText(p.text);
       setDirty(p.id, d, !st.doc.eq(d.baseline));
+      reportRecovery(p.id, d, st);
     },
     dirty(id) { const d = docs.get(id); return !!(d && d.dirty); },
     close(id) {

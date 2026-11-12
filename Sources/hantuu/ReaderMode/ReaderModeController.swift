@@ -607,6 +607,41 @@ final class ReaderModeController: NSObject {
         return true
     }
 
+    /// Shared panel transport preserves the composer and uses the normal pending receipt.
+    @discardableResult
+    func sendPanelFeedback(text: String, chatID: UUID, id: String) -> Bool {
+        guard let chat = model.selectedChat, chat.id == chatID,
+              let terminal = chat.terminal, isLive(chat), let text = ComposerMessage.prepare(text) else { return false }
+        let screen = TerminalScreen.analyze(terminal.activeScreenText())
+        let status = statusProvider(chat)
+        let input = ComposerMode.Input(agentName: chat.agent.name, ended: chat.status == .ended,
+            live: true, activity: chat.activity, detail: chat.activityDetail,
+            waiting: status.map { !$0.waits.isEmpty } ?? chat.activity.isNeeds,
+            ready: screen.ready || status?.structured == true || chat.agent.transcript == nil,
+            screenMenu: screen.menu)
+        guard ComposerMode.resolve(input).canSend else { return false }
+        chat.pendingMessages.enqueue(id: id, text: text, files: [], agentID: chat.agent.id, existing: chat.allEntries)
+        sentThisTurn[chat.id, default: []].append(text)
+        type(ComposerMessage.steps(text: text, files: [], agentID: chat.agent.id), into: terminal,
+             chatID: chat.id, id: id, queued: true)
+        return true
+    }
+
+    /// Draft insertion is native and chat-owned, including when the terminal is visible.
+    func addPanelFeedbackToDraft(_ text: String, chatID: UUID) -> Bool {
+        guard model.selectedChat?.id == chatID else { return false }
+        if shownChatID == chatID {
+            let old = composer.textView.string
+            composer.textView.text = old + (old.isEmpty ? "" : "\n\n") + text
+            drafts[chatID] = composer.textView.string
+            focusComposer()
+        } else {
+            let old = drafts[chatID] ?? ""
+            drafts[chatID] = old + (old.isEmpty ? "" : "\n\n") + text
+        }
+        return true
+    }
+
     // MARK: Typing into the terminal
 
     /// Queues a message's steps for a terminal and starts typing if nothing else is. Typing
@@ -623,6 +658,11 @@ final class ReaderModeController: NSObject {
     private func canType(_ id: String) -> Bool {
         guard let first = outbox.first, first.id == id, first.terminal.surface != nil,
               let chat = model.chats.first(where: { $0.id == first.chatID }), chat.status != .ended else { return false }
+        if id.hasPrefix("pending-review-") {
+            let screen = TerminalScreen.analyze(first.terminal.activeScreenText())
+            guard screen.menu == nil, !chat.activity.isNeeds,
+                  statusProvider(chat)?.waits.isEmpty != false else { return false }
+        }
         // A session change or an interruption can drop the queue while a paste is waiting.
         return !first.tracksPending || chat.pendingMessages.entries.contains { $0.id == id }
     }
@@ -698,12 +738,19 @@ final class ReaderModeController: NSObject {
                 let suggestions = !CommandMenuScreen.rows(screen).isEmpty
                 let commandSafe = command == nil || (CommandMenuScreen.safe(screen) &&
                     (TerminalScreen.analyze(screen).menu == nil || suggestions))
-                if self.canType(id) && self.permitsSubmit(t) && commandSafe {
+                let panelSafe = !id.hasPrefix("pending-review-") || {
+                    let state = TerminalScreen.analyze(t.activeScreenText())
+                    guard let chat = self.model.chats.first(where: { $0.terminal === t }) else { return false }
+                    return state.menu == nil && !chat.activity.isNeeds && chat.status != .ended
+                }()
+                if self.canType(id) && self.permitsSubmit(t) && commandSafe && panelSafe {
                     t.pressReturn()
                     self.model.chats.first { $0.id == self.outbox[0].chatID }?.pendingMessages.markSubmitted(id: id)
                     if let command { self.didSendCommand(command, terminal: t) }
                 } else if command != nil, self.model.selectedChat?.terminal === t {
                     self.showTerminal()
+                } else if id.hasPrefix("pending-review-"), let chat = self.model.chats.first(where: { $0.terminal === t }) {
+                    chat.pendingMessages.remove(id: id)
                 }
                 self.typeNext()
             }
@@ -712,6 +759,8 @@ final class ReaderModeController: NSObject {
 
     /// True while a message is still being typed into a terminal.
     var isTyping: Bool { typing }
+
+    func hasPanelFeedbackTransport(id: String) -> Bool { outbox.contains { $0.id == id } }
 
     private func didSendCommand(_ text: String, terminal: TerminalView) {
         guard let chat = model.chats.first(where: { $0.terminal === terminal }),

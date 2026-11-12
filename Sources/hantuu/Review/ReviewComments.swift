@@ -11,6 +11,7 @@ struct ReviewComment: Codable, Identifiable, Equatable {
     var quoted: [String]
     var body: String
     var created = Date()
+    var revision: String? = nil
 
     var lineLabel: String { start == end ? "\(start)" : "\(start)-\(end)" }
 }
@@ -73,5 +74,38 @@ struct ReviewSavedState: Codable {
     func save() {
         Paths.ensure(Paths.dataDir)
         if let data = try? JSONEncoder.hantuu.encode(self) { try? data.write(to: Self.url, options: .atomic) }
+    }
+}
+
+struct ReviewCommentDraft: Codable {
+    struct Anchor: Codable {
+        var side: String
+        var start: Int
+        var end: Int
+        var quoted: [String]
+    }
+    var text: String
+    var anchor: Anchor
+    var editingID: String? = nil
+    var revision: String?
+}
+
+final class ReviewCommentDraftStore {
+    static let shared = ReviewCommentDraftStore()
+    private var drafts: [String: ReviewCommentDraft] = [:]
+    private let url = Paths.dataDir.appendingPathComponent("review-drafts.json")
+    private init() {
+        try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+        if let data = try? Data(contentsOf: url), let saved = try? JSONDecoder().decode([String: ReviewCommentDraft].self, from: data) { drafts = saved }
+    }
+    private func identity(_ chat: String, _ key: String) -> String { chat + "|" + key }
+    func get(chat: String?, key: String) -> ReviewCommentDraft? { chat.flatMap { drafts[identity($0, key)] } }
+    func set(_ draft: ReviewCommentDraft?, chat: String?, key: String) {
+        guard let chat else { return }
+        drafts[identity(chat, key)] = draft
+        Paths.ensure(Paths.dataDir)
+        if let data = try? JSONEncoder().encode(drafts) { try? data.write(to: url, options: .atomic)
+            try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+        }
     }
 }

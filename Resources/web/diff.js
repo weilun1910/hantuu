@@ -6,7 +6,7 @@
   const view = document.getElementById('view');
   const empty = document.getElementById('empty');
   const scroller = document.scrollingElement;
-  const post = (m) => window.webkit.messageHandlers.hantuu.postMessage(m);
+  const post = (m) => window.webkit.messageHandlers.hantuu.postMessage(Object.assign({ token: current && current.token, chat: current && current.chat, context: current && current.context }, m));
   const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
   const byExt = {
@@ -82,6 +82,10 @@
   let selection = null;
   let box = null;
   const scrollMemory = {};
+  let wrapLines = true;
+  let findText = "";
+  const drafts = {};
+  const draftKey = (p) => p.chat + "|" + p.key;
 
   window.addEventListener('scroll', () => {
     if (!current) return;
@@ -92,6 +96,7 @@
   function isLine(r) { return r && (r.t === 'c' || r.t === 'a' || r.t === 'd'); }
 
   function render(p) {
+    saveDraft();
     current = p;
     anchor = null;
     selection = null;
@@ -129,7 +134,7 @@
         const code = html[i] !== undefined ? html[i] : esc(r.s);
         parts.push('<tr class="' + cls + '" data-i="' + i + '"><td class="ln o" title="Comment on this line. Shift-click for a range.">' + (r.o == null ? '' : r.o) +
           '</td><td class="ln n" title="Comment on this line. Shift-click for a range.">' + (r.n == null ? '' : r.n) +
-          '</td><td class="code"><span class="sign">' + sign + '</span>' + (code || ' ') + '</td></tr>');
+          '</td><td class="code"><button class="line-comment" aria-label="Add comment on line ' + (r.n || r.o) + '">+</button><span class="sign">' + sign + '</span>' + (code || ' ') + '</td></tr>');
       }
     });
     const table = document.createElement('table');
@@ -139,8 +144,41 @@
     table.appendChild(tb);
     view.appendChild(table);
     rowEls = Array.from(tb.rows);
+    drawTools();
     drawComments();
+    restoreDraft();
     scroller.scrollTop = p.scrollTop != null ? p.scrollTop : (p.keepScroll ? scrollMemory[p.context + '|' + p.key] || 0 : 0);
+  }
+
+  function drawTools() {
+    const tools = document.createElement('div'); tools.className = 'diff-tools';
+    const button = (label, action) => {
+      const b = document.createElement('button'); b.textContent = label; b.addEventListener('click', action); tools.appendChild(b); return b;
+    };
+    const move = (direction) => {
+      const hunks = Array.from(view.querySelectorAll('tr.hunk'));
+      const ordered = direction > 0 ? hunks : hunks.reverse();
+      const target = ordered.find(h => direction > 0 ? h.getBoundingClientRect().top > 42 : h.getBoundingClientRect().top < 30) || ordered[0];
+      if (target) { target.scrollIntoView({block:'start'}); window.scrollBy(0,-38); }
+    };
+    button('Previous hunk', () => move(-1));
+    button('Next hunk', () => move(1));
+    const wrap = button('Wrap', () => { wrapLines = !wrapLines; view.classList.toggle('nowrap', !wrapLines); wrap.setAttribute('aria-pressed', String(wrapLines)); });
+    wrap.setAttribute('aria-pressed', String(wrapLines)); view.classList.toggle('nowrap', !wrapLines);
+    const input = document.createElement('input'); input.type = 'search'; input.placeholder = 'Find in diff'; input.setAttribute('aria-label','Find in diff'); input.value = findText;
+    let nextIndex = -1;
+    const find = (backwards = false) => {
+      findText = input.value;
+      const matches = rowEls.filter(row => findText && row.textContent.toLowerCase().includes(findText.toLowerCase()));
+      rowEls.forEach(row => row.classList.remove('find-match'));
+      if (!matches.length) { input.setAttribute('aria-description','No matches'); return; }
+      nextIndex = (nextIndex + (backwards ? -1 : 1) + matches.length) % matches.length;
+      matches[nextIndex].classList.add('find-match'); matches[nextIndex].scrollIntoView({block:'center'});
+      input.setAttribute('aria-description', (nextIndex + 1) + ' of ' + matches.length + ' matches');
+    };
+    input.addEventListener('input', () => { nextIndex = -1; find(); });
+    input.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); find(e.shiftKey); } });
+    tools.appendChild(input); view.prepend(tools);
   }
 
   // ---- Selecting lines and the comment box ----
@@ -183,6 +221,7 @@
   }
 
   function closeBox() {
+    if (current) { delete drafts[draftKey(current)]; current.draft = null; post({ type: 'commentDraft', draft: null }); }
     if (box) box.remove();
     box = null;
     selection = null;
@@ -205,7 +244,7 @@
     const add = tr.querySelector('.add');
     ta.value = keep;
     add.disabled = !keep.trim();
-    ta.addEventListener('input', () => { add.disabled = !ta.value.trim(); });
+    ta.addEventListener('input', () => { add.disabled = !ta.value.trim(); saveDraft(); });
     ta.addEventListener('keydown', (e) => {
       if (e.key === 'Enter' && e.metaKey) { e.preventDefault(); e.stopPropagation(); submit(); }
       else if (e.key === 'Escape') { e.preventDefault(); closeBox(); }
@@ -229,26 +268,65 @@
 
   // ---- Saved comments ----
 
+  function matchingRows(c) {
+    if (!c.quoted || !c.quoted.length) return [];
+    const sideRows = current.rows.map((r, i) => ({r, i})).filter(({r}) => c.side === 'old' ? r.o != null : r.n != null);
+    const matches = [];
+    for (let i = 0; i <= sideRows.length - c.quoted.length; i++) {
+      const run = sideRows.slice(i, i + c.quoted.length);
+      if (run.every(({r}, k) => r.s === c.quoted[k] && (!k || (c.side === 'old' ? r.o : r.n) === (c.side === 'old' ? run[k-1].r.o : run[k-1].r.n) + 1))) matches.push(run);
+    }
+    return matches;
+  }
+
   function anchorRow(c) {
-    let found = -1;
-    current.rows.forEach((r, i) => {
-      if (c.side === 'old' ? (r.t === 'd' && r.o === c.end) : (r.n === c.end && r.t !== 'd')) found = i;
-    });
-    return found;
+    const matches = matchingRows(c);
+    if (c.revision && c.revision === current.revision) {
+      const exact = matches.find(run => (c.side === 'old' ? run[0].r.o : run[0].r.n) === c.start);
+      if (exact) return exact[exact.length - 1].i;
+    }
+    return matches.length === 1 ? matches[0][matches[0].length - 1].i : -1;
+  }
+
+  function saveDraft() {
+    if (!current || !box || !selection) return;
+    const draft = { text: box.querySelector('textarea').value, anchor: describe(selection.from, selection.to), revision: current.revision };
+    drafts[draftKey(current)] = draft;
+    post({ type: 'commentDraft', draft });
+  }
+
+  function restoreDraft() {
+    const d = drafts[draftKey(current)] || current.draft;
+    if (!d || d.editingID) return;
+    const matches = matchingRows(d.anchor);
+    if (matches.length === 1) {
+      const run = matches[0];
+      selection = { from: run[0].i, to: run[run.length - 1].i };
+      anchor = selection.from;
+      paintSelection(); openBox();
+      box.querySelector('textarea').value = d.text;
+      box.querySelector('.add').disabled = !d.text.trim();
+    } else {
+      const recovery = document.createElement('div');
+      recovery.className = 'outdated draft-recovery';
+      const label = document.createElement('div');
+      label.textContent = 'Draft on outdated lines. Copy your text or select a new line to attach it.';
+      const ta = document.createElement('textarea'); ta.value = d.text;
+      ta.addEventListener('input', () => { d.text = ta.value; drafts[draftKey(current)] = d; post({type:'commentDraft', draft:d}); });
+      recovery.append(label, ta); view.prepend(recovery);
+    }
   }
 
   function drawComments() {
     if (!current || !rowEls.length) return;
-    view.querySelectorAll('tr.note, .outdated').forEach((n) => n.remove());
+    view.querySelectorAll('tr.note, .outdated:not(.draft-recovery)').forEach((n) => n.remove());
     rowEls.forEach((tr) => tr.classList.remove('commented'));
     const loose = [];
     for (const c of current.comments || []) {
       const at = anchorRow(c);
       if (at < 0) { loose.push(c); continue; }
-      current.rows.forEach((r, i) => {
-        const line = c.side === 'old' ? (r.t === 'd' ? r.o : null) : (r.t !== 'd' ? r.n : null);
-        if (line != null && line >= c.start && line <= c.end) rowEls[i].classList.add('commented');
-      });
+      const matched = matchingRows(c).find(run => run[run.length - 1].i === at);
+      if (matched) matched.forEach(({i}) => rowEls[i].classList.add('commented'));
       const tr = document.createElement('tr');
       tr.className = 'note';
       const td = document.createElement('td');
@@ -272,8 +350,26 @@
     const head = document.createElement('div');
     head.className = 'note-head';
     const label = document.createElement('span');
-    label.textContent = lineLabel(c.side, c.start, c.end) + (outdated ? ', no longer in the diff' : '');
-    const rm = document.createElement('a');
+    label.textContent = lineLabel(c.side, c.start, c.end) + (outdated ? ' - Outdated' : '');
+    const rm = document.createElement('button');
+    const edit = document.createElement('button');
+    edit.textContent = 'Edit';
+    const openEdit = () => {
+      const ta = document.createElement('textarea');
+      const saved = drafts[draftKey(current)] || current.draft;
+      ta.value = saved && saved.editingID === c.id ? saved.text : c.body;
+      ta.addEventListener('input', () => {
+        const draft = {text:ta.value, anchor:{side:c.side,start:c.start,end:c.end,quoted:c.quoted}, revision:c.revision, editingID:c.id};
+        drafts[draftKey(current)] = draft; post({type:'commentDraft',draft});
+      });
+      const save = document.createElement('button'); save.textContent = 'Save';
+      const commit = () => { if (ta.value.trim()) { delete drafts[draftKey(current)]; current.draft = null; post({type:'commentDraft',draft:null}); post({ type: 'editComment', id: c.id, body: ta.value.trim() }); } };
+      save.addEventListener('click', commit);
+      ta.addEventListener('keydown', e => { if (e.metaKey && e.key === 'Enter') commit(); });
+      n.replaceChildren(head, ta, save); ta.focus();
+    };
+    edit.addEventListener('click', openEdit);
+    head.appendChild(edit);
     rm.textContent = 'Remove';
     rm.addEventListener('click', (e) => { e.preventDefault(); post({ type: 'removeComment', id: c.id }); });
     head.appendChild(label);
@@ -283,12 +379,19 @@
     body.textContent = c.body;
     n.appendChild(head);
     n.appendChild(body);
+    if (outdated && c.quoted) {
+      const quote = document.createElement('pre'); quote.textContent = c.quoted.join('\n'); n.appendChild(quote);
+    }
+    const saved = drafts[draftKey(current)] || current.draft;
+    if (saved && saved.editingID === c.id) openEdit();
     return n;
   }
 
   // ---- Input ----
 
   view.addEventListener('click', (e) => {
+    const plus = e.target.closest('.line-comment');
+    if (plus) { select(+plus.closest('tr').dataset.i, e.shiftKey); return; }
     const ln = e.target.closest('td.ln');
     if (ln && ln.parentElement.dataset.i !== undefined) {
       e.preventDefault();
@@ -300,7 +403,7 @@
       if (tr) {
         const r = current.rows[+tr.dataset.i];
         const line = r.n != null ? r.n : r.o;
-        if (line) post({ type: 'openLine', line });
+        if (line) post({ type: 'openLine', line, side: r.n != null ? 'new' : 'old' });
       }
     }
   });
@@ -308,25 +411,15 @@
   view.addEventListener('mousedown', (e) => { if (e.shiftKey && e.target.closest('td.ln')) e.preventDefault(); });
 
   document.addEventListener('keydown', (e) => {
-    if (e.target && e.target.tagName === 'TEXTAREA') return;
+    if (e.key.toLowerCase() === 'f' && e.metaKey) { const input = view.querySelector('.diff-tools input'); if (input) { e.preventDefault(); input.focus(); input.select(); } return; }
+    if (e.target && ['TEXTAREA', 'INPUT'].includes(e.target.tagName)) return;
     if (e.key === 'Enter' && e.metaKey) { e.preventDefault(); post({ type: 'send' }); }
     else if (e.key === 'Escape' && box) { closeBox(); }
   });
 
   window.hantuu = {
     show(p) {
-      // A live refresh of the same file keeps an open comment box if the lines are unchanged.
-      const pending = box && current && current.key === p.key ? { text: box.querySelector('textarea').value, sel: selection, anchor } : null;
-      const sameRows = pending && JSON.stringify(current.rows) === JSON.stringify(p.rows);
       render(p);
-      if (pending && sameRows && pending.sel) {
-        anchor = pending.anchor;
-        selection = pending.sel;
-        paintSelection();
-        openBox();
-        box.querySelector('textarea').value = pending.text;
-        box.querySelector('.add').disabled = !pending.text.trim();
-      }
     },
     setComments(list) {
       if (!current) return;
@@ -340,6 +433,7 @@
       }
     },
     clear(text) {
+      saveDraft();
       current = null;
       rowEls = [];
       box = null;

@@ -23,15 +23,36 @@ final class ReviewCenter: ObservableObject {
     // Changes
     @Published private(set) var repo: RepoInfo?
     @Published private(set) var repoChecked = false
-    @Published var base: DiffBase = .uncommitted { didSet { if !restoringPanel, base != oldValue { baseChanged(); rememberPanelState() } } }
-    @Published private(set) var changes: [ChangedFile] = []
+    @Published var base: DiffBase = .unstaged { didSet { if !restoringPanel, base != oldValue { baseChanged(); rememberPanelState() } } }
+    @Published var changes: [ChangedFile] = []
     @Published private(set) var uncommitted: [ChangedFile] = []
     @Published private(set) var branchSummary: ChangeSummary?
-    @Published private(set) var changesLoaded = false
+    @Published var changesLoaded = false
     @Published var selectedPath: String? { didSet { if !restoringPanel, selectedPath != oldValue { loadDiff(); rememberPanelState() } } }
     @Published private(set) var comments: [String: [ReviewComment]] = [:]
     @Published private(set) var viewed: [String: String] = [:]
     @Published var flash: String?
+    @Published var gitReadState = PanelReadState()
+    @Published var diffReadState = PanelReadState()
+    @Published var gitSnapshot: GitReviewSnapshot?
+    @Published var gitSelection = GitReviewSelection()
+    @Published var selectedCheckout: String?
+    @Published var diffText = ""
+    @Published var hunks: [GitReviewHunk] = []
+    @Published var operationRunning = false
+    @Published var operationMessage: String?
+    @Published var recoveryFolder: URL?
+    @Published var pathFilter = ""
+    @Published var hideTests = false
+    @Published var hideGenerated = false
+    @Published var hideDeleted = false
+    @Published var diffContext = 3 { didSet { if diffContext != oldValue { loadDiff() } } }
+    @Published var commitMessage = ""
+    @Published var prTitle = ""
+    @Published var prBody = ""
+    @Published var prDraft = true
+    private var gitRequest = 0
+    private var diffRequest = 0
 
     // A folder that isn't a repository but holds some. This center scans them all and keeps
     // the comments and viewed marks. Each repository gets a center of its own (parentReview
@@ -48,11 +69,17 @@ final class ReviewCenter: ObservableObject {
     private var nestedEntry: RepositoryChanges?
     private let discoveryCache = RepositoryDiscoveryCache()
 
+    var checkoutPreferenceRoot: String? { parentReview == nil ? folder : nestedEntry?.info.root }
+
     var hasRepositories: Bool { repo != nil || !repositories.isEmpty }
     /// What Overview's Changes card counts: the branch, or every nested repository's branch.
     var overviewSummary: ChangeSummary? { repo == nil ? repositories.flatMap(\.branch).summary : branchSummary }
 
     // Overview
+    @Published private(set) var repositoryPullRequests: [RepositoryPullRequest] = []
+    @Published private(set) var prReadState = PanelReadState()
+    @Published private(set) var portsReadState = PanelReadState()
+    @Published private(set) var insightsReadState = PanelReadState()
     @Published private(set) var insights: SessionInsights?
     /// The selected chat's subagents and background tasks, with what their own files add.
     @Published private(set) var work = AgentWork()
@@ -60,6 +87,7 @@ final class ReviewCenter: ObservableObject {
     @Published private(set) var ports: [ListeningPort] = []
 
     // Files
+    @Published private(set) var filesReadState = PanelReadState()
     @Published private(set) var tree: FileTree?
     @Published var filter = "" { didSet { rememberPanelState() } }
     @Published var expanded: Set<String> = [] { didSet { rememberPanelState() } }
@@ -151,11 +179,30 @@ final class ReviewCenter: ObservableObject {
         }
         insightsFollower = nil
         insights = nil
+        insightsReadState = PanelReadState()
+        filesReadState.loading = false
+        prReadState.loading = false
+        portsReadState.loading = false
+        if folderChanged {
+            prReadState = PanelReadState()
+            portsReadState = PanelReadState()
+            filesReadState = PanelReadState()
+            repositoryPullRequests = []
+        }
         workTracker = AgentWorkTracker()
         work = AgentWork()
         if folderChanged {
             flash = nil
             repo = nil
+            gitSnapshot = nil
+            selectedCheckout = f.flatMap { GitReviewSelection.load($0).checkout }
+            gitSelection = GitReviewSelection.load(selectedCheckout ?? f ?? "")
+            gitReadState = PanelReadState()
+            diffReadState = PanelReadState()
+            diffText = ""
+            hunks = []
+            operationMessage = nil
+            recoveryFolder = nil
             repositoryCenters = [:]
             repositories = []
             expandedRepositories = []
@@ -265,7 +312,7 @@ final class ReviewCenter: ObservableObject {
     }
 
     private func restorePanelState(_ state: FolderPanelState) {
-        base = state.base ?? .uncommitted
+        base = state.base ?? .unstaged
         selectedPath = state.selectedPath
         expandedRepositories = state.expandedRepositories ?? []
         showCleanRepositories = state.showCleanRepositories ?? false
@@ -346,7 +393,7 @@ final class ReviewCenter: ObservableObject {
     }
 
     func refreshNow() {
-        if let parentReview { parentReview.refreshNow(); return }
+        if parentReview != nil { refreshGit(); return }
         invalidateDiscovery()
         updateActivity(refresh: true)
     }
@@ -354,45 +401,71 @@ final class ReviewCenter: ObservableObject {
     // MARK: Git
 
     func refreshGit(completion: (() -> Void)? = nil) {
-        if let parentReview { parentReview.refreshGit(completion: completion); return }
         guard let folder else { completion?(); return }
+        let target = selectedCheckout ?? (parentReview == nil ? folder : (repo?.root ?? folder))
         let gen = generation
-        let base = self.base
-        let wantBranch = activeTab == .overview || base == .branch
+        gitRequest += 1
+        let request = gitRequest
+        let scope = base
+        let selection = gitSelection
+        gitReadState.loading = true
         queue.async {
-            let repo = RepoInfo.load(folder: folder)
-            var unc: [ChangedFile] = [], list: [ChangedFile] = []
-            var summary: ChangeSummary?
+            let info = RepoInfo.load(folder: target)
+            var snapshot: GitReviewSnapshot?
+            var failure: String?
             var nested: [RepositoryChanges] = []
             var truncated = false
-            if let repo {
-                let env = Git.readOnlyIndex(root: repo.root)
-                unc = ChangeScanner.uncommitted(repo, env: env)
-                var branchList: [ChangedFile]?
-                if wantBranch, let mb = repo.mergeBase { branchList = ChangeScanner.branch(repo, base: mb, env: env) }
-                list = base == .branch ? (branchList ?? unc) : unc
-                summary = (branchList ?? unc).summary
+            if info != nil {
+                do { snapshot = try GitReviewSnapshot.load(root: info!.root, scope: scope, selection: selection) }
+                catch { failure = error.localizedDescription }
+            } else if FileManager.default.fileExists(atPath: (target as NSString).appendingPathComponent(".git")) {
+                failure = "Git could not read this checkout. Check its permissions and repository metadata."
             } else {
-                let discovered = self.discoveryCache.result(folder: folder)
+                let discovered = self.discoveryCache.result(folder: target)
                 truncated = discovered.truncated
                 nested = RepositoryChanges.ordered(discovered.repositories.compactMap(RepositoryChanges.scan))
+                let errors = discovered.errors + nested.compactMap(\.scanError)
+                if !errors.isEmpty { failure = errors.joined(separator: "\n") }
+                if nested.count != discovered.repositories.count { failure = "Some repositories could not be read. Retry before reviewing them." }
             }
             DispatchQueue.main.async {
-                guard gen == self.generation else { return }
-                let rootChanged = repo?.root != self.repo?.root
-                if repo != self.repo { self.repo = repo }
+                guard gen == self.generation, request == self.gitRequest else { completion?(); return }
+                self.gitReadState.loading = false
+                self.gitReadState.error = failure
                 self.repoChecked = true
-                if unc != self.uncommitted { self.uncommitted = unc }
-                if list != self.changes { self.changes = list }
-                if wantBranch { self.branchSummary = summary }
+                if let failure {
+                    if !nested.isEmpty { self.applyRepositories(nested) }
+                    self.operationMessage = failure
+                    completion?()
+                    return
+                }
+                self.gitReadState.lastSuccess = Date()
+                let repositorySetChanged = self.repo?.root != info?.root || self.repositories.map(\.id) != nested.map(\.id)
+                self.repo = info
+                self.gitSnapshot = snapshot
+                if let snapshot {
+                    self.gitSelection = snapshot.selection
+                    snapshot.selection.save(snapshot.info.root)
+                    self.changes = snapshot.files
+                    self.uncommitted = snapshot.uncommitted
+                    self.branchSummary = snapshot.overviewSummary
+                } else {
+                    self.changes = []
+                    self.uncommitted = []
+                }
                 if !nested.isEmpty || !self.repositories.isEmpty { self.applyRepositories(nested) }
-                if truncated != self.discoveryTruncated { self.discoveryTruncated = truncated }
+                self.discoveryTruncated = truncated
                 self.changesLoaded = true
-                if rootChanged, self.activeTab != nil { self.startWatching() }
-                if self.selectedPath == nil || !list.contains(where: { $0.path == self.selectedPath }) {
-                    self.selectedPath = list.first?.path
+                if self.activeTab != nil { self.startWatching() }
+                if self.selectedPath == nil || !self.changes.contains(where: { $0.path == self.selectedPath }) {
+                    self.selectedPath = self.changes.first?.path
                 }
                 self.loadDiff()
+                if repositorySetChanged, self.activeTab == .overview { self.refreshPullRequest() }
+                if let parent = self.parentReview {
+                    parent.objectWillChange.send()
+                    parent.repositoryListRefreshed()
+                }
                 completion?()
             }
         }
@@ -425,7 +498,11 @@ final class ReviewCenter: ObservableObject {
     }
 
     private func canFocus(_ id: String) -> Bool {
-        expandedRepositories.contains(id) && repositoryCenters[id]?.changes.isEmpty == false
+        guard expandedRepositories.contains(id), let center = repositoryCenters[id] else { return false }
+        // Reserve the first open section while its scoped scan loads. Completion order
+        // must not choose the initial diff or replace a restored repository selection.
+        if !center.changesLoaded { return center.nestedEntry?.hasChanges == true }
+        return !center.changes.isEmpty
     }
 
     private func firstFocusable() -> String? {
@@ -439,12 +516,10 @@ final class ReviewCenter: ObservableObject {
         updateRepositoryTabs()
     }
 
-    /// After a section switches comparison: its diff shows if it has files, and if it was
-    /// showing and now has none, the diff moves to the next open section with changes.
-    private func repositoryListChanged(_ id: String) {
-        if canFocus(id) {
-            focus(id)
-        } else if focusedRepository == id {
+    /// A background scan preserves the chosen section. If its list becomes empty,
+    /// the diff moves to the next open section with changes.
+    private func repositoryListRefreshed() {
+        if focusedRepository.map({ !canFocus($0) }) ?? true {
             focusedRepository = firstFocusable()
             updateRepositoryTabs()
         }
@@ -453,13 +528,13 @@ final class ReviewCenter: ObservableObject {
     /// Whether this repository's selected file is the one whose diff is showing.
     var showsSelection: Bool {
         guard let parentReview else { return true }
-        return parentReview.focusedRepository == repo?.root
+        return parentReview.focusedRepository == parentReview.repositoryCenters.first(where: { $0.value === self })?.key
     }
 
     /// Picks a file in the list. In a repository section it also moves the diff to it.
     func select(_ path: String) {
         selectedPath = path
-        if let parentReview, let root = repo?.root { parentReview.focus(root) }
+        if let parentReview, let id = parentReview.repositoryCenters.first(where: { $0.value === self })?.key { parentReview.focus(id) }
     }
 
     private func addRepositoryCenter(for entry: RepositoryChanges) -> ReviewCenter {
@@ -470,11 +545,13 @@ final class ReviewCenter: ObservableObject {
         center.model = model
         center.chatID = chatID
         center.folder = folder
+        center.selectedCheckout = GitReviewSelection.load(entry.info.root).checkout
         center.panelProjectID = panelProjectID
         center.restoringPanel = true
         // Open on the comparison that has something to show: a branch whose work is all
         // committed opens on Branch rather than on an empty Uncommitted list.
-        center.base = entry.uncommitted.isEmpty && entry.info.mergeBase != nil ? .branch : .uncommitted
+        center.base = entry.uncommitted.isEmpty && entry.info.mergeBase != nil ? .branch : .unstaged
+        center.gitSelection = GitReviewSelection.load(entry.info.root)
         if let saved = savedRepositories[entry.id] {
             center.base = saved.base ?? center.base
             center.selectedPath = saved.selectedPath
@@ -494,21 +571,19 @@ final class ReviewCenter: ObservableObject {
 
     /// A repository's center: shows its part of the parent's scan.
     private func show(_ entry: RepositoryChanges) {
+        if let error = entry.scanError {
+            if repo == nil { repo = entry.info }
+            repoChecked = true
+            gitReadState.loading = false
+            gitReadState.error = error
+            return
+        }
         nestedEntry = entry
-        if entry.info != repo { repo = entry.info }
+        if selectedCheckout == nil, entry.info != repo { repo = entry.info }
+        if repo == nil { repo = entry.info }
         repoChecked = true
-        if entry.uncommitted != uncommitted { uncommitted = entry.uncommitted }
-        branchSummary = entry.branch.summary
-        showNestedList()
-    }
-
-    private func showNestedList() {
-        guard let entry = nestedEntry else { return }
-        let list = base == .branch ? entry.branch : entry.uncommitted
-        if list != changes { changes = list }
-        changesLoaded = true
-        if selectedPath == nil || !list.contains(where: { $0.path == selectedPath }) { selectedPath = list.first?.path }
-        loadDiff()
+        if gitSnapshot == nil { branchSummary = entry.branch.summary }
+        refreshGit()
     }
 
     /// Opening a section shows its diff if nothing else is; closing the one whose diff is
@@ -535,24 +610,33 @@ final class ReviewCenter: ObservableObject {
 
     private func baseChanged() {
         lastDiffKey = ""
-        // A repository in a parent folder already has both lists from the last scan.
+        diffRequest += 1
+        diffReadState.loading = false
+        hunks = []
+        // A comparison choice takes focus now. Its asynchronous result must not take
+        // focus back if the user selects or closes another section while it loads.
         if let parentReview {
-            showNestedList()
-            if let root = repo?.root { parentReview.repositoryListChanged(root) }
+            if let id = parentReview.repositoryCenters.first(where: { $0.value === self })?.key,
+               parentReview.expandedRepositories.contains(id) {
+                parentReview.focus(id)
+            }
+            refreshGit()
             return
         }
-        changesLoaded = false
         if activeTab != nil { refreshGit() }
     }
 
     var baseRef: String? {
+        if let snapshot = gitSnapshot, snapshot.scope == base { return snapshot.baseRevision }
         guard let repo else { return nil }
         if base == .branch, let mb = repo.mergeBase { return mb }
         return repo.headRef
     }
 
     var baseLabel: String {
-        if base == .branch, let d = repo?.defaultBranch { return d }
+        if base == .branch { return gitSelection.target ?? repo?.defaultBranch ?? "Choose target" }
+        if base == .commit { return String((gitSelection.commit ?? "HEAD").prefix(10)) }
+        if base == .unstaged { return "index" }
         return "last commit"
     }
 
@@ -578,36 +662,55 @@ final class ReviewCenter: ObservableObject {
     // MARK: Diff
 
     func loadDiff(force: Bool = false) {
-        guard activeTab == .changes, let repo, let file = selectedFile, let ref = baseRef else {
+        guard activeTab == .changes, let snapshot = gitSnapshot, snapshot.scope == base,
+              let file = selectedFile else {
             if activeTab == .changes, changesLoaded, selectedFile == nil {
+                diffRequest += 1
+                diffReadState = PanelReadState()
                 diffPage.clear(changes.isEmpty ? "" : "Pick a file to see its diff.")
+                diffText = ""
+                hunks = []
                 lastDiffKey = ""
             }
             return
         }
         let gen = generation
-        let key = "\(repo.root)|\(base.rawValue)|\(file.path)"
+        diffRequest += 1
+        let request = diffRequest
+        let context = diffContext
+        let key = "\(snapshot.info.root)|\(base.rawValue)|\(file.path)"
         let allowLarge = force || forcedLarge.contains(key)
         if force { forcedLarge.insert(key) }
         let keepScroll = key == lastDiffKey
+        diffReadState.loading = true
         queue.async {
-            let text = ChangeScanner.diff(file, base: ref, root: repo.root)
-            let tooBig = text.utf8.count > 800_000
-            let parsed = tooBig && !allowLarge ? ParsedDiff() : DiffParser.parse(text)
-            DispatchQueue.main.async {
-                guard gen == self.generation, self.selectedPath == file.path, self.baseRef == ref, self.activeTab == .changes else { return }
-                var payload = DiffPayload(key: key, path: file.path, rows: parsed.rows, comments: self.pageComments(for: file.path),
-                                          keepScroll: keepScroll)
-                if !allowLarge && (tooBig || parsed.rows.count > 4000) {
-                    payload.rows = []
-                    payload.large = max(parsed.rows.count, text.split(separator: "\n").count)
-                } else if parsed.binary {
-                    payload.notice = "Binary file, not shown."
-                } else if parsed.rows.isEmpty {
-                    payload.notice = file.status == "R" ? "Renamed with no line changes." : "No line changes."
+            do {
+                let text = try snapshot.diff(file, context: context)
+                try GitReviewActions.validate(snapshot)
+                let tooBig = text.utf8.count > 800_000
+                let parsed = tooBig && !allowLarge ? ParsedDiff() : DiffParser.parse(text)
+                DispatchQueue.main.async {
+                    guard gen == self.generation, request == self.diffRequest, self.selectedPath == file.path,
+                          self.gitSnapshot?.revision == snapshot.revision, self.base == snapshot.scope, self.activeTab == .changes else { return }
+                    self.diffReadState = PanelReadState(loading: false, lastSuccess: Date(), error: nil)
+                    self.diffText = text
+                    self.hunks = GitReviewHunk.parse(text, file: file, context: context)
+                    var payload = DiffPayload(key: key, path: file.path, rows: parsed.rows, comments: self.pageComments(for: file.path), keepScroll: keepScroll)
+                    payload.revision = snapshot.fingerprints[file.path]
+                    if !allowLarge && (tooBig || parsed.rows.count > 4000) {
+                        payload.rows = []
+                        payload.large = max(parsed.rows.count, text.split(separator: "\n").count)
+                    } else if parsed.binary { payload.notice = "Binary file, not shown." }
+                    else if parsed.rows.isEmpty { payload.notice = file.status == "R" ? "Renamed with no line changes." : "No line changes." }
+                    self.lastDiffKey = key
+                    self.diffPage.show(payload)
                 }
-                self.lastDiffKey = key
-                self.diffPage.show(payload)
+            } catch {
+                DispatchQueue.main.async {
+                    guard gen == self.generation, request == self.diffRequest else { return }
+                    self.diffReadState.loading = false
+                    self.diffReadState.error = error.localizedDescription
+                }
             }
         }
     }
@@ -616,14 +719,11 @@ final class ReviewCenter: ObservableObject {
 
     private func viewedKey(_ f: ChangedFile) -> String { "\(repo?.root ?? "")|\(base.rawValue)|\(f.path)" }
 
-    /// Changes when the file does, so a viewed file comes back once the agent edits it again.
-    private func fingerprint(_ f: ChangedFile) -> String {
-        let abs = ((repo?.root ?? "") as NSString).appendingPathComponent(f.path)
-        let mtime = ((try? FileManager.default.attributesOfItem(atPath: abs))?[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0
-        return "\(Int(mtime * 1000))-\(f.added ?? -1)-\(f.deleted ?? -1)"
-    }
+    func revisionIdentity(file: ChangedFile) -> String? { gitSnapshot?.scope == base ? gitSnapshot?.fingerprints[file.path] : nil }
 
-    func isViewed(_ f: ChangedFile) -> Bool { (parentReview ?? self).viewed[viewedKey(f)] == fingerprint(f) }
+    private func fingerprint(_ f: ChangedFile) -> String { revisionIdentity(file: f) ?? "unavailable" }
+
+    func isViewed(_ f: ChangedFile) -> Bool { revisionIdentity(file: f) != nil && (parentReview ?? self).viewed[viewedKey(f)] == fingerprint(f) }
 
     func toggleViewed(_ f: ChangedFile) {
         let k = viewedKey(f)
@@ -641,18 +741,18 @@ final class ReviewCenter: ObservableObject {
 
     private func pageComments(for path: String) -> [DiffPayload.Comment] {
         currentComments.filter { $0.path == path && $0.root == repo?.root }.map {
-            DiffPayload.Comment(id: $0.id, side: $0.side, start: $0.start, end: $0.end, body: $0.body)
+            DiffPayload.Comment(id: $0.id, side: $0.side, start: $0.start, end: $0.end, body: $0.body, quoted: $0.quoted, revision: $0.revision)
         }
     }
 
     /// A repository section's comments are kept by its parent, with the rest of the chat's.
-    func addComment(path: String, side: String, start: Int, end: Int, quoted: [String], body: String) {
+    func addComment(path: String, side: String, start: Int, end: Int, quoted: [String], body: String, revision: String? = nil) {
         let owner = parentReview ?? self
         guard let key = owner.chatKey, let repo else { return }
         let text = body.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return }
         let c = ReviewComment(root: repo.root, path: path, side: side == "old" ? "old" : "new",
-                              start: min(start, end), end: max(start, end), quoted: quoted, body: text)
+                              start: min(start, end), end: max(start, end), quoted: quoted, body: text, revision: revision)
         owner.comments[key, default: []].append(c)
         owner.pushComments()
     }
@@ -687,17 +787,31 @@ final class ReviewCenter: ObservableObject {
         return chat.status != .ended && !t.processExited
     }
 
-    /// Types every pending comment into the chat as one message and presses Return.
+    func editComment(id: String, body: String) {
+        if let parentReview { parentReview.editComment(id: id, body: body); return }
+        guard let key = chatKey, let i = comments[key]?.firstIndex(where: { $0.id == id }),
+              !body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        comments[key]?[i].body = body
+        pushComments()
+    }
+
+    func addCommentsToMessage() {
+        guard let id = chatID, let folder else { return }
+        if ReaderModeController.main?.addPanelFeedbackToDraft(CommentMessage.build(currentComments, folder: folder), chatID: id) == true {
+            showFlash("Added to message")
+        }
+    }
+
     func sendComments() {
         if let parentReview { parentReview.sendComments(); return }
-        guard canSend, let chat = selectedChat, let terminal = chat.terminal, let folder else { return }
-        let list = currentComments
-        guard !list.isEmpty else { return }
-        terminal.submit(CommentMessage.build(list, folder: folder))
-        Log.write("review: sent \(list.count) comment(s) to chat=\(chat.id)")
-        clearComments()
-        showFlash(list.count == 1 ? "Sent 1 comment" : "Sent \(list.count) comments")
-        model?.focusRequest.send(terminal)
+        guard let chat = selectedChat, let folder, let model else { return }
+        let key = chat.id.uuidString
+        PanelFeedbackDelivery.shared.send(comments: currentComments, folder: folder, chatID: chat.id, model: model) { [weak self] delivered in
+            guard let self else { return }
+            // A comment edited after sending remains pending as new feedback.
+            self.comments[key]?.removeAll { delivered.contains($0) }
+            self.pushComments()
+        }
     }
 
     func showFlash(_ text: String) {
@@ -718,58 +832,52 @@ final class ReviewCenter: ObservableObject {
         model?.openFile(p, line: line)
     }
 
-    func openLine(_ line: Int) {
-        if let f = selectedFile { open(f, line: line) }
+    func openLine(_ line: Int, side: String = "new") {
+        guard let file = selectedFile else { return }
+        if side == "old", let snapshot = gitSnapshot {
+            HistoricalSourceWindow.open(snapshot: snapshot, file: file, line: line, old: true)
+        } else if let snapshot = gitSnapshot, snapshot.scope == .branch || snapshot.scope == .commit {
+            HistoricalSourceWindow.open(snapshot: snapshot, file: file, line: line, old: false)
+        } else { open(file, line: line) }
     }
 
     func hasUncommittedChanges(_ f: ChangedFile) -> Bool { uncommitted.contains { $0.path == f.path } }
 
-    func confirmRevert(_ f: ChangedFile) {
-        guard let repo, let current = uncommitted.first(where: { $0.path == f.path }) else { return }
-        let a = NSAlert()
-        a.messageText = "Revert \(f.name)?"
-        let inHead = !(current.isUntracked || current.status == "A")
-        a.informativeText = inHead
-            ? "This discards the uncommitted changes to \(current.path) and restores it from the last commit."
-            : "\(current.path) isn't in the last commit, so reverting moves it to the Trash."
-        a.addButton(withTitle: "Revert")
-        a.addButton(withTitle: "Cancel")
-        guard a.runModal() == .alertFirstButtonReturn else { return }
-        queue.async {
-            let err = ChangeScanner.revert(current, repo: repo)
-            DispatchQueue.main.async {
-                if let err, !err.isEmpty {
-                    let e = NSAlert()
-                    e.messageText = "Couldn't revert \(f.name)"
-                    e.informativeText = err
-                    e.runModal()
-                }
-                Log.write("review: reverted \(current.path) in \(repo.root)")
-                self.refreshGit()
-            }
-        }
-    }
+    func confirmRevert(_ f: ChangedFile) { confirmGitAction(.discard(f)) }
 
-    /// Types a shell-escaped path into the chat's terminal, as a drop would.
+    /// File context joins the same chat-owned draft as other panel feedback.
     func insertPath(_ abs: String) {
-        guard canSend, let t = selectedChat?.terminal else { return }
-        if ReaderModeController.main?.insertIntoComposer(ShellEscape.escape(abs) + " ") == true { return }
-        t.pasteText(ShellEscape.escape(abs) + " ")
-        model?.focusRequest.send(t)
+        guard let id = chatID else { return }
+        _ = ReaderModeController.main?.addPanelFeedbackToDraft(ShellEscape.escape(abs), chatID: id)
     }
 
     // MARK: Files
 
     func refreshTree(completion: (() -> Void)? = nil) {
-        guard let folder else { completion?(); return }
+        guard !filesReadState.loading, let folder else { completion?(); return }
         let gen = generation
+        filesReadState.loading = true
         queue.async {
-            let inRepo = Git.run(["rev-parse", "--is-inside-work-tree"], in: folder, timeout: 5).text.hasPrefix("true")
-            let (paths, truncated) = FileTree.listFiles(folder: folder, inRepo: inRepo)
-            let tree = FileTree.build(root: folder, paths: paths, truncated: truncated, fromGit: inRepo)
+            let result = Result { () throws -> FileTree in
+                let probe = Git.run(["rev-parse", "--is-inside-work-tree"], in: folder, timeout: 5)
+                let inRepo = probe.ok && probe.text.hasPrefix("true")
+                // Only Git's explicit non-repository response permits a directory walk.
+                if !probe.ok && !probe.err.contains("not a git repository") {
+                    throw GitReviewError(message: probe.err.isEmpty ? "Could not inspect this folder." : probe.err)
+                }
+                let listing = try FileTree.listFilesChecked(folder: folder, inRepo: inRepo)
+                return FileTree.build(root: folder, paths: listing.paths, truncated: listing.truncated, fromGit: inRepo)
+            }
             DispatchQueue.main.async {
                 guard gen == self.generation else { return }
-                self.tree = tree
+                self.filesReadState.loading = false
+                switch result {
+                case .success(let tree):
+                    self.tree = tree
+                    self.filesReadState.lastSuccess = Date()
+                    self.filesReadState.error = nil
+                case .failure(let error): self.filesReadState.error = error.localizedDescription
+                }
                 completion?()
             }
         }
@@ -783,59 +891,106 @@ final class ReviewCenter: ObservableObject {
 
     func refreshInsights(completion: (() -> Void)? = nil) {
         guard let chat = selectedChat, let path = chat.transcriptPath, let kind = chat.agent.transcript else {
-            insights = nil
+            insightsReadState.loading = false
+            insightsReadState.error = "No transcript is available for this chat."
             if !work.isEmpty { work = AgentWork() }
             completion?()
             return
         }
         // The transcript can change during a chat's life (Claude Code's /resume and /clear),
         // so the follower, and the subagents folder next to it, come from the current path.
-        if insightsFollower?.url.path != path { insightsFollower = InsightsFollower(url: URL(fileURLWithPath: path), kind: kind) }
-        guard let f = insightsFollower else { return }
+        if insightsFollower?.url.path != path {
+            insightsFollower = InsightsFollower(url: URL(fileURLWithPath: path), kind: kind)
+            insights = nil
+            insightsReadState = PanelReadState()
+        }
+        guard !insightsReadState.loading, let f = insightsFollower else { completion?(); return }
+        insightsReadState.loading = true
         let gen = generation
         let tracker = workTracker
         let processStart: Date? = chat.status == .ended ? nil : chat.startedAt
         queue.async {
-            let i = f.poll()
-            let w = tracker.update(i.work, transcript: f.url, kind: kind, processStart: processStart)
+            let result = Result { try f.pollChecked() }
+            let w = (try? result.get()).map { tracker.update($0.work, transcript: f.url, kind: kind, processStart: processStart) }
             DispatchQueue.main.async {
-                guard gen == self.generation else { return }
-                if i != self.insights { self.insights = i }
-                if w != self.work { self.work = w }
+                guard gen == self.generation, self.insightsFollower === f else { return }
+                self.insightsReadState.loading = false
+                switch result {
+                case .success(let i):
+                    if i != self.insights { self.insights = i }
+                    if let w, w != self.work { self.work = w }
+                    self.insightsReadState.lastSuccess = Date()
+                    self.insightsReadState.error = nil
+                case .failure(let error): self.insightsReadState.error = error.localizedDescription
+                }
                 completion?()
             }
         }
     }
 
     func refreshPullRequest() {
-        guard !fixtureMode, let folder else { return }
+        guard !fixtureMode, !prReadState.loading, let folder else { return }
         let gen = generation
+        prReadState.loading = true
+        let roots = repo == nil ? repositories.map { $0.repository.root }.sorted() : []
+        let previous = repositoryPullRequests
+        repositoryPullRequests = roots.map { root in
+            var entry = previous.first { $0.root == root } ?? RepositoryPullRequest(root: root)
+            entry.readState.loading = true
+            return entry
+        }
         slowQueue.async {
-            let isRepo = Git.run(["rev-parse", "--is-inside-work-tree"], in: folder, timeout: 5).text.hasPrefix("true")
-            let pr = isRepo ? GitHubCLI.pullRequest(folder: folder) : nil
+            let nested = roots.map { root -> RepositoryPullRequest in
+                var entry = previous.first { $0.root == root } ?? RepositoryPullRequest(root: root)
+                switch GitHubCLI.readPullRequest(folder: root) {
+                case .success(let pr): entry.pr = pr; entry.readState = PanelReadState(lastSuccess: Date())
+                case .failure(let error): entry.readState.loading = false; entry.readState.error = error.localizedDescription
+                }
+                return entry
+            }
+            let result: Result<PullRequestInfo?, GitHubCLI.ReadError> = roots.isEmpty ? GitHubCLI.readPullRequest(folder: folder) : .success(nil)
             DispatchQueue.main.async {
                 guard gen == self.generation else { return }
-                if pr != self.pr { self.pr = pr }
+                self.prReadState.loading = false
+                self.repositoryPullRequests = nested
+                switch result {
+                case .success(let pr):
+                    self.pr = pr
+                    self.prReadState.lastSuccess = Date()
+                    self.prReadState.error = nil
+                case .failure(let error): self.prReadState.error = error.localizedDescription
+                }
             }
         }
     }
 
     func refreshPorts() {
-        guard !fixtureMode, let folder else { return }
+        guard !fixtureMode, !portsReadState.loading, let folder else { return }
         let gen = generation
-        slowQueue.async {
-            let ports = Ports.listening(in: folder)
+        portsReadState.loading = true
+        DispatchQueue.global(qos: .utility).async {
+            let result = Ports.readListening(in: folder)
             DispatchQueue.main.async {
                 guard gen == self.generation else { return }
-                if ports != self.ports { self.ports = ports }
+                self.portsReadState.loading = false
+                switch result {
+                case .success(let ports):
+                    self.ports = ports
+                    self.portsReadState.lastSuccess = Date()
+                    self.portsReadState.error = nil
+                case .failure(let error): self.portsReadState.error = error.localizedDescription
+                }
             }
         }
     }
 
     /// Fixture data for snapshots and the self test.
-    func setFixture(pr: PullRequestInfo?, ports: [ListeningPort]) {
+    func setFixture(pr: PullRequestInfo?, ports: [ListeningPort], readState: PanelReadState? = nil) {
         self.pr = pr
         self.ports = ports
+        self.prReadState = readState ?? PanelReadState(lastSuccess: Date())
+        self.portsReadState = readState ?? PanelReadState(lastSuccess: Date())
+        if let readState { self.insightsReadState = readState }
     }
 
     // MARK: Persistence

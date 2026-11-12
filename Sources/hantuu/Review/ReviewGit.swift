@@ -158,7 +158,7 @@ struct RepoInfo: Equatable {
 // MARK: - Changed files
 
 enum DiffBase: String, Codable {
-    case uncommitted, branch
+    case uncommitted, branch, unstaged, staged, commit
 }
 
 struct ChangedFile: Identifiable, Equatable, Hashable {
