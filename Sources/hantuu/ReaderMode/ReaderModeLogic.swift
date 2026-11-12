@@ -102,6 +102,27 @@ enum TerminalScreen {
         var menu: ScreenMenu?
     }
 
+    enum CodexPicker: Equatable { case model, reasoning }
+
+    /// Codex omits "to" in these picker hints. Match the title and selected numbered
+    /// list as well as the footer, so model names in an answer are not treated as a menu.
+    static func codexPicker(_ screen: String) -> CodexPicker? {
+        let rows = screen.split(whereSeparator: \.isNewline).map {
+            $0.trimmingCharacters(in: .whitespaces).lowercased()
+        }.filter { !$0.isEmpty }
+        guard let title = rows.lastIndex(where: {
+            $0 == "select model and effort" || $0 == "select model" || $0.hasPrefix("select reasoning level for ")
+        }) else { return nil }
+        let body = Array(rows.dropFirst(title + 1))
+        let footer = body.suffix(3).joined(separator: " ").split(whereSeparator: \.isWhitespace).joined(separator: " ")
+        let kind: CodexPicker = rows[title].hasPrefix("select reasoning") ? .reasoning : .model
+        guard footer.contains("esc back"),
+              footer.contains(kind == .model ? "enter select" : "enter default"),
+              body.contains(where: { $0.range(of: #"^›\s*\d+\.\s+\S"#, options: .regularExpression) != nil }),
+              !body.suffix(3).contains(where: { line in readyMarks.contains(where: line.contains) }) else { return nil }
+        return kind
+    }
+
     /// Looks at the bottom of the screen only, where agents draw their menus, so a phrase in
     /// earlier output doesn't count.
     static func analyze(_ screen: String, lines tail: Int = 16) -> State {
@@ -123,6 +144,8 @@ enum TerminalScreen {
             menu = ScreenMenu(kind: .trust, line: l)
         } else if let l = find(updateMarks) {
             menu = ScreenMenu(kind: .update, line: l)
+        } else if codexPicker(screen) != nil {
+            menu = ScreenMenu(kind: .menu, line: "Choose a model or reasoning level in the terminal.")
         } else if find(menuMarks) != nil {
             // The footer only says how to pick; the first line of the box says what it's about.
             menu = ScreenMenu(kind: .menu, line: "Answer it in the terminal.")
@@ -190,7 +213,7 @@ enum ComposerMessage {
     /// paste, and neither takes a TIFF or HEIC, so those are converted to PNG first.
     static let imageAgents: Set<String> = ["claude", "codex"]
 
-    struct OutgoingFile: Equatable {
+    struct OutgoingFile: Equatable, Codable {
         var path: String
         /// Pasted on its own so the agent attaches it as an image.
         var image: Bool
@@ -220,12 +243,12 @@ enum ComposerMessage {
             body = body.isEmpty ? list : body + (body.contains("\n") ? "\n\n" : " ") + list
         }
         // Claude Code puts nothing between its image chip and pasted text after it.
-        if !images.isEmpty && !body.isEmpty && agentID == "claude" { body = " " + body }
+        if !images.isEmpty && !body.isEmpty && agentID == "claude", ComposerCommandTransport.invocation(body) == nil { body = " " + body }
         // A message that starts with a path isn't a slash command.
         if text == nil && body.hasPrefix("/") { body = " " + body }
         var out = images.map { SendStep.image(ShellEscape.escape($0.path)) }
         if !body.isEmpty {
-            if images.isEmpty, text != nil, ReaderCommandLogic.invocation(body) != nil,
+            if text != nil, ComposerCommandTransport.invocation(body) != nil,
                ["claude", "codex"].contains(agentID) { out.append(.command(body)) }
             else { out.append(.paste(body)) }
         }
@@ -248,7 +271,7 @@ enum SendStep: Equatable {
     /// Text, as one bracketed paste.
     case paste(String)
     /// An image's escaped path as a paste of its own. The next step waits until the agent
-    /// shows one more image chip, or a few seconds.
+    /// shows one more image chip. Timeout must fail the transaction without sending Return.
     case image(String)
     /// A real Return key, a moment after the last paste.
     case pressReturn

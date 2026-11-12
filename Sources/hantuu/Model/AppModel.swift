@@ -47,7 +47,7 @@ final class Chat: ObservableObject, Identifiable {
     var launchToken = UUID()
     var launchMonitor: Timer?
     @Published var status: ChatStatus = .running {
-        didSet { if status == .ended { pendingMessages.removeAll() } }
+        didSet { if status == .ended { pendingMessages.hold(reason: "The agent ended. Queued work is held; submitted input may still need confirmation.") } }
     }
     @Published var pendingMessages = PendingReaderMessages()
     @Published var exitCode: Int?
@@ -165,6 +165,38 @@ struct SavedChat: Codable {
     var lastSelectedAt: Date?
     var requestedWorktree: Bool?
     var resumeOnRetry: Bool?
+    var pendingMessages: PendingReaderMessages? = nil
+    enum CodingKeys: String, CodingKey {
+        case userTitle, archivedAt, seenSessionID, seenThrough, seenCompletionKey, manualUnread, lastSelectedAt, requestedWorktree, resumeOnRetry
+        case id, projectID, agentID, sessionID, title, firstPrompt, transcriptPath, createdAt, worktree, pinnedAt, pendingMessages
+    }
+}
+
+extension SavedChat {
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        id = try values.decode(UUID.self, forKey: .id)
+        projectID = try values.decode(UUID.self, forKey: .projectID)
+        agentID = try values.decode(String.self, forKey: .agentID)
+        sessionID = try values.decodeIfPresent(String.self, forKey: .sessionID)
+        title = try values.decode(String.self, forKey: .title)
+        firstPrompt = try values.decodeIfPresent(String.self, forKey: .firstPrompt)
+        transcriptPath = try values.decodeIfPresent(String.self, forKey: .transcriptPath)
+        createdAt = try values.decode(Date.self, forKey: .createdAt)
+        worktree = try values.decodeIfPresent(WorktreeInfo.self, forKey: .worktree)
+        pinnedAt = try values.decodeIfPresent(Date.self, forKey: .pinnedAt)
+        userTitle = try values.decodeIfPresent(String.self, forKey: .userTitle)
+        archivedAt = try values.decodeIfPresent(Date.self, forKey: .archivedAt)
+        seenSessionID = try values.decodeIfPresent(String.self, forKey: .seenSessionID)
+        seenThrough = try values.decodeIfPresent(Date.self, forKey: .seenThrough)
+        seenCompletionKey = try values.decodeIfPresent(String.self, forKey: .seenCompletionKey)
+        manualUnread = try values.decodeIfPresent(Bool.self, forKey: .manualUnread)
+        lastSelectedAt = try values.decodeIfPresent(Date.self, forKey: .lastSelectedAt)
+        requestedWorktree = try values.decodeIfPresent(Bool.self, forKey: .requestedWorktree)
+        resumeOnRetry = try values.decodeIfPresent(Bool.self, forKey: .resumeOnRetry)
+        // A corrupt optional recovery record must never erase the chat itself.
+        pendingMessages = try? values.decodeIfPresent(PendingReaderMessages.self, forKey: .pendingMessages)
+    }
 }
 
 /// What state.json holds: the sidebar, the chats and the window.
@@ -359,6 +391,8 @@ final class AppModel: ObservableObject, TerminalEvents {
                 c.lastSelectedAt = sc.lastSelectedAt
                 c.requestedWorktree = sc.requestedWorktree ?? false
                 c.resumeOnRetry = sc.resumeOnRetry ?? (sc.sessionID != nil)
+                c.pendingMessages = sc.pendingMessages ?? PendingReaderMessages()
+                c.pendingMessages.recoverAfterLaunch()
                 if let p = sc.transcriptPath, FileManager.default.fileExists(atPath: p), let kind = c.agent.transcript {
                     attachFollower(c, url: URL(fileURLWithPath: p), kind: kind, live: false)
                 } else if c.sessionID != nil {
@@ -461,7 +495,8 @@ final class AppModel: ObservableObject, TerminalEvents {
                       userTitle: $0.userTitle, archivedAt: $0.archivedAt, seenSessionID: $0.seenSessionID,
                       seenThrough: $0.seenThrough, seenCompletionKey: $0.seenCompletionKey,
                       manualUnread: $0.manualUnread, lastSelectedAt: $0.lastSelectedAt,
-                      requestedWorktree: $0.requestedWorktree, resumeOnRetry: $0.resumeOnRetry)
+                      requestedWorktree: $0.requestedWorktree, resumeOnRetry: $0.resumeOnRetry,
+                      pendingMessages: $0.pendingMessages)
         } + awayChats.filter { sc in away.contains { $0.id == sc.projectID } }
         s.selectedChatID = selectedChatID
         s.defaultAgentID = defaultAgentID
@@ -910,12 +945,13 @@ final class AppModel: ObservableObject, TerminalEvents {
         chat.firstPrompt = nil
         if replacedSession {
             subagentBrowser.forget(chat.id)
-            chat.pendingMessages.removeAll()
+            chat.pendingMessages.replacedSession()
             chat.seenSessionID = nil
             chat.seenThrough = nil
             chat.seenCompletionKey = nil
             chat.manualUnread = false
         }
+        if changedID && !replacedSession, let id = session.id { chat.pendingMessages.adoptInitialSession(id) }
         if let id = session.id { chat.sessionID = id }
         chat.transcriptPath = path
         if let path {
@@ -1025,7 +1061,9 @@ final class AppModel: ObservableObject, TerminalEvents {
             if chat.firstPrompt == nil, let p = fresh.first(where: { $0.kind == .user })?.text {
                 chat.firstPrompt = p.split(whereSeparator: \.isNewline).first.map(String.init)
             }
+            let hadPending = !chat.pendingMessages.isEmpty
             self.readerAppend.send((chat.id, chat.pendingMessages.reconcile(fresh)))
+            if hadPending && self.persistenceEnabled { self.save() }
         }
         chat.follower = f
         chat.resumeOnRetry = true

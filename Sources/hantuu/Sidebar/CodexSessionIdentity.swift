@@ -24,7 +24,7 @@ struct CodexTitleIdentity: Equatable {
     }
 
     /// A matching saved full UUID is preserved while a truncated title is verified.
-    /// Only a genuinely different identity clears queued input and seen watermarks.
+    /// Only a genuinely different identity holds queued input and clears seen watermarks.
     func preservesSession(_ sessionID: String?) -> Bool { matches(sessionID) }
 
     func matches(_ sessionID: String?) -> Bool {
@@ -154,7 +154,7 @@ extension AppModel {
         if !preserveSession {
             subagentBrowser.forget(chat.id)
             chat.firstPrompt = nil
-            chat.pendingMessages.removeAll()
+            chat.pendingMessages.replacedSession()
             chat.seenSessionID = nil; chat.seenThrough = nil; chat.seenCompletionKey = nil; chat.manualUnread = false
         }
         readerReload.send(chat.id); objectWillChange.send(); scheduleSave()

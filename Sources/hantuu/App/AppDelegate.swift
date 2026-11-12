@@ -174,6 +174,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             chat.addItem(it)
         }
         chat.addItem(.separator())
+        for item in ReaderModeMenuTarget.composerItems() { chat.addItem(item) }
         chat.addItem(item("Next Chat Requiring Attention", #selector(jumpToNeedsYou), "j"))
         chat.addItem(item("Resume Chat", #selector(resumeChat), "t", [.command, .shift]))
         SidebarMenuTarget.install(chat: chat, view: view)

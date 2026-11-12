@@ -36,12 +36,13 @@ extension SelfTest {
         check("queue: delivery consumes only the first matching pending send", matched.first?.replacesPendingID == "p1" && pending.entries.map(\.id) == ["p2"])
         _ = pending.reconcile([old, delivered])
         check("queue: replaying a delivery cannot consume a second identical send", pending.entries.map(\.id) == ["p2"])
+        pending.markSubmitted(id: "p2")
         check("queue: restored input can identify a silent queue drop",
               pending.isRestored(in: "────────────────────\n❯ Use this\n────────────────────\n? for shortcuts"))
         check("queue: an empty input box is not a silent queue drop",
               !pending.isRestored(in: "────────────────────\n❯ \n────────────────────\n? for shortcuts"))
         pending.removeAll()
-        check("queue: stopping discards pending sends", pending.isEmpty)
+        check("queue: explicit reset discards pending sends", pending.isEmpty)
 
         let picture = ComposerMessage.OutgoingFile(path: dir.appendingPathComponent("queue picture.png").path, image: true)
         pending.enqueue(id: "pic", text: "Use this", files: [picture], agentID: "claude", existing: [])
@@ -58,8 +59,10 @@ extension SelfTest {
         check("queue: slash send steps preserve the command and arguments", pending.entries.first?.text == "/compact keep tests")
         check("queue: a command notice acknowledges a pending command", pending.reconcile(command).first?.replacesPendingID == "command" && pending.isEmpty)
         pending.enqueue(id: "interrupted", text: "Do this next", files: [], agentID: "claude", existing: [])
+        pending.markSubmitted(id: "interrupted")
         _ = pending.reconcile([ReaderEntry(id: "stop", kind: .notice, text: "Interrupted")])
-        check("queue: a terminal interruption drops undelivered bubbles", pending.isEmpty)
+        check("queue: a terminal interruption preserves delivery uncertainty", pending.stage(id: "interrupted") == .unconfirmed && pending.queuePaused)
+        pending.removeAll()
 
         let project = UUID()
         let first = Chat(projectID: project, agentID: "claude")
@@ -68,7 +71,7 @@ extension SelfTest {
         second.pendingMessages.enqueue(id: "second", text: "Second chat", files: [], agentID: "codex", existing: [])
         check("queue: chats own separate pending messages", first.pendingMessages.entries.first?.text == "First chat" && second.pendingMessages.entries.first?.text == "Second chat")
         first.status = .ended
-        check("queue: ending one chat drops only its queue", first.pendingMessages.isEmpty && second.pendingMessages.entries.count == 1)
+        check("queue: ending one chat preserves recovery without affecting another", first.pendingMessages.entries.count == 1 && first.pendingMessages.queuePaused && second.pendingMessages.entries.count == 1)
 
         var codex = CodexTranscriptParser()
         let rollout: [[String: Any]] = [
@@ -192,5 +195,25 @@ extension SelfTest {
         check("queue: another chat cannot remove the visible pending bubble", js(page, "document.querySelectorAll('.entry.pending').length === 1") as? Bool == true)
         _ = js(page, "window.hantuu.pending({chatID:'queue',pending:[]}); 0")
         check("queue: dropping pending entries leaves delivered entries intact", js(page, "!document.querySelector('.entry.pending') && document.querySelectorAll('.entry').length === 2") as? Bool == true)
+        _ = js(page, """
+            window.queueEvents = [];
+            window.hantuuRender.post = payload => window.queueEvents.push(payload);
+            window.heldOne = {id:'one',kind:'user',text:'First waiting message',pending:true,pendingState:'Waiting to send',pendingActions:['send','edit','up','down','remove']};
+            window.heldTwo = {...window.heldOne,id:'two',text:'Second waiting message'};
+            window.hantuu.pending({chatID:'queue',pending:[window.heldOne,window.heldTwo]});
+            window.firstHeldNode = document.querySelector('[data-id=one]');
+            window.firstHeldNode.querySelectorAll('.queue-action')[1].click();
+            0
+            """)
+        check("queue: edit action includes owning chat and message", js(page, "JSON.stringify(window.queueEvents.at(-1)) === JSON.stringify({type:'queueAction',chatID:'queue',id:'one',action:'edit'})") as? Bool == true)
+        _ = js(page, "window.hantuu.pending({chatID:'queue',pending:[window.heldTwo,window.heldOne]}); 0")
+        check("queue: reorder moves existing bubbles into saved order", js(page, "Array.from(document.querySelectorAll('.pending')).map(e=>e.dataset.id).join(',') === 'two,one' && document.querySelector('[data-id=one]') === window.firstHeldNode") as? Bool == true)
+        _ = js(page, "window.hantuu.pending({chatID:'queue',pending:[{...window.heldOne,text:'Edited waiting message'}]}); 0")
+        check("queue: saving edits replaces visible prompt text", js(page, "document.querySelector('.pending').innerText.includes('Edited waiting message')") as? Bool == true)
+        _ = js(page, "window.hantuu.pending({chatID:'queue',pending:[{...window.heldOne,pendingState:'Delivery unconfirmed',pendingDetail:'Inspect terminal before resending',pendingActions:['restore','terminal']}]}); 0")
+        check("queue: uncertainty exposes recovery and its reason", js(page, "document.querySelector('.queued-label').textContent === 'Delivery unconfirmed' && document.querySelector('.pending-detail').textContent === 'Inspect terminal before resending' && document.querySelectorAll('.queue-action').length === 2") as? Bool == true)
+        _ = js(page, "window.hantuu.append({chatID:'queue',entries:[{id:'delivered-one',kind:'user',text:'First waiting message',replacesPendingID:'one'}],pending:[]}); document.querySelector('[data-id=delivered-one] .edit-as-new').click(); 0")
+        check("queue: delivered message offers edit as new without pending controls", js(page, "!document.querySelector('.pending-actions') && JSON.stringify(window.queueEvents.at(-1)) === JSON.stringify({type:'editAsNew',chatID:'queue',id:'delivered-one'})") as? Bool == true)
+
     }
 }

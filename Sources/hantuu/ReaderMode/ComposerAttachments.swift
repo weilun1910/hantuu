@@ -5,8 +5,20 @@ import UniformTypeIdentifiers
 /// A file waiting in the message box to go out with the next message: one you dropped, picked
 /// with the paperclip or copied in Finder, or an image pasted without a file of its own, which
 /// hantuu saves first (see PastedImages).
-struct ComposerAttachment: Equatable, Identifiable {
-    let id = UUID()
+enum AttachmentPreparation: Equatable, Codable {
+    case preparing
+    case ready
+    case failed(String)
+
+    var title: String {
+        switch self { case .preparing: return "Preparing"; case .ready: return "Ready"; case .failed: return "Failed" }
+    }
+}
+
+struct ComposerAttachment: Equatable, Identifiable, Codable {
+    let id: UUID
+    var preparation: AttachmentPreparation
+    var preparedURL: URL?
     /// The file as you chose it. The chip shows its name.
     let url: URL
     /// hantuu wrote this file from pasted image data.
@@ -14,7 +26,10 @@ struct ComposerAttachment: Equatable, Identifiable {
     /// What the chip says. A pasted image has no name of its own.
     var label: String
 
-    init(url: URL, pasted: Bool = false, label: String? = nil) {
+    init(url: URL, pasted: Bool = false, label: String? = nil, id: UUID = UUID(), preparation: AttachmentPreparation = .ready, preparedURL: URL? = nil) {
+        self.id = id
+        self.preparation = preparation
+        self.preparedURL = preparedURL
         self.url = url
         self.pasted = pasted
         self.label = label ?? url.lastPathComponent
@@ -32,14 +47,22 @@ struct ComposerAttachment: Equatable, Identifiable {
         }
         switch content {
         case .files(let urls):
-            return urls.filter(\.isFileURL).map { ComposerAttachment(url: $0) }
+            return urls.filter(\.isFileURL).map { ComposerAttachment(url: $0, preparation: PastedImages.preparation(for: $0)) }
         case .images(let images), .text(_, let images):
-            return images.compactMap { img in
-                PastedImages.save(img.data, type: img.type, now: now).map { ComposerAttachment(url: $0, pasted: true, label: pastedLabel()) }
+            return images.map { img in
+                let label = pastedLabel()
+                guard let url = PastedImages.save(img.data, type: img.type, now: now) else {
+                    return ComposerAttachment(url: PastedImages.newURL(ext: "png", now: now), pasted: true, label: label,
+                        preparation: .failed("Could not save pasted image. Paste it again or remove this attachment."))
+                }
+                return ComposerAttachment(url: url, pasted: true, label: label,
+                    preparation: PastedImages.isPending(url) ? .preparing : .ready)
             }
         case .pdf(let data):
             let url = PastedImages.newURL(ext: "pdf", now: now)
-            guard (try? data.write(to: url, options: .atomic)) != nil else { return [] }
+            guard (try? data.write(to: url, options: .atomic)) != nil else {
+                return [ComposerAttachment(url: url, pasted: true, label: "Pasted PDF", preparation: .failed("Could not save pasted PDF. Paste it again or remove this attachment."))]
+            }
             return [ComposerAttachment(url: url, pasted: true, label: "Pasted PDF")]
         case .nothing:
             return []
@@ -160,6 +183,27 @@ enum PastedImages {
 
     /// Paths being written in the background, with what to run once each is done. Main thread.
     private static var waiting: [String: [() -> Void]] = [:]
+    private static var failures: [String: String] = [:]
+    /// Configure before cleanup using persisted draft and queue references. Nil skips deletion.
+    static var protectedPathsProvider: (() -> Set<String>)?
+
+    static func preparation(for url: URL) -> AttachmentPreparation {
+        if isPending(url) { return .preparing }
+        if let error = failures[url.path] { return .failed(error) }
+        return .ready
+    }
+
+    static func beginPromise(_ url: URL) {
+        waiting[url.path] = []
+        DispatchQueue.main.asyncAfter(deadline: .now() + 30) {
+            guard waiting[url.path] != nil else { return }
+            finishPromise(url, error: "File drop did not finish. Drop the file again or remove this attachment.")
+        }
+    }
+    static func finishPromise(_ url: URL, error: String?) {
+        failures[url.path] = error
+        (waiting.removeValue(forKey: url.path) ?? []).forEach { $0() }
+    }
 
     /// Claims the name with an empty file, so a second paste in the same second gets another,
     /// and writes the real file off the main thread.
@@ -170,6 +214,7 @@ enum PastedImages {
             let ok = write()
             DispatchQueue.main.async {
                 if !ok {
+                    failures[url.path] = "Image conversion failed. Retry or remove this attachment."
                     try? FileManager.default.removeItem(at: url)
                     Log.write("reader mode: couldn't save a pasted picture as PNG")
                 }
@@ -187,13 +232,18 @@ enum PastedImages {
 
     /// Deletes files in the folder last changed more than `keep` ago. Returns how many.
     @discardableResult
-    static func cleanUp(now: Date = Date(), in dir: URL? = nil) -> Int {
+    static func cleanUp(now: Date = Date(), in dir: URL? = nil, protectedPaths: Set<String> = []) -> Int {
         let dir = dir ?? folder
         let fm = FileManager.default
         let keys: Set<URLResourceKey> = [.contentModificationDateKey, .isRegularFileKey, .isDirectoryKey, .isSymbolicLinkKey]
         guard let files = try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: Array(keys)) else { return 0 }
         var removed = 0
         for f in files {
+            let path = f.standardizedFileURL.path
+            guard !protectedPaths.contains(where: { p in
+                let protected = URL(fileURLWithPath: p).standardizedFileURL.path
+                return protected == path || protected.hasPrefix(path + "/")
+            }) else { continue }
             // Pasted files, and the folders that dropped file promises land in. Never a link.
             guard let v = try? f.resourceValues(forKeys: keys), v.isSymbolicLink != true,
                   v.isRegularFile == true || v.isDirectory == true,
@@ -207,10 +257,11 @@ enum PastedImages {
 
     /// Once per launch, off the main thread.
     static func cleanUpOnce() {
-        guard !cleanedThisLaunch else { return }
+        guard !cleanedThisLaunch, let protectedPathsProvider else { return }
+        let protected = protectedPathsProvider().union(waiting.keys)
         cleanedThisLaunch = true
         DispatchQueue.global(qos: .utility).async {
-            let n = cleanUp()
+            let n = cleanUp(protectedPaths: protected)
             if n > 0 { Log.write("reader mode: deleted \(n) pasted images older than a week") }
         }
     }
@@ -326,13 +377,17 @@ enum ComposerPasteboard {
             return true
         }
         if let promises = pb.readObjects(forClasses: [NSFilePromiseReceiver.self], options: nil) as? [NSFilePromiseReceiver], !promises.isEmpty {
-            let dir = PastedImages.newFolder()
             let queue = OperationQueue()
             queue.qualityOfService = .userInitiated
             for p in promises {
+                let dir = PastedImages.newFolder()
+                let placeholders = p.fileNames.map { dir.appendingPathComponent($0) }
+                placeholders.forEach { PastedImages.beginPromise($0) }
+                deliver(.files(placeholders))
                 p.receivePromisedFiles(atDestination: dir, options: [:], operationQueue: queue) { url, error in
-                    guard error == nil else { return }
-                    DispatchQueue.main.async { deliver(.files([url])) }
+                    DispatchQueue.main.async {
+                        PastedImages.finishPromise(url, error: error.map { "File drop failed: \($0.localizedDescription). Drop the file again or remove this attachment." })
+                    }
                 }
             }
             return true
@@ -399,7 +454,9 @@ enum ChipStyle {
 
 /// One attachment: a thumbnail or file icon, the name, and a small x to take it out.
 final class AttachmentChip: NSView {
-    let attachment: ComposerAttachment
+    private(set) var attachment: ComposerAttachment
+    let retry = NSButton(title: "Retry", target: nil, action: nil)
+    var onRetry: (() -> Void)?
     let remove = ChipRemoveButton()
     var onRemove: (() -> Void)?
     private var image: NSImage?
@@ -415,6 +472,20 @@ final class AttachmentChip: NSView {
         super.init(frame: .zero)
         toolTip = attachment.pasted ? "Pasted image" : attachment.url.path
         addSubview(remove)
+        retry.bezelStyle = .inline
+        retry.font = .systemFont(ofSize: 11)
+        retry.target = self
+        retry.action = #selector(retryTapped)
+        addSubview(retry)
+        refreshState()
+        if attachment.preparation == .preparing && PastedImages.isPending(attachment.url) {
+            PastedImages.whenReady(attachment.url) { [weak self] in
+                guard let self else { return }
+                self.attachment.preparation = PastedImages.preparation(for: attachment.url)
+                self.refreshState()
+                self.superview?.needsLayout = true
+            }
+        }
         remove.target = self
         remove.action = #selector(removeTapped)
         remove.setAccessibilityLabel("Remove \(attachment.label)")
@@ -432,6 +503,17 @@ final class AttachmentChip: NSView {
             }
         }
     }
+
+    private var displayLabel: String { attachment.label + " | " + attachment.preparation.title }
+    private func refreshState() {
+        if case .failed(let reason) = attachment.preparation {
+            retry.isHidden = false
+            toolTip = attachment.url.path + "\n" + reason
+        } else { retry.isHidden = true; toolTip = attachment.url.path + "\n" + attachment.preparation.title }
+        needsDisplay = true
+        needsLayout = true
+    }
+    @objc private func retryTapped() { onRetry?() }
 
     /// A plain symbol for a file that isn't a picture, in the label's grey, so a row of chips
     /// doesn't turn into a row of app icons.
@@ -457,10 +539,11 @@ final class AttachmentChip: NSView {
     }
 
     /// 4 + thumbnail + 7 + name + 4 + x (16) + 4.
-    var preferredWidth: CGFloat { 4 + ChipStyle.thumb + 7 + Self.labelWidth(attachment.label) + 4 + 16 + 4 }
+    var preferredWidth: CGFloat { 4 + ChipStyle.thumb + 7 + Self.labelWidth(displayLabel) + 4 + 16 + 4 + (retry.isHidden ? 0 : 40) }
 
     override func layout() {
         super.layout()
+        retry.frame = NSRect(x: bounds.maxX - 62, y: (bounds.height - 20) / 2, width: 40, height: 20)
         remove.frame = NSRect(x: bounds.maxX - 20, y: (bounds.height - 16) / 2, width: 16, height: 16)
     }
 
@@ -521,15 +604,15 @@ final class AttachmentChip: NSView {
         let p = NSMutableParagraphStyle()
         p.lineBreakMode = .byTruncatingMiddle
         let attrs: [NSAttributedString.Key: Any] = [.font: ChipStyle.font, .foregroundColor: ChipStyle.label, .paragraphStyle: p]
-        let lw = Self.labelWidth(attachment.label)
+        let lw = min(Self.labelWidth(displayLabel), max(0, bounds.width - 55 - (retry.isHidden ? 0 : 40)))
         let lh = ceil(ChipStyle.font.ascender - ChipStyle.font.descender)
-        (attachment.label as NSString).draw(with: NSRect(x: t.maxX + 7, y: (bounds.height - lh) / 2, width: lw, height: lh),
+        (displayLabel as NSString).draw(with: NSRect(x: t.maxX + 7, y: (bounds.height - lh) / 2, width: lw, height: lh),
                                             options: [.usesLineFragmentOrigin, .truncatesLastVisibleLine], attributes: attrs)
     }
 
     override func isAccessibilityElement() -> Bool { true }
     override func accessibilityRole() -> NSAccessibility.Role? { .group }
-    override func accessibilityLabel() -> String? { attachment.pasted ? "Pasted image" : "Attachment \(attachment.label)" }
+    override func accessibilityLabel() -> String? { "Attachment \(attachment.label), \(attachment.preparation.title)" }
 }
 
 /// The x on a chip. Quiet until the pointer is over the chip.
@@ -583,19 +666,24 @@ final class ChipRemoveButton: NSControl {
 final class AttachmentStrip: NSView {
     private(set) var chips: [AttachmentChip] = []
     var onRemove: ((ComposerAttachment.ID) -> Void)?
+    var onRetry: ((ComposerAttachment.ID) -> Void)?
     static let maxRows = 3
 
     override var isFlipped: Bool { true }
 
     func show(_ attachments: [ComposerAttachment]) {
-        guard attachments.map(\.id) != chips.map(\.attachment.id) else { return }
+        guard attachments != chips.map(\.attachment) else { return }
         // Keep chips that are still there, so their thumbnails don't flicker.
         var keep: [ComposerAttachment.ID: AttachmentChip] = [:]
         for c in chips { keep[c.attachment.id] = c }
         var next: [AttachmentChip] = []
         for a in attachments {
-            let chip = keep.removeValue(forKey: a.id) ?? AttachmentChip(a)
+            let old = keep.removeValue(forKey: a.id)
+            let chip: AttachmentChip
+            if let old, old.attachment == a { chip = old }
+            else { old?.removeFromSuperview(); chip = AttachmentChip(a) }
             chip.onRemove = { [weak self] in self?.onRemove?(a.id) }
+            chip.onRetry = { [weak self] in self?.onRetry?(a.id) }
             next.append(chip)
         }
         keep.values.forEach { $0.removeFromSuperview() }

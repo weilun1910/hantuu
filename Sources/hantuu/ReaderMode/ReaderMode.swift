@@ -62,6 +62,19 @@ final class ReaderModeMenuTarget: NSObject, NSMenuItemValidation {
         return it
     }
 
+    static func composerItems() -> [NSMenuItem] {
+        let focus = NSMenuItem(title: "Focus Message Box", action: #selector(focusMessageBox(_:)), keyEquivalent: "l")
+        focus.keyEquivalentModifierMask = [.command]
+        focus.target = shared
+        let attach = NSMenuItem(title: "Attach Files to Message", action: #selector(attachMessageFiles(_:)), keyEquivalent: "a")
+        attach.keyEquivalentModifierMask = [.command, .option]
+        attach.target = shared
+        return [focus, attach]
+    }
+
+    @objc func focusMessageBox(_ sender: Any?) { ReaderModeController.main?.focusComposer() }
+    @objc func attachMessageFiles(_ sender: Any?) { ReaderModeController.main?.composer.addFiles() }
+
     @objc func toggleFace(_ sender: Any?) { toggle(model: AppModel.shared) }
 
     func toggle(model: AppModel, mode: ReaderMode = .shared) {
@@ -73,6 +86,10 @@ final class ReaderModeMenuTarget: NSObject, NSMenuItemValidation {
     }
 
     func validateMenuItem(_ item: NSMenuItem) -> Bool {
+        if item.action == #selector(focusMessageBox(_:)) || item.action == #selector(attachMessageFiles(_:)) {
+            guard let controller = ReaderModeController.main, let chat = controller.model.selectedChat else { return false }
+            return controller.model.subagentBrowser.selection == nil && controller.mode.showsReader(chat) && controller.composerMode != .none
+        }
         guard AppModel.shared.subagentBrowser.selection == nil, let chat = AppModel.shared.selectedChat else {
             item.title = "Show as Reader"
             return false
@@ -145,8 +162,7 @@ struct ReaderModeStatus: View {
     }
 }
 
-/// "esc to stop" at the end of the working line: a quiet button with a key cap, the way the
-/// agents' own terminals say "esc to interrupt".
+/// A quiet native interrupt action. Esc can also deliver input the provider already queued.
 struct StopHint: View {
     let agentName: String
     let stop: () -> Void
@@ -160,7 +176,7 @@ struct StopHint: View {
                     .padding(.horizontal, 4)
                     .frame(height: 16)
                     .background(RoundedRectangle(cornerRadius: 4).fill(Color.hInk(hovering ? 0.1 : 0.06)))
-                Text("to stop")
+                Text("to interrupt")
             }
             .font(.system(size: 12))
             .foregroundStyle(hovering ? Color.hText : Color.hTertiary)
@@ -168,7 +184,7 @@ struct StopHint: View {
         }
         .buttonStyle(.plain)
         .onHover { hovering = $0 }
-        .help("Stop \(agentName). Sends Esc to its terminal.")
+        .help("Interrupt \(agentName) with Esc. Its native queued messages may still be delivered.")
     }
 }
 

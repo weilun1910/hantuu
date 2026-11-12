@@ -96,6 +96,10 @@ final class PanelFeedbackDelivery: ObservableObject {
                 fail(id: b.id, detail: "Delivery was interrupted or unconfirmed. Check the conversation before retrying.")
                 continue
             }
+            if chat.pendingMessages.stage(id: b.id) == .failed {
+                fail(id: b.id, detail: "Delivery was interrupted or unconfirmed. Check the conversation before retrying; your comments are retained.")
+                continue
+            }
             if chat.agent.transcript == nil, ReaderModeController.main?.hasPanelFeedbackTransport(id: b.id) != true {
                 chat.pendingMessages.remove(id: b.id)
                 fail(id: b.id, detail: "This agent has no transcript acknowledgement. Check its terminal before retrying; your comments are retained.")

@@ -22,6 +22,7 @@ extension SelfTest {
         readerModeKeys()
         readerModeAttachments(rdir)
         readerModeFakeAgent(rdir)
+        readerBackgroundQueues(rdir)
         readerModeSnapshots(rdir)
         readerModeRealAgent(rdir)
         attachmentLiveProbe(rdir)
@@ -115,6 +116,26 @@ extension SelfTest {
         check("screen: the agent's idle prompt counts as ready, with no menu", idle.ready && idle.menu == nil)
         let codexIdle = TerminalScreen.analyze("› Ask Codex to do anything\n\n  100% context left · ? for shortcuts")
         check("screen: Codex's prompt counts as ready", codexIdle.ready && codexIdle.menu == nil)
+        let modelPicker = "Select Model and Effort\n  1. GPT-6-Astra Frontier model\n› 2. GPT-6-Luna (current) Fast model\n  enter select | esc back"
+        let effortPicker = "Select Reasoning Level for GPT-6-Luna\n  1. Low Fast responses\n› 2. Medium (current) Balanced responses\n  enter default | s session | esc back"
+        check("screen: Codex model picker uses its real compact footer",
+              TerminalScreen.codexPicker(modelPicker) == .model && TerminalScreen.analyze(modelPicker).menu?.kind == .menu)
+        check("screen: Codex reasoning picker remains blocked after model selection",
+              TerminalScreen.codexPicker(effortPicker) == .reasoning && TerminalScreen.analyze(effortPicker).menu?.kind == .menu)
+        check("screen: Codex picker supports a wrapped footer",
+              TerminalScreen.codexPicker(modelPicker.replacingOccurrences(of: " | esc back", with: "\n esc back")) == .model)
+        check("screen: Codex picker title can be above the normal footer scan",
+              TerminalScreen.codexPicker(modelPicker.replacingOccurrences(of: "  1.", with: String(repeating: "  3. Example model\n", count: 20) + "  1.")) == .model)
+        check("screen: model names and footer prose alone never identify a picker",
+              TerminalScreen.codexPicker("Use GPT-6-Luna. Its picker says enter select and esc back.") == nil &&
+              TerminalScreen.codexPicker("Select Model and Effort\nenter select | esc back") == nil)
+        check("screen: closing or choosing Codex picker restores the ordinary prompt",
+              TerminalScreen.analyze("› Ask Codex to do anything\n? for shortcuts").menu == nil &&
+              TerminalScreen.codexPicker(modelPicker + "\n› Ask Codex to do anything\n? for shortcuts") == nil)
+        check("screen: Codex picker triggers command auto-peek and blocks late Return",
+              ReaderCommandLogic.autoPeek(sentAt: Date(), now: Date(), menu: TerminalScreen.analyze(modelPicker).menu) &&
+              ReaderSubmissionGuard.refusal(screen: modelPicker, waiting: false, command: "/model") != nil &&
+              ReaderSubmissionGuard.refusal(screen: effortPicker, waiting: false, command: nil) != nil)
         let update = TerminalScreen.analyze("Update available! 0.50.0 -> 0.51.0\n› 1. Update now\n  2. Skip\n")
         check("screen: an update offer blocks sending", update.menu?.kind == .update)
         let old = TerminalScreen.analyze("Do you trust the files in this folder?\n" + (1...30).map { "line \($0) of the answer" }.joined(separator: "\n") + "\n? for shortcuts")
@@ -131,11 +152,11 @@ extension SelfTest {
         // Claude Code after a stop: the history, then the message back in the box between rules.
         let restored = "❯ Read notes.md\n● It says hi.\n\n\(rule)\n❯ \(msg)\n\(rule)\n  ⏵⏵ auto mode on (shift+tab to cycle)"
         let n = ComposerMessage.restoredLength(screen: restored, sent: [msg])
-        check("stop: a message put back in Claude Code's box is cleared in full", n >= msg.unicodeScalars.count && n < msg.unicodeScalars.count + 10, "\(n)")
+        check("stop detection: a restored message is recognized without deleting it", n >= msg.unicodeScalars.count && n < msg.unicodeScalars.count + 10, "\(n)")
         let empty = "❯ \(msg)\n● Once upon a time\n\n\(rule)\n❯ \n\(rule)\n  ? for shortcuts"
         check("stop: the same text higher up in the history doesn't count", ComposerMessage.restoredLength(screen: empty, sent: [msg]) == 0)
         let pasted = "\(rule)\n❯ [Pasted text #1 +40 lines]\n\(rule)\n  ? for shortcuts"
-        check("stop: a long message shown as pasted text is cleared too", ComposerMessage.restoredLength(screen: pasted, sent: [String(repeating: "x\n", count: 40)]) > 80)
+        check("stop detection: a restored long paste is recognized", ComposerMessage.restoredLength(screen: pasted, sent: [String(repeating: "x\n", count: 40)]) > 80)
         check("stop: two messages from one turn are both counted",
               ComposerMessage.restoredLength(screen: restored, sent: [msg, "and make it sad"]) >= msg.unicodeScalars.count + 15)
         check("stop: nothing sent this turn, nothing deleted", ComposerMessage.restoredLength(screen: restored, sent: []) == 0)
@@ -497,6 +518,109 @@ extension SelfTest {
         return TerminalView(app: g.app, launch: .init(workingDirectory: dir.path, command: "/bin/sh -c \(ShellEscape.quote(script))"), handlesChildExit: true)
     }
 
+    /// Two independent byte sinks prove a hidden chat keeps its own transport and timer.
+    static func readerBackgroundQueues(_ dir: URL) {
+        guard let ghostty = GhosttyApp.shared ?? GhosttyApp.start() else { check("background queue: libghostty", false); return }
+        for provider in ["claude", "codex"] {
+            let settings = ChatSettings(file: dir.appendingPathComponent("background-" + provider + ".json"))
+            settings.showChatsAsReader = true
+            let mode = ReaderMode(settings: settings)
+            let app = AppModel()
+            app.transcriptLocations = TranscriptLocations(claude: dir, codex: dir)
+            let project = Project(path: dir.path)
+            let owner = Chat(projectID: project.id, agentID: provider)
+            let other = Chat(projectID: project.id, agentID: provider)
+            owner.sessionID = "fixture-owner"
+            other.sessionID = "fixture-other"
+            let ownerFile = dir.appendingPathComponent("background-" + provider + "-owner.bin")
+            let otherFile = dir.appendingPathComponent("background-" + provider + "-other.bin")
+            let a = recordingTerminal(ghostty, dir: dir, file: ownerFile)
+            let b = recordingTerminal(ghostty, dir: dir, file: otherFile)
+            owner.terminal = a; other.terminal = b
+            app.projects = [project]; app.chats = [owner, other]; app.selectedChatID = owner.id
+            let window = NSWindow(contentRect: NSRect(x: -6000, y: -4000, width: 900, height: 640), styleMask: [.borderless], backing: .buffered, defer: false)
+            window.isReleasedWhenClosed = false
+            let host = NSView(frame: NSRect(x: 0, y: 0, width: 900, height: 640))
+            window.contentView = host
+            a.frame = host.bounds; b.frame = host.bounds
+            host.addSubview(a); host.addSubview(b)
+            let controller = ReaderModeController(model: app, mode: mode, commandCatalog: ReaderCommandCatalog(home: dir))
+            controller.commandDiscoveryEnabled = false
+            controller.statusProvider = { _ in nil }
+            controller.install(in: host, top: host.topAnchor, above: b)
+            window.orderFrontRegardless()
+            defer {
+                owner.terminal = nil; other.terminal = nil
+                a.destroy(); b.destroy(); window.orderOut(nil)
+            }
+            controller.sync(selected: owner)
+            guard waitUntil(10, { controller.refresh(); return controller.composerMode == .ready && TerminalScreen.analyze(b.activeScreenText()).ready }) else {
+                check("background queue: \(provider) fixture is ready", false); continue
+            }
+            func ownerBytes() -> Data { (try? Data(contentsOf: ownerFile)) ?? Data() }
+            func acknowledge(_ text: String) {
+                let entry = ReaderEntry(id: UUID().uuidString, kind: .user, text: text)
+                owner.liveEntries.append(entry)
+                _ = owner.pendingMessages.reconcile([entry])
+            }
+            owner.activity = .working
+            controller.refresh()
+            controller.composer.textView.text = "first background message"
+            let first = controller.send(intent: .queue)
+            controller.composer.textView.text = "second background message"
+            let second = controller.send(intent: .queue)
+            mode.toggle(other)
+            app.selectedChatID = other.id
+            controller.sync(selected: other)
+            controller.composer.textView.text = "Other chat draft"
+            check("background queue: \(provider) switching to a terminal does not pause waiting input",
+                  first && second && !owner.pendingMessages.queuePaused && owner.pendingMessages.entries.count == 2 && ownerBytes().isEmpty)
+            owner.activity = .idle
+            let delivered = waitUntil(6) { ownerBytes().contains(0x0D) && !controller.isTyping }
+            let firstBytes = String(decoding: ownerBytes(), as: UTF8.self)
+            check("background queue: \(provider) timer submits only to the hidden owner",
+                  delivered && firstBytes == "\u{1b}[200~first background message\u{1b}[201~\r" &&
+                  ((try? Data(contentsOf: otherFile)) ?? Data()).isEmpty && controller.composer.textView.string == "Other chat draft")
+            acknowledge("first background message")
+            owner.activity = .needsPermission
+            controller.refresh()
+            RunLoop.main.run(until: Date().addingTimeInterval(1.2))
+            check("background queue: \(provider) permission wait holds remaining input without pausing the queue",
+                  ownerBytes().count == firstBytes.utf8.count && !owner.pendingMessages.queuePaused)
+            owner.activity = .idle
+            app.selectedChatID = nil
+            controller.sync(selected: nil)
+            let next = waitUntil(6) { String(decoding: ownerBytes(), as: UTF8.self).hasSuffix("second background message\u{1b}[201~\r") && !controller.isTyping }
+            check("background queue: \(provider) continues with no selected chat", next && !owner.pendingMessages.queuePaused)
+            acknowledge("second background message")
+
+            app.selectedChatID = owner.id
+            controller.sync(selected: owner)
+            controller.composer.textView.text = "switch during delayed return"
+            let before = ownerBytes().count
+            let sending = controller.send()
+            app.selectedChatID = other.id
+            controller.sync(selected: other)
+            let finished = waitUntil(5) { !controller.isTyping && ownerBytes().last == 0x0D }
+            check("background queue: \(provider) switching during a paste preserves its delayed Return",
+                  sending && finished && String(decoding: ownerBytes().dropFirst(before), as: UTF8.self) == "\u{1b}[200~switch during delayed return\u{1b}[201~\r" &&
+                  !owner.pendingMessages.queuePaused && ((try? Data(contentsOf: otherFile)) ?? Data()).isEmpty)
+            acknowledge("switch during delayed return")
+
+            app.selectedChatID = owner.id
+            controller.sync(selected: owner)
+            controller.composer.textView.text = "background session replacement"
+            let replacementMark = ownerBytes().count
+            let started = controller.send()
+            app.selectedChatID = other.id
+            controller.sync(selected: other)
+            owner.sessionID = "replacement-session"
+            let refused = waitUntil(5) { !controller.isTyping }
+            check("background queue: \(provider) still cancels delayed Return after session replacement",
+                  started && refused && !ownerBytes().dropFirst(replacementMark).contains(0x0D) && owner.pendingMessages.inputNeedsReview)
+        }
+    }
+
     static func readerModeFakeAgent(_ dir: URL) {
         guard let g = GhosttyApp.shared ?? GhosttyApp.start() else { check("reader mode: libghostty", false); return }
         let settings = ChatSettings(file: dir.appendingPathComponent("fake-chat-settings.json"))
@@ -560,6 +684,13 @@ extension SelfTest {
         }
 
         func bytes() -> Data { (try? Data(contentsOf: sent)) ?? Data() }
+        func reviewInputForNextScenario() {
+            // This byte-recording fixture has no editable input buffer. Simulate the explicit
+            // user review action between independent scenarios, never an automatic reset.
+            let beforeReview = bytes().count
+            _ = rm.perform(NSSelectorFromString("reviewedInputPressed"))
+            check("recovery: explicit Input reviewed unlocks without sending", !chat.pendingMessages.inputNeedsReview && bytes().count == beforeReview)
+        }
         // Send: one bracketed paste, then a real Return.
         rm.composer.textView.text = "Explain the build script\nin two lines  \n\n"
         let ok = rm.send()
@@ -618,35 +749,76 @@ extension SelfTest {
         rm.composer.textView.text = "what are these"
         let mark = bytes().count
         let sentFiles = rm.send()
-        let wantFiles = "\u{1b}[200~" + ShellEscape.escape(shot.path) + "\u{1b}[201~" + "\u{1b}[200~ what are these " + ShellEscape.escape(pdf.path) + "\u{1b}[201~\r"
-        let gotFiles = waitUntil(8) { bytes().count > mark && bytes().last == 0x0D }
+        let gotFiles = waitUntil(8) { !rm.isTyping && bytes().count > mark }
         let typedFiles = String(decoding: bytes().suffix(from: mark), as: UTF8.self)
-        check("send: the image goes in as a paste of its own path, then the text and the PDF's path, then Return",
-              sentFiles && gotFiles && typedFiles == wantFiles, typedFiles.debugDescription)
-        check("send: the box empties, chips too", rm.composer.attachments.isEmpty && rm.composer.textView.string.isEmpty && rm.composer.stripScroll.isHidden)
-        // A TIFF is converted to PNG first, and typing waits for it.
+        let failedImage = chat.pendingMessages.entries.last
+        check("send: image timeout stops before text, PDF or Return",
+              sentFiles && gotFiles && typedFiles == "\u{1b}[200~" + ShellEscape.escape(shot.path) + "\u{1b}[201~", typedFiles.debugDescription)
+        check("send: failed image retains recoverable text and attachments",
+              failedImage.map { chat.pendingMessages.stage(id: $0.id) == .failed && chat.pendingMessages.recovery(id: $0.id)?.attachments.map(\.url) == [shot, pdf] } == true)
+        check("send: accepted input moves from composer into recoverable pending state", rm.composer.attachments.isEmpty && rm.composer.textView.string.isEmpty && rm.composer.stripScroll.isHidden)
+        check("send: partial image failure requires input review", chat.pendingMessages.inputNeedsReview)
+        let lockedBytes = bytes().count
+        rm.composer.textView.text = "must wait for review"
+        check("send: locked input refuses another send and retains draft", !rm.send() && bytes().count == lockedBytes && rm.composer.textView.string == "must wait for review")
+        rm.composer.textView.text = ""
+        reviewInputForNextScenario()
+        // Conversion succeeds independently of native acknowledgement. A missing image chip
+        // must still prevent Return after the converted file path has been pasted.
         let tiffFile = dir.appendingPathComponent("scan.tiff")
         try? imageData(.systemGray, width: 2400, height: 1600, type: .tiff).write(to: tiffFile)
         rm.composer.add([ComposerAttachment(url: tiffFile)])
         let mark3 = bytes().count
         rm.send()
-        _ = waitUntil(8) { bytes().count > mark3 && bytes().last == 0x0D }
+        _ = waitUntil(8) { !rm.isTyping && bytes().count > mark3 }
         let typedTIFF = String(decoding: bytes().suffix(from: mark3), as: UTF8.self)
         let pngPath = ShellEscape.escape(PastedImages.folder.path)
-        check("send: a TIFF goes in as the path of a PNG copy, once it's written",
-              typedTIFF.hasPrefix("\u{1b}[200~" + pngPath) && typedTIFF.hasSuffix("scan.png\u{1b}[201~\r"), typedTIFF.debugDescription)
-        // Two sends in a row are typed one after the other, never mixed.
-        rm.composer.add([ComposerAttachment(url: shot)])
+        check("send: TIFF conversion writes a PNG but unconfirmed image never submits",
+              typedTIFF.hasPrefix("\u{1b}[200~" + pngPath) && typedTIFF.hasSuffix("scan.png\u{1b}[201~") && !typedTIFF.contains("\r"), typedTIFF.debugDescription)
+        reviewInputForNextScenario()
+        // The fake terminal deliberately has no image acknowledgement. Use text-only input
+        // for this independent serialized transport check.
+        let mark2 = bytes().count
         rm.composer.textView.text = "first"
         rm.send()
         rm.composer.textView.text = "second"
         rm.send()
-        let mark2 = bytes().count
         _ = waitUntil(8) { String(decoding: bytes().suffix(from: mark2), as: UTF8.self).hasSuffix("second\u{1b}[201~\r") && !rm.isTyping }
         let two = String(decoding: bytes().suffix(from: mark2), as: UTF8.self)
         check("send: a second message waits for the first to finish typing",
-              two == "\u{1b}[200~" + ShellEscape.escape(shot.path) + "\u{1b}[201~\u{1b}[200~ first\u{1b}[201~\r\u{1b}[200~second\u{1b}[201~\r"
-              || String(decoding: bytes().suffix(from: mark), as: UTF8.self).hasSuffix("first\u{1b}[201~\r\u{1b}[200~second\u{1b}[201~\r"), two.debugDescription)
+              two == "\u{1b}[200~first\u{1b}[201~\r\u{1b}[200~second\u{1b}[201~\r", two.debugDescription)
+        check("send: idle sends remain pending until transcript acknowledgement", chat.pendingMessages.entries.contains { $0.text == "second" })
+        // Permission state can change between a paste and its delayed Return.
+        let permissionMark = bytes().count
+        rm.composer.textView.text = "late permission fixture"
+        let permissionStarted = rm.send()
+        chat.activity = .needsPermission
+        chat.activityDetail = "A permission dialog appeared during submission"
+        let permissionStopped = waitUntil(5) { !rm.isTyping }
+        check("send: late permission state cancels delayed Return and locks partial input",
+              permissionStarted && permissionStopped && chat.pendingMessages.inputNeedsReview && !bytes().suffix(from: permissionMark).contains(0x0D))
+        let permissionPending = chat.pendingMessages.entries.last
+        check("send: late permission keeps recoverable original text", permissionPending?.text == "late permission fixture" && permissionPending.map { chat.pendingMessages.stage(id: $0.id) == .failed } == true)
+        chat.activity = .idle
+        chat.activityDetail = ""
+        rm.refresh()
+        reviewInputForNextScenario()
+
+        // A native /resume or fork can change identity during the same delayed submission.
+        let oldSession = chat.sessionID
+        let sessionMark = bytes().count
+        rm.composer.textView.text = "session replacement fixture"
+        let sessionStarted = rm.send()
+        chat.sessionID = "fixture-replacement-session"
+        let sessionStopped = waitUntil(5) { !rm.isTyping }
+        check("send: native session change cancels Return without replay",
+              sessionStarted && sessionStopped && chat.pendingMessages.inputNeedsReview && !bytes().suffix(from: sessionMark).contains(0x0D))
+        check("send: native session change retains failed input", chat.pendingMessages.entries.last.map { $0.text == "session replacement fixture" && chat.pendingMessages.stage(id: $0.id) == .failed } == true)
+        chat.sessionID = oldSession
+        rm.refresh()
+        reviewInputForNextScenario()
+        // Isolate the following queue scenario. This is a fixture reset, not app Stop behavior.
+        chat.pendingMessages.removeAll()
         // Each chat keeps its own attachments.
         let other = Chat(projectID: project.id, agentID: "claude")
         other.terminal = tv
@@ -690,17 +862,19 @@ extension SelfTest {
         check("queue send: delivery while another chat is selected clears the pending state", chat.pendingMessages.isEmpty)
         model.chats = [chat]
 
-        // Stop during a delayed paste cancels its Return as well as its pending bubble.
+        // Stop during a delayed paste cancels Return and preserves a recoverable copy.
         rm.composer.textView.text = "cancel before return"
         let cancelMark = bytes().count
         _ = rm.send()
         let cancelled = rm.stop()
         RunLoop.main.run(until: Date().addingTimeInterval(0.8))
-        check("queue send: Stop drops the pending bubble and cancels the delayed Return",
-              cancelled && chat.pendingMessages.isEmpty && !rm.isTyping && !bytes().suffix(from: cancelMark).contains(0x0D))
+        check("queue send: Stop retains input and cancels the delayed Return",
+              cancelled && chat.pendingMessages.entries.contains { $0.text == "cancel before return" && (chat.pendingMessages.stage(id: $0.id) == .failed || chat.pendingMessages.stage(id: $0.id) == .unconfirmed) }
+              && !rm.isTyping && !bytes().suffix(from: cancelMark).contains(0x0D))
         chat.activity = .idle
         rm.refresh()
 
+        reviewInputForNextScenario()
         // Stop: Esc, only while working.
         let before = bytes().count
         check("stop: does nothing while the agent isn't working", rm.stop() == false)
@@ -743,6 +917,10 @@ extension SelfTest {
         check("stop: Backspace reaches the terminal as DEL", waitUntil(5) { bytes().count == beforeBS + 3 && bytes().suffix(3).allSatisfy { $0 == 0x7F } },
               bytes().suffix(4).map { String(format: "%02x", $0) }.joined(separator: " "))
 
+        // End the preceding stopped-turn scenario before testing permission banners.
+        chat.activity = .idle
+        rm.refresh()
+        reviewInputForNextScenario()
         // The banner: a permission prompt is waiting.
         chat.activity = .needsPermission
         chat.activityDetail = "Wants to run Bash: npm test"
@@ -955,6 +1133,8 @@ extension SelfTest {
             ComposerAttachment(url: attachDir),
         ], text: "")
         check("snapshot: the message box with one picture, and with several files and a long name, in dark and light", oneImage && several)
+        check("snapshot: literal multiline command with image draft in both appearances",
+              attachShots("composer-command-multiline", [ComposerAttachment(url: photo)], text: "/plan Review this image\nDescribe the smallest useful change."))
         rm.composer.setAttachments([])
         rm.composer.textView.text = ""
         _ = waitUntil(3) { (js(rm.reader!.page, "getComputedStyle(document.body).color") as? String) == "rgb(227, 227, 227)" }
@@ -964,6 +1144,29 @@ extension SelfTest {
         chat.activitySince = Date().addingTimeInterval(-14)
         rm.refresh()
         let working = shot("reader-mode-working.png")
+        for (name, stage, detail) in [
+            ("held", PendingReaderMessages.Stage.waiting, "Paused for review"),
+            ("unconfirmed", PendingReaderMessages.Stage.unconfirmed, "Delivery was not acknowledged. Check the terminal before restoring."),
+            ("failed", PendingReaderMessages.Stage.failed, "The image was not confirmed. Restore the input to retry."),
+        ] {
+            let id = "snapshot-" + name
+            chat.pendingMessages.removeAll()
+            chat.pendingMessages.enqueue(id: id, text: "Check the keyboard flow after this turn", files: [], agentID: "claude", existing: chat.allEntries, stage: stage, sessionID: chat.sessionID)
+            chat.pendingMessages.update(id: id, stage: stage, detail: detail)
+            chat.pendingMessages.queuePaused = true
+            chat.pendingMessages.inputNeedsReview = stage != .waiting
+            model.readerAppend.send((chat.id, chat.pendingMessages.entries))
+            rm.refresh()
+            let rendered = attachShots("reader-mode-" + name + "-queue-draft", [ComposerAttachment(url: pdf)], text: "Keep this draft while I review the queued message.")
+            check("snapshot: " + name + " queue, delivery controls and draft render in both appearances", rendered)
+            // Remove the fixture bubble before the next distinct state capture.
+            _ = js(rm.reader!.page, "document.querySelector('section.entry[data-id=\"" + id + "\"]')?.remove(); 0")
+        }
+        chat.pendingMessages.removeAll()
+        chat.pendingMessages.queuePaused = false
+        chat.pendingMessages.inputNeedsReview = false
+        rm.composer.textView.text = ""
+        rm.composer.setAttachments([])
 
         chat.activity = .needsPermission
         chat.activityDetail = "Wants to run Bash: npm test"

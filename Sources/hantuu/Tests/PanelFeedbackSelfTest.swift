@@ -63,7 +63,7 @@ extension SelfTest {
             check("panel feedback \(agent): receipt consumes once", pending.reconcile(fresh).allSatisfy { $0.replacesPendingID == nil })
 
             // First discovery attaches the identity for the send already in progress.
-            // A later switch must still discard the previous conversation's queue.
+            // A later switch retains recovery without accepting receipts from the new conversation.
             let app = AppModel()
             let project = Project(path: dir.path)
             let chat = Chat(projectID: project.id, agentID: agent)
@@ -80,7 +80,10 @@ extension SelfTest {
             check("panel feedback \(agent): first session acknowledges exactly once", receipt.first?.replacesPendingID == "first-review" && chat.pendingMessages.isEmpty)
             chat.pendingMessages.enqueue(id: "old-review", text: text, files: [], agentID: agent, existing: [])
             app.followSession(chat, session: .init(id: "22222222-2222-4222-8222-222222222222", path: nextPath.path), verifiedCodex: agent == "codex")
-            check("panel feedback \(agent): another session drops old pending feedback", chat.pendingMessages.isEmpty)
+            check("panel feedback \(agent): another session holds recoverable feedback without replay",
+                  chat.pendingMessages.queuePaused && chat.pendingMessages.stage(id: "old-review") == .failed)
+            check("panel feedback \(agent): new session cannot acknowledge old feedback",
+                  chat.pendingMessages.reconcile(user("wrong-session-receipt")).allSatisfy { $0.replacesPendingID == nil })
             chat.follower?.stop()
         }
         let url = dir.appendingPathComponent("panel-feedback-fixture.json")

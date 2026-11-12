@@ -6,7 +6,7 @@ import GhosttyKit
 /// parsing and selection rules below. No fixture test launches an agent or reads its home.
 enum LiveCheckRules {
     static let agents = ["claude", "codex"]
-    static let features = ["slash", "queued", "send-now", "relaunch", "subagents", "reader", "review", "sidebar", "side"]
+    static let features = ["slash", "queued", "send-now", "relaunch", "subagents", "reader", "review", "sidebar", "side", "composer", "command-arguments"]
 
     /// Codex walks ancestors itself, so a Git ceiling environment variable is insufficient.
     static func gitAncestor(_ folder: URL, exists: (URL) -> Bool = { FileManager.default.fileExists(atPath: $0.path) }) -> URL? {
@@ -20,7 +20,7 @@ enum LiveCheckRules {
     }
 
     static func codexModel(for feature: String, configured: String?) -> String {
-        configured ?? (feature == "subagents" ? "gpt-6.1-sol" : "gpt-6-luna")
+        configured ?? (["subagents", "send-now"].contains(feature) ? "gpt-6.1-sol" : "gpt-6-luna")
     }
 
     static func selection(_ value: String?, allowed: [String]) -> [String]? {
@@ -64,8 +64,8 @@ enum LiveCheckRules {
         return (screenBusy || freshTurn) && !typing && composerWorking
     }
 
-    /// A turn-start event can precede generation. Queue only once the native screen shows
-    /// count output, so an immediately accepted steer cannot replace an unstarted count.
+    /// Claude's long-response probes wait for generated output before injecting input.
+    /// Codex uses a fresh busy turn and still must expose its native Send now action.
     static func countOutputStarted(_ screen: String) -> Bool {
         screen.range(of: #"(?m)^[ \t]*[0-9]+ - this is the next number in the sequence\.[ \t]*$"#,
                      options: .regularExpression) != nil
@@ -206,6 +206,7 @@ extension SelfTest {
         check("live checks: child probe uses Sol unless its model is explicitly overridden",
               LiveCheckRules.codexModel(for: "subagents", configured: nil) == "gpt-6.1-sol" &&
               LiveCheckRules.codexModel(for: "queued", configured: nil) == "gpt-6-luna" &&
+              LiveCheckRules.codexModel(for: "send-now", configured: nil) == "gpt-6.1-sol" &&
               LiveCheckRules.codexModel(for: "subagents", configured: "gpt-6-astra") == "gpt-6-astra")
     }
 
@@ -214,7 +215,7 @@ extension SelfTest {
         guard let raw = env["HANTUU_LIVE"], !raw.isEmpty else { return }
         guard let agents = LiveCheckRules.selection(env["HANTUU_LIVE_AGENTS"], allowed: LiveCheckRules.agents),
               let features = LiveCheckRules.selection(env["HANTUU_LIVE_FEATURES"], allowed: LiveCheckRules.features) else {
-            check("live configuration: selectors", false, "Use claude,codex and slash,queued,send-now,relaunch,subagents,reader,review,sidebar,side.")
+            check("live configuration: selectors", false, "Use claude,codex and slash,queued,send-now,relaunch,subagents,reader,review,sidebar,side,composer,command-arguments.")
             return
         }
         let folder = URL(fileURLWithPath: raw).standardizedFileURL.resolvingSymlinksInPath()
@@ -254,7 +255,7 @@ extension SelfTest {
                     continue
                 }
                 let probe = LiveCheckSession(agent: agent, feature: feature, folder: folder, dir: dir,
-                                             codexModel: LiveCheckRules.codexModel(for: feature, configured: env["HANTUU_LIVE_CODEX_MODEL"]))
+                                             codexModel: LiveCheckRules.codexModel(for: feature, configured: env["HANTUU_LIVE_CODEX_MODEL"]), agents: found)
                 defer { probe.finish() }
                 guard probe.start() else { continue }
                 switch feature {
@@ -267,6 +268,8 @@ extension SelfTest {
                 case "review": probe.reviewFeedback()
                 case "sidebar": probe.sidebar()
                 case "side": probe.sideQuestions()
+                case "composer": probe.composerParity()
+                case "command-arguments": probe.commandArguments()
                 default: break
                 }
             }
@@ -284,6 +287,7 @@ private final class LiveCheckSession {
     let dir: URL
     let codexModel: String
     private var model: AppModel?
+    private let discoveredAgents: [AgentDefinition]
     private var chatID: UUID?
     private var info: SessionInfo?
     private var center: StatusCenter?
@@ -301,12 +305,13 @@ private final class LiveCheckSession {
     var terminal: TerminalView? { chat?.terminal }
     var screen: String { terminal?.activeScreenText() ?? "" }
 
-    init(agent: String, feature: String, folder: URL, dir: URL, codexModel: String) {
+    init(agent: String, feature: String, folder: URL, dir: URL, codexModel: String, agents: [AgentDefinition]) {
         self.agent = agent
         self.feature = feature
         self.folder = folder
         self.dir = dir
         self.codexModel = codexModel
+        self.discoveredAgents = agents
     }
 
     private func report(_ name: String, _ ok: Bool, _ detail: String = "") {
@@ -352,6 +357,7 @@ private final class LiveCheckSession {
     private func startSession() -> Bool {
         guard SessionHelper.prepare() else { report("private helper directory", false); return false }
         let app = AppModel()
+        app.agents = discoveredAgents
         model = app
         let project = Project(path: folder.path)
         let chat = Chat(projectID: project.id, agentID: agent)
@@ -607,7 +613,7 @@ private final class LiveCheckSession {
         }
         report("/model opens the real picker and peeks terminal", peeked, String(screen.suffix(450)))
         guard peeked, safe(allowingMenu: true) else { return }
-        terminal?.pressEscape()
+        dismissPicker()
         let returned = wait(15, allowingMenu: true) {
             TerminalScreen.analyze(self.screen).menu == nil && self.mode?.showsReader(chat) == true &&
                 self.window?.firstResponder === self.reader?.composer.textView
@@ -643,6 +649,15 @@ private final class LiveCheckSession {
                notices.isEmpty ? "Terminal peek; no transcript notice." : notices)
     }
 
+    private func dismissPicker() {
+        let wasReasoning = TerminalScreen.codexPicker(screen) == .reasoning
+        terminal?.pressEscape()
+        if wasReasoning {
+            let parentPicker = wait(5, allowingMenu: true) { TerminalScreen.codexPicker(self.screen) != .reasoning }
+            if parentPicker, TerminalScreen.codexPicker(screen) == .model { terminal?.pressEscape() }
+        }
+    }
+
     func queued() {
         let first = "Without tools or file access, write every integer from 1 to 400, one per line. After each integer write: this is the next number in the sequence. Do not abbreviate, summarize, or skip any lines. Finish with done."
         let token = "queue" + UUID().uuidString.prefix(8).lowercased()
@@ -671,8 +686,8 @@ private final class LiveCheckSession {
         let pending = chat.pendingMessages.entries.filter { $0.text == second && $0.pending == true }
         report("second send immediately enters pending queue", queued && pending.count == 1,
                "Matching pending entries=\(pending.count).")
-        let shown = wait(3) { self.countUser(second, pending: true) == 1 && self.body().contains("Queued") }
-        report("reader shows one Queued message", shown, String(body().suffix(450)))
+        let shown = wait(3) { self.countUser(second, pending: true) == 1 && (self.body().contains("Sent to agent") || self.body().contains("Preparing to send")) }
+        report("reader shows one pending provider submission", shown, String(body().suffix(450)))
         let delivered = wait(240) {
             chat.allEntries.filter { $0.kind == .user && $0.text == second }.count == 1 &&
                 !chat.pendingMessages.entries.contains { $0.text == second } && self.reply(token)
@@ -686,7 +701,8 @@ private final class LiveCheckSession {
 
     func sideQuestions() {
         guard let app = model, let chat, let host,
-              let executable = app.agents.first(where: { $0.id == agent })?.path else {
+              let executable = app.agents.first(where: { $0.id == agent })?.path,
+              FileManager.default.isExecutableFile(atPath: executable) else {
             report("side CLI is available", false)
             return
         }
@@ -772,7 +788,8 @@ private final class LiveCheckSession {
     func sendNow() {
         let token = "received" + UUID().uuidString.prefix(8).lowercased()
         let finished = "finished" + UUID().uuidString.prefix(8).lowercased()
-        let first = "Without tools or file access, write every integer from 1 to 2000, one per line. Use exactly this line format: <integer> - this is the next number in the sequence. Do not abbreviate, summarize, or skip any lines. Finish with \(finished)."
+        let count = agent == "codex" ? 400 : 2000
+        let first = "Without tools or file access, write every integer from 1 to \(count), one per line. Use exactly this line format: <integer> - this is the next number in the sequence. Do not abbreviate, summarize, or skip any lines. Finish with \(finished)."
         let second = "Stop counting now. Without tools, reply only \(token)."
         guard let chat else { return }
         func completedCount() -> Bool {
@@ -785,7 +802,7 @@ private final class LiveCheckSession {
         let busy = sent && wait(60) {
             let state = self.center?.state(of: chat.id)
             let screenBusy = TerminalScreen.analyze(self.screen).busy
-            guard !completedCount(), LiveCheckRules.countOutputStarted(self.screen), LiveCheckRules.canQueue(screenBusy: screenBusy,
+            guard !completedCount(), (self.agent == "codex" || LiveCheckRules.countOutputStarted(self.screen)), LiveCheckRules.canQueue(screenBusy: screenBusy,
                 turnActive: state?.turnActive == true, startedAt: state?.turnStartedAt, sentAt: sentAt,
                 typing: self.reader?.isTyping != false, composerWorking: self.reader?.composerMode.isWorking == true) else { return false }
             busyEvidence = "screen busy=\(screenBusy), turn active=\(state?.turnActive == true); " + String(self.screen.suffix(450))
@@ -854,14 +871,6 @@ private final class LiveCheckSession {
         guard !wrong else { return }
 
         for busy in [false, true] {
-            if busy {
-                let sent = send("Without tools, count from 1 to 90, one number per line, then say done.")
-                let working = sent && wait(45) {
-                    TerminalScreen.analyze(self.screen).busy && self.reader?.isTyping == false && self.reader?.composerMode.isWorking == true
-                }
-                report("review queue starts during real work", working)
-                guard working else { return }
-            }
             let token = "review" + UUID().uuidString.prefix(8).lowercased()
             let draft = "Keep my unfinished composer draft " + token
             reader.composer.textView.text = draft
@@ -870,16 +879,36 @@ private final class LiveCheckSession {
                 body: "This is a delivery test. Do not use tools or change files. Reply only \(token).", revision: "fixture-1")
             var retained = [c]
             var receipts = 0
-            let sent = service.send(comments: retained, folder: folder.path, chatID: chat.id, model: app) { delivered in
-                receipts += 1
-                retained.removeAll { delivered.contains($0) }
+            func submitReview() -> Bool {
+                reader.composer.textView.text = draft
+                return service.send(comments: retained, folder: folder.path, chatID: chat.id, model: app) { delivered in
+                    receipts += 1
+                    retained.removeAll { delivered.contains($0) }
+                }
             }
+            var sent = false
+            if busy {
+                let began = Date()
+                let workingPrompt = "Without tools or file access, write every integer from 1 to 2000, one per line. Use exactly this line format: <integer> - this is the next number in the sequence. Do not abbreviate, summarize, or skip any lines. Finish with done."
+                let started = send(workingPrompt)
+                let working = started && wait(60) {
+                    let state = self.center?.state(of: chat.id)
+                    guard (self.agent == "codex" || LiveCheckRules.countOutputStarted(self.screen)),
+                          LiveCheckRules.canQueue(screenBusy: TerminalScreen.analyze(self.screen).busy,
+                            turnActive: state?.turnActive == true, startedAt: state?.turnStartedAt, sentAt: began,
+                            typing: reader.isTyping, composerWorking: reader.composerMode.isWorking) else { return false }
+                    sent = submitReview()
+                    return true
+                }
+                report("review queue starts during real work", working, String(screen.suffix(450)))
+                guard working else { return }
+            } else { sent = submitReview() }
             let batch = service.latest(for: chat.id)
             report("\(busy ? "queued" : "idle") review retains comments and draft before acknowledgement",
                 sent && retained == [c] && reader.composer.textView.string == draft && receipts == 0 &&
                 batch?.state == (busy ? .queued : .sending) && chat.pendingMessages.entries.contains { $0.id == batch?.id })
             guard sent, let batch else { return }
-            let delivered = wait(120) {
+            let delivered = wait(busy ? 300 : 120) {
                 service.latest(for: chat.id)?.state == .delivered && self.reply(token) &&
                 self.reader?.composerMode == .ready && !TerminalScreen.analyze(self.screen).busy
             }
@@ -919,6 +948,7 @@ private final class LiveCheckSession {
                released && SessionHelper.info(id)?.child == previous.child,
                "detached=\(detached), model released=\(oldModel == nil), reader released=\(oldReader == nil), transcript reader released=\(oldTranscriptReader == nil), page released=\(oldPage == nil), peek released=\(oldPeek == nil).")
         let restored = AppModel()
+        restored.agents = discoveredAgents
         model = restored
         restored.load()
         restored.select(id)
@@ -1084,6 +1114,277 @@ private final class LiveCheckSession {
         _ = app.sidebarKey(115)
         _ = app.sidebarKey(119)
         report("sidebar Home and End stay on visible rows", app.visibleSidebarTargets.contains(app.sidebarCursor ?? .pinned))
+    }
+
+    /// Opt-in only. Exercises the mounted controller against a disposable provider session.
+    /// No picker option, trust dialog, permission request or update prompt is accepted.
+    func composerParity() {
+        guard let reader, let chat, safe() else { report("mounted composer", false); return }
+        func descendants(_ view: NSView) -> [NSView] {
+            [view] + view.subviews.flatMap { descendants($0) }
+        }
+        guard let controls = descendants(reader.root).compactMap({ $0 as? ComposerAgentControlsView }).first else {
+            report("native controls mounted", false); return
+        }
+        let draft = "Unsent composer draft " + UUID().uuidString
+        let selection = NSRange(location: 7, length: 8)
+        reader.composer.textView.text = draft
+        reader.composer.textView.setSelectedRange(selection)
+
+        for action in [ComposerAgentControlAction.model, .effort, .permissions] {
+            guard safe(), reader.composerMode == .ready,
+                  let button = descendants(controls).compactMap({ $0 as? NSButton }).first(where: { $0.tag == action.rawValue }),
+                  button.isEnabled else { report("\(action.label) available at ready boundary", false); return }
+            button.performClick(nil)
+            let marker = action == .permissions ? "permission" : action == .effort && agent == "claude" ? "effort" : "model"
+            let opened = wait(15, allowingMenu: true) {
+                self.mode?.isPeeking(chat) == true && self.screen.lowercased().contains(marker) &&
+                    TerminalScreen.analyze(self.screen).menu != nil && !reader.isTyping
+            }
+            report("\(action.label) opens actual native picker", opened, String(screen.suffix(450)))
+            guard opened, safe(allowingMenu: true) else { return }
+            report("\(action.label) retains unsent text and caret", reader.composer.textView.string == draft &&
+                   reader.composer.textView.selectedRange() == selection)
+            dismissPicker()
+            let returned = wait(15, allowingMenu: true) {
+                TerminalScreen.analyze(self.screen).menu == nil && self.mode?.showsReader(chat) == true &&
+                    reader.composerMode == .ready && self.window?.firstResponder === reader.composer.textView
+            }
+            report("\(action.label) cancellation restores reader focus", returned, String(screen.suffix(450)))
+            guard returned else { return }
+        }
+
+        // Use an existing checkout candidate without writing into the trusted probe folder.
+        if let item = try? ComposerMentionSearch.items(root: folder, query: "").first(where: {
+            ($0.relativePath as NSString).lastPathComponent.rangeOfCharacter(from: .whitespacesAndNewlines) == nil
+        }) {
+            let name = (item.relativePath as NSString).lastPathComponent
+            reader.composer.textView.text = "Inspect @" + name
+            reader.composer.textView.setSelectedRange(NSRange(location: (reader.composer.textView.string as NSString).length, length: 0))
+            reader.composer.textView.refreshMentions(force: true)
+            let found = wait(8) { reader.composer.textView.mentionSuggestions.contains(where: { $0.relativePath == item.relativePath }) }
+            report("@ search resolves an actual checkout path", found)
+            guard found, let index = reader.composer.textView.mentionSuggestions.firstIndex(where: { $0.relativePath == item.relativePath }) else { return }
+            reader.composer.textView.completeMention(at: index)
+            report("@ completion inserts a path without submitting", reader.composer.textView.string.contains(item.insertion.trimmingCharacters(in: .whitespaces)) &&
+                   !chat.allEntries.contains(where: { $0.kind == .user && $0.text.contains(item.relativePath) }))
+        } else {
+            report("SKIP @ live search: trusted folder has no searchable Git candidate", true)
+        }
+        reader.composer.textView.text = ""
+
+        let missingURL = dir.appendingPathComponent("missing-\(UUID().uuidString).png")
+        let missingPrompt = "Unsent missing attachment " + UUID().uuidString
+        let priorPermit = reader.permitsSubmit
+        var transportAttempted = false
+        reader.permitsSubmit = { terminal in transportAttempted = true; return priorPermit(terminal) }
+        reader.composer.setAttachments([ComposerAttachment(url: missingURL)])
+        let missingAccepted = send(missingPrompt)
+        let failedID = chat.pendingMessages.entries.first(where: { $0.text == missingPrompt })?.id
+        let retained = missingAccepted && wait(5) {
+            guard let failedID else { return false }
+            return chat.pendingMessages.stage(id: failedID) == .failed && !reader.isTyping
+        }
+        reader.permitsSubmit = priorPermit
+        let recovery = failedID.flatMap { chat.pendingMessages.recovery(id: $0) }
+        report("missing attachment fails before terminal input and retains recovery", retained && !transportAttempted &&
+               recovery?.text == missingPrompt && recovery?.attachments.first?.url == missingURL && countUser(missingPrompt) == 0)
+        guard retained, !transportAttempted else { return }
+
+        // A small deterministic bitmap is test input, not generated product art.
+        let imageURL = dir.appendingPathComponent("composer-\(agent)-fixture.png")
+        guard let bitmap = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 16, pixelsHigh: 16,
+                                           bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true,
+                                           isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0) else {
+            report("image fixture allocated", false); return
+        }
+        for y in 0..<16 { for x in 0..<16 { bitmap.setColor(.systemBlue, atX: x, y: y) } }
+        guard let png = bitmap.representation(using: .png, properties: [:]), (try? png.write(to: imageURL)) != nil else {
+            report("image fixture written in test output", false); return
+        }
+        let imageToken = "image" + UUID().uuidString.prefix(8).lowercased()
+        let imagePrompt = "Without tools, inspect the attached test image and reply only \(imageToken)."
+        reader.composer.setAttachments([ComposerAttachment(url: imageURL)])
+        let imageSent = send(imagePrompt)
+        let imageSeen = imageSent && wait(120) {
+            self.reply(imageToken) && reader.composerMode == .ready &&
+                chat.allEntries.contains { $0.kind == .user && $0.text.contains(imageToken) && !$0.images.isEmpty }
+        }
+        report("image receives native acknowledgement, transcript image and reply", imageSeen,
+               "Requires an actual user transcript image, not a path echo. \(String(screen.suffix(450)))")
+        guard imageSeen else { return }
+
+        reader.refresh()
+        reader.composer.textView.text = draft
+        let recallSelection = NSRange(location: 0, length: 0)
+        reader.composer.textView.setSelectedRange(recallSelection)
+        let usersBeforeRecall = chat.allEntries.filter { $0.kind == .user }.count
+        func recallKey(_ code: UInt16, _ character: String) -> Bool {
+            guard let event = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [],
+                                              timestamp: 0, windowNumber: window?.windowNumber ?? 0,
+                                              context: nil, characters: character, charactersIgnoringModifiers: character,
+                                              isARepeat: false, keyCode: code) else { return false }
+            reader.composer.textView.keyDown(with: event)
+            return true
+        }
+        let recalled = recallKey(126, String(UnicodeScalar(NSUpArrowFunctionKey)!))
+        report("Up recalls actual latest user prompt", recalled && reader.composer.textView.string == imagePrompt)
+        reader.composer.textView.setSelectedRange(NSRange(location: (reader.composer.textView.string as NSString).length, length: 0))
+        let returnedDraft = recallKey(125, String(UnicodeScalar(NSDownArrowFunctionKey)!))
+        report("Down restores draft and caret without sending", returnedDraft && reader.composer.textView.string == draft &&
+               reader.composer.textView.selectedRange() == recallSelection && !reader.isTyping &&
+               chat.allEntries.filter { $0.kind == .user }.count == usersBeforeRecall)
+
+        let busyPrompt = "Without tools, count slowly from 1 to 300, one number per line, spelling out each number and its square."
+        let queuedPrompt = "Without tools, reply only held" + UUID().uuidString.prefix(8).lowercased() + "."
+        let busySent = send(busyPrompt)
+        let busy = busySent && wait(45) {
+            reader.composerMode.isWorking && TerminalScreen.analyze(self.screen).busy && !reader.isTyping
+        }
+        report("active turn observed before explicit Queue", busy)
+        guard busy else { return }
+        reader.composer.textView.text = queuedPrompt
+        let queued = reader.send(intent: .queue)
+        let queuedID = chat.pendingMessages.entries.first(where: { $0.text == queuedPrompt })?.id
+        report("Queue retains message before provider submission", queued && queuedID != nil &&
+               queuedID.map { chat.pendingMessages.stage(id: $0) == .waiting } == true && countUser(queuedPrompt) == 0)
+        guard queued, let queuedID, reader.composerMode.isWorking else { return }
+        reader.composer.textView.text = draft
+        reader.composer.textView.setSelectedRange(selection)
+        let stopped = reader.stop()
+        let settled = stopped && wait(30) { !TerminalScreen.analyze(self.screen).busy && !reader.isTyping }
+        report("Stop holds reader queue without sending it", settled && chat.pendingMessages.queuePaused &&
+               chat.pendingMessages.stage(id: queuedID) == .waiting && countUser(queuedPrompt) == 0)
+        guard settled, chat.pendingMessages.queuePaused, let id = chatID, let previous = SessionHelper.info(id) else { return }
+        let quiet = pause(3)
+        report("held queue stays unsent after ready boundary", quiet && countUser(queuedPrompt) == 0 &&
+               chat.pendingMessages.stage(id: queuedID) == .waiting)
+        guard quiet else { return }
+        // Text/selection changes have had the debounce window above to persist. sync(nil)
+        // hides the reader and stops its timer before destroying the app objects.
+        _ = reader.sync(selected: nil)
+        model?.save()
+        unmount()
+        let detached = SelfTest.waitUntil(10) { SessionHelper.info(id)?.attached == false }
+        report("composer relaunch detaches owned session", detached)
+        guard detached else { return }
+        let restored = AppModel()
+        restored.agents = discoveredAgents
+        model = restored
+        restored.load()
+        restored.select(id)
+        mount()
+        let reattached = wait(60) {
+            SessionHelper.info(id)?.child == previous.child && SessionHelper.info(id)?.attached == true &&
+                self.reader?.composer.textView.string == draft
+        }
+        report("relaunch restores unsent draft and caret", reattached && self.reader?.composer.textView.selectedRange() == selection)
+        guard reattached, let restoredChat = self.chat else { return }
+        let stillQuiet = pause(3)
+        report("relaunch retains paused queue without replay", stillQuiet && restoredChat.pendingMessages.queuePaused &&
+               restoredChat.pendingMessages.stage(id: queuedID) == .waiting && countUser(queuedPrompt) == 0)
+        guard stillQuiet, let activeReader = self.reader else { return }
+        let planReady = wait(10) { activeReader.composerMode == .ready && !activeReader.isTyping }
+        guard planReady, safe(),
+              let newControls = descendants(activeReader.root).compactMap({ $0 as? ComposerAgentControlsView }).first,
+              let planButton = descendants(newControls).compactMap({ $0 as? NSButton }).first(where: { $0.tag == ComposerAgentControlAction.plan.rawValue }),
+              planButton.isEnabled else { report("Plan control available after relaunch", false); return }
+        planButton.performClick(nil)
+        let enteredPlan = wait(15, allowingMenu: true) {
+            guard !activeReader.isTyping else { return false }
+            let parsed = newControls.displayedState?.plan
+            if parsed?.text == "On", parsed?.evidence == .terminalFooter { return true }
+            // Codex's native mode indicator is a footer, not assistant prose or a proposed plan.
+            return self.screen.split(whereSeparator: \.isNewline).suffix(4).contains { raw in
+                let line = raw.trimmingCharacters(in: .whitespaces).lowercased()
+                return line == "plan mode" || line.hasPrefix("plan mode (") || line.hasPrefix("⏸ plan mode on (")
+            }
+        }
+        report("Plan action produces confirmed native mode indicator", enteredPlan, String(screen.suffix(450)))
+        report("Plan action preserves draft, caret and paused queue", enteredPlan &&
+               activeReader.composer.textView.string == draft && activeReader.composer.textView.selectedRange() == selection &&
+               restoredChat.pendingMessages.queuePaused && countUser(queuedPrompt) == 0)
+    }
+
+    /// A separate disposable session because compaction and Plan change session state.
+    /// Claude /compact accepts summary instructions. Codex /plan explicitly supports pasted
+    /// arguments and images. Claude's image case uses /plan's prompt path, not compaction.
+    func commandArguments() {
+        guard let reader, let chat, safe() else { report("command probe ready", false); return }
+        let seedToken = "seed" + UUID().uuidString.prefix(8).lowercased()
+        let seeded = send("Without tools, reply only \(seedToken).") && wait(120) {
+            self.reply(seedToken) && reader.composerMode == .ready && !reader.isTyping
+        }
+        report("seed conversation exists before compaction", seeded)
+        guard seeded else { return }
+
+        let imageURL = dir.appendingPathComponent("command-arguments-\(agent).png")
+        guard let bitmap = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 16, pixelsHigh: 16,
+                                           bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true,
+                                           isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0) else {
+            report("command image fixture allocated", false); return
+        }
+        for y in 0..<16 { for x in 0..<16 { bitmap.setColor(.systemBlue, atX: x, y: y) } }
+        guard let png = bitmap.representation(using: .png, properties: [:]), (try? png.write(to: imageURL)) != nil else {
+            report("command image fixture written", false); return
+        }
+        for attachImage in [false, true] {
+            guard safe(), reader.composerMode == .ready else { report("next command ready", false); return }
+            let previousIDs = Set(chat.allEntries.map(\.id))
+            let transcriptOffset = chat.transcriptPath.flatMap { try? Data(contentsOf: URL(fileURLWithPath: $0)).count } ?? 0
+            let baselineMarks = ComposerMessage.imageMarks(screen)
+            var nativeImageSeen = false
+            let previousPermit = reader.permitsSubmit
+            reader.permitsSubmit = { terminal in
+                if ComposerMessage.imageMarks(terminal.activeScreenText()) > baselineMarks { nativeImageSeen = true }
+                return previousPermit(terminal)
+            }
+            defer { reader.permitsSubmit = previousPermit }
+            reader.composer.setAttachments(attachImage ? [ComposerAttachment(url: imageURL)] : [])
+            let usesPlan = agent == "codex" || attachImage
+            let token = "planned" + UUID().uuidString.prefix(8).lowercased()
+            let command = usesPlan
+                ? "/plan Do not use tools or change files.\nReply only \(token)."
+                : "/compact Preserve the conversation token \(seedToken).\nKeep the summary brief. Do not use tools or change files."
+            var currentPlanConfirmed = false
+            let accepted = send(command)
+            let dispatched = accepted && wait(120) {
+                if usesPlan {
+                    if self.agent == "codex", let path = chat.transcriptPath,
+                       let bytes = try? Data(contentsOf: URL(fileURLWithPath: path)), bytes.count >= transcriptOffset {
+                        let records = bytes.split(separator: 10).map { Data($0) }
+                        let parsed = ComposerAgentControlsParser.snapshot(provider: .codex, sessionID: chat.sessionID, records: records)
+                        let newContext = bytes.dropFirst(transcriptOffset).split(separator: 10).contains { line in
+                            guard let object = (try? JSONSerialization.jsonObject(with: Data(line))) as? [String: Any],
+                                  object["type"] as? String == "turn_context",
+                                  let payload = object["payload"] as? [String: Any],
+                                  let mode = payload["collaboration_mode"] as? [String: Any] else { return false }
+                            return mode["mode"] as? String == "plan"
+                        }
+                        currentPlanConfirmed = currentPlanConfirmed || (newContext && parsed.plan?.text == "On")
+                    } else if self.agent == "claude" {
+                        let parsed = ComposerAgentControlsParser.snapshot(provider: .claude, sessionID: chat.sessionID, screen: self.screen)
+                        currentPlanConfirmed = currentPlanConfirmed || (parsed.plan?.text == "On" && parsed.plan?.evidence == .terminalFooter)
+                    }
+                    return currentPlanConfirmed && self.reply(token) && !reader.isTyping && !TerminalScreen.analyze(self.screen).busy
+                }
+                return chat.allEntries.contains { !previousIDs.contains($0.id) && $0.kind == .notice && $0.text == "Conversation compacted" } &&
+                    !reader.isTyping && !TerminalScreen.analyze(self.screen).busy
+            }
+            let suffix = attachImage ? "with image" : "without image"
+            report("multiline \(usesPlan ? "/plan" : "/compact") dispatches natively \(suffix)", dispatched,
+                   "Requires native mode plus reply, or a new provider compaction event. Assistant agreement alone cannot pass. \(String(screen.suffix(450)))")
+            if attachImage { report("native image chip acknowledged before command submission", dispatched && nativeImageSeen) }
+            guard dispatched else {
+                report("no automatic command retry or confirmation", true,
+                       "Unsupported syntax, a confirmation, or missing native state evidence leaves this check failed.")
+                return
+            }
+            if mode?.isPeeking(chat) == true, safe(), TerminalScreen.analyze(screen).menu == nil { reader.backToReader() }
+            let ready = wait(15) { reader.composerMode == .ready }
+            report("native command returns to ready boundary \(suffix)", ready)
+            guard ready else { return }
+        }
     }
 
     func subagents() {

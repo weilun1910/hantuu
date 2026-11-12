@@ -51,11 +51,11 @@ extension SelfTest {
                       !pending.isRestored(in: "────────────────────\n❯ one\n────────────────────\n? for shortcuts"))
             }
             _ = pending.reconcile([ReaderEntry(id: "interrupt", kind: .notice, text: "Turn interrupted")])
-            check("send now: \(agent) retains requested deliveries across native interruption", pending.entries.count == (supported ? 2 : 0))
+            check("send now: \(agent) retains requested deliveries across native interruption", pending.entries.count == 2 && pending.entries.allSatisfy { $0.pendingState == "Delivery unconfirmed" })
             let delivered = pending.reconcile([ReaderEntry(id: "delivered-one", kind: .user, text: "one"),
                                                ReaderEntry(id: "delivered-two", kind: .user, text: "two")])
             check("send now: \(agent) reconciles each acknowledgement once", pending.isEmpty &&
-                  delivered.compactMap(\.replacesPendingID) == (supported ? ["one", "two"] : []))
+                  delivered.compactMap(\.replacesPendingID) == ["one", "two"])
         }
         var combined = PendingReaderMessages()
         combined.sendNowEnabled = true

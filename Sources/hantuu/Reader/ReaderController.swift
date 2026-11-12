@@ -21,6 +21,8 @@ final class ReaderController {
     /// Esc shrinks an opened-out image or PDF (FileViewer/ReaderMedia.swift).
     let mediaKeys: ReaderMediaKeys
     var onSendNow: ((UUID, String) -> Void)?
+    var onQueueAction: ((UUID, String, String) -> Void)?
+    var onEditAsNew: ((UUID, String) -> Void)?
     var onFocusComposer: (() -> Void)?
     let interaction: ReaderInteraction
     var retryReading: (() -> Void)?
@@ -109,6 +111,11 @@ final class ReaderController {
         guard !interaction.message(msg) else { return }
         let base = model.selectedChat.flatMap { model.project($0.projectID)?.path }
         switch msg["type"] as? String {
+        case "queueAction", "editAsNew":
+            guard let raw = msg["chatID"] as? String, let chatID = UUID(uuidString: raw),
+                  chatID == shownChatID, chatID == model.selectedChatID, let id = msg["id"] as? String else { return }
+            if msg["type"] as? String == "editAsNew" { onEditAsNew?(chatID, id) }
+            else if let action = msg["action"] as? String { onQueueAction?(chatID, id, action) }
         case "sendNow":
             guard let raw = msg["chatID"] as? String, let chatID = UUID(uuidString: raw),
                   chatID == shownChatID, chatID == model.selectedChatID,

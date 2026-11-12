@@ -68,7 +68,9 @@
       state.setAttribute('aria-live', 'polite');
       el.appendChild(state);
     }
-    state.textContent = e.deliveryRequested ? 'Delivering' : 'Queued';
+    state.textContent = e.pendingState || (e.deliveryRequested ? 'Delivering' : 'Queued');
+    state.title = e.pendingDetail || '';
+    updateQueueActions(el, e);
     let button = el.querySelector('.send-now');
     if (!e.pending || !e.sendNowLabel || e.deliveryRequested) {
       if (button) {
@@ -84,7 +86,7 @@
       const owner = chatID;
       button.addEventListener('click', () => R.post({ type: 'sendNow', chatID: owner, id: e.id }));
       button.addEventListener('keydown', (event) => {
-        const buttons = Array.from(list.querySelectorAll('.send-now'));
+        const buttons = Array.from(list.querySelectorAll('.queue-action, .send-now'));
         const boundary = event.shiftKey ? buttons[0] : buttons[buttons.length - 1];
         if (event.key === 'Escape' || (event.key === 'Tab' && boundary === button)) {
           event.preventDefault();
@@ -98,6 +100,55 @@
     button.setAttribute('aria-label', e.sendNowLabel);
   }
 
+  function updateQueueActions(el, e) {
+    let row = el.querySelector('.pending-actions');
+    const signature = JSON.stringify([e.pendingActions || [], e.pendingDetail || '']);
+    if (row && row.dataset.signature === signature) return;
+    if (row) {
+      if (row.contains(document.activeElement)) R.post({ type: 'focusComposer' });
+      row.remove();
+    }
+    if (!e.pendingActions || !e.pendingActions.length) return;
+    row = document.createElement('div');
+    row.className = 'pending-actions';
+    row.dataset.signature = signature;
+    const labels = {send:'Send now',sendWithQueue:'Send with agent queue',edit:'Edit',up:'Move up',down:'Move down',remove:'Remove',restore:'Restore draft',terminal:'Check terminal',resume:'Resume queue'};
+    const owner = chatID;
+    for (const action of e.pendingActions) {
+      const button = document.createElement('button');
+      button.className = 'queue-action';
+      button.type = 'button';
+      button.textContent = labels[action] || action;
+      button.title = (action === 'send' || action === 'sendWithQueue') ? 'Send this waiting item. Native Send now can also deliver input already queued in the agent.' : button.textContent;
+      button.setAttribute('aria-label', button.textContent + ': ' + (e.text || 'attachment').slice(0, 60));
+      button.addEventListener('click', () => R.post({type:'queueAction',chatID:owner,id:e.id,action}));
+      button.addEventListener('keydown', (event) => {
+        const buttons = Array.from(list.querySelectorAll('.queue-action, .send-now'));
+        const boundary = event.shiftKey ? buttons[0] : buttons[buttons.length - 1];
+        if (event.key === 'Escape' || (event.key === 'Tab' && boundary === button)) {
+          event.preventDefault(); R.post({type:'focusComposer'});
+        }
+      });
+      row.appendChild(button);
+    }
+    if (e.pendingDetail) {
+      const detail = document.createElement('div');
+      detail.className = 'pending-detail';
+      detail.textContent = e.pendingDetail;
+      row.appendChild(detail);
+    }
+    el.appendChild(row);
+  }
+
+  function editAsNew(el, e) {
+    if (e.kind !== 'user' || e.pending || el.querySelector('.edit-as-new')) return;
+    const owner = chatID;
+    const button = document.createElement('button');
+    button.type = 'button'; button.className = 'edit-as-new'; button.textContent = 'Edit as new';
+    button.addEventListener('click', () => R.post({type:'editAsNew',chatID:owner,id:e.id}));
+    el.appendChild(button);
+  }
+
   function renderEntry(e) {
     const evidence = parity && parity.renderEntry(e);
     if (evidence) return evidence;
@@ -105,6 +156,7 @@
     el.className = 'entry ' + e.kind;
     el.dataset.id = e.id;
     if (e.contentUnavailable) el.dataset.contentUnavailable = e.contentUnavailable;
+    el.dataset.content = JSON.stringify([e.text, e.images || []]);
     if (e.pending) el.classList.add('pending');
     const shown = new Set();
     switch (e.kind) {
@@ -190,6 +242,7 @@
     const media = R.mediaFor(e.links, shown);
     if (media) el.appendChild(media);
     if (parity) parity.register(e, el);
+    editAsNew(el, e);
     return el;
   }
 
@@ -242,6 +295,9 @@
         if (parity) parity.register(e, el);
         const queued = el.querySelector('.queued-label');
         if (queued) queued.remove();
+        const row = el.querySelector('.pending-actions');
+        if (row) row.remove();
+        editAsNew(el, e);
         const action = el.querySelector('.send-now');
         if (action) {
           if (document.activeElement === action) R.post({ type: 'focusComposer' });
@@ -275,13 +331,23 @@
     }
     for (const e of entries) {
       if (pendingNodes.has(e.id)) {
-        updatePending(pendingNodes.get(e.id), e);
-        continue;
+        const existing = pendingNodes.get(e.id);
+        if (existing.dataset.content === JSON.stringify([e.text, e.images || []])) {
+          updatePending(existing, e);
+          continue;
+        }
+        existing.remove(); pendingNodes.delete(e.id);
       }
       const el = renderEntry(e);
       if (main) main.decorate(el, e, false);
       pendingNodes.set(e.id, el);
       list.appendChild(el);
+    }
+    const current = Array.from(list.children).filter(el => el.classList.contains('pending'));
+    if (current.some((el, index) => el.dataset.id !== entries[index]?.id)) {
+      const focused = document.activeElement;
+      for (const e of entries) list.appendChild(pendingNodes.get(e.id));
+      if (focused && list.contains(focused)) focused.focus();
     }
     empty.hidden = list.childElementCount > 0;
     if (parity) { parity.prune(); parity.refreshSearch(); }
@@ -289,7 +355,7 @@
 
   window.hantuu = {
     focusQueue() {
-      const buttons = list.querySelectorAll('.send-now');
+      const buttons = list.querySelectorAll('.queue-action, .send-now');
       if (!buttons.length) return false;
       buttons[buttons.length - 1].focus();
       return true;

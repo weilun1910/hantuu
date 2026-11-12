@@ -7,6 +7,25 @@ final class ComposerTextView: NSTextView {
     var placeholder = "" { didSet { needsDisplay = true } }
     var onSend: (() -> Void)?
     var onSendNow: (() -> Bool)?
+    var onAlternateSend: (() -> Void)?
+    var onSelectionChange: (() -> Void)?
+    var promptHistory: [String] = []
+    var onRecallPrompt: (() -> Void)?
+    private var promptRecall = ComposerPromptRecall()
+    private var applyingRecall = false
+    func resetPromptRecall() { promptRecall.reset() }
+    var mentionCheckout: URL? { didSet { refreshMentions(force: true) } }
+    var mentionChatID: UUID? { didSet { resetPromptRecall(); refreshMentions(force: true) } }
+    var onMentionMenuChange: (() -> Void)?
+    private(set) var mentionSuggestions: [ComposerMentionItem] = []
+    private(set) var mentionSelection = 0
+    private(set) var mentionStatus: String?
+    private var mentionQuery: ComposerMentionQuery?
+    private var mentionGeneration = 0
+    private var mentionWork: DispatchWorkItem?
+    private var dismissedMentionText: String?
+    var mentionMenuVisible: Bool { mentionQuery != nil && dismissedMentionText != string }
+
     var onFocusQueue: (() -> Bool)?
     /// Esc. Returns true if it did something (stopped the agent).
     var onEscape: (() -> Bool)?
@@ -72,11 +91,15 @@ final class ComposerTextView: NSTextView {
     override func setSelectedRange(_ charRange: NSRange) {
         super.setSelectedRange(charRange)
         updateCommands()
+        refreshMentions()
+        onSelectionChange?()
     }
 
     override func setSelectedRange(_ charRange: NSRange, affinity: NSSelectionAffinity, stillSelecting flag: Bool) {
         super.setSelectedRange(charRange, affinity: affinity, stillSelecting: flag)
         updateCommands()
+        refreshMentions()
+        onSelectionChange?()
     }
     /// Files or pictures from a paste or a drop. Returns false if there was nothing to attach.
     var onAttach: ((ComposerPasteboard.Content) -> Bool)?
@@ -141,10 +164,25 @@ final class ComposerTextView: NSTextView {
         // An input method that's composing (Japanese, Chinese, ...) gets Return and Esc first.
         if hasMarkedText() { return super.keyDown(with: event) }
         let mods = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
-        if mods.isDisjoint(with: [.command, .control, .option, .shift]), commandKey(event.keyCode) { return }
+        if mods.isDisjoint(with: [.command, .control, .option, .shift]) {
+            if mentionKey(event.keyCode) || commandKey(event.keyCode) { return }
+            if (event.keyCode == 126 || event.keyCode == 125), isEditable,
+               atRecallVisualBoundary(older: event.keyCode == 126),
+               let recalled = promptRecall.move(older: event.keyCode == 126, text: string, selection: selectedRange(), history: promptHistory) {
+                applyingRecall = true
+                text = recalled.0
+                setSelectedRange(recalled.1)
+                applyingRecall = false
+                onRecallPrompt?()
+                return
+            }
+        }
         switch event.keyCode {
         case 36, 76:   // Return, keypad Enter
-            if mods == .control, onSendNow?() == true {
+            if mods == .command, let onAlternateSend {
+                onAlternateSend()
+                return
+            } else if mods == .control, onSendNow?() == true {
                 return
             } else if mods.contains(.shift) || mods.contains(.option) {
                 insertNewlineIgnoringFieldEditor(nil)
@@ -171,6 +209,7 @@ final class ComposerTextView: NSTextView {
     override func complete(_ sender: Any?) {}
     override func cancelOperation(_ sender: Any?) {
         if hasMarkedText() { super.cancelOperation(sender) }
+        else if mentionMenuVisible { dismissMentions() }
         else if commandMenuVisible { dismissCommands() }
         else { _ = onEscape?() }
     }
@@ -178,9 +217,102 @@ final class ComposerTextView: NSTextView {
     override func didChangeText() {
         super.didChangeText()
         needsDisplay = true
+        if !applyingRecall { promptRecall.reset() }
         if dismissedCommandText != string { dismissedCommandText = nil }
+        if dismissedMentionText != string { dismissedMentionText = nil }
         updateCommands()
+        refreshMentions()
         onTextChange?()
+    }
+
+    private func atRecallVisualBoundary(older: Bool) -> Bool {
+        guard !string.isEmpty, let layoutManager else { return true }
+        let count = (string as NSString).length
+        let location = min(selectedRange().location, count - 1)
+        let glyph = layoutManager.glyphIndexForCharacter(at: location)
+        var line = NSRange()
+        _ = layoutManager.lineFragmentRect(forGlyphAt: glyph, effectiveRange: &line)
+        return older ? line.location == 0 : NSMaxRange(line) >= layoutManager.numberOfGlyphs
+    }
+
+    // MARK: Checkout file mentions
+
+    func refreshMentions(force: Bool = false) {
+        let query = hasMarkedText() || dismissedMentionText == string ? nil : ComposerMentionQuery.parse(string, selection: selectedRange())
+        if !force && query == mentionQuery { return }
+        mentionWork?.cancel()
+        mentionGeneration += 1
+        let generation = mentionGeneration
+        mentionQuery = query
+        mentionSuggestions = []
+        mentionSelection = 0
+        mentionStatus = nil
+        guard let query, let root = mentionCheckout, let chatID = mentionChatID else {
+            mentionQuery = nil
+            onMentionMenuChange?()
+            return
+        }
+        mentionStatus = "Searching files..."
+        onMentionMenuChange?()
+        let work = DispatchWorkItem { [weak self] in
+            let result = Result { try ComposerMentionSearch.items(root: root, query: query.search) }
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.mentionGeneration == generation, self.mentionChatID == chatID,
+                      self.mentionCheckout == root, self.mentionQuery == query else { return }
+                switch result {
+                case .success(let items):
+                    self.mentionSuggestions = items
+                    self.mentionStatus = items.isEmpty ? "No matching files" : nil
+                case .failure(let error): self.mentionStatus = error.localizedDescription
+                }
+                self.onMentionMenuChange?()
+            }
+        }
+        mentionWork = work
+        DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 0.12, execute: work)
+    }
+
+    func dismissMentions() {
+        mentionWork?.cancel()
+        mentionGeneration += 1
+        dismissedMentionText = string
+        mentionQuery = nil
+        mentionSuggestions = []
+        mentionStatus = nil
+        onMentionMenuChange?()
+    }
+
+    func completeMention(at index: Int) {
+        guard isEditable, !hasMarkedText(), let query = mentionQuery,
+              query == ComposerMentionQuery.parse(string, selection: selectedRange()), mentionSuggestions.indices.contains(index) else { return }
+        let item = mentionSuggestions[index]
+        guard let root = mentionCheckout,
+              ComposerMentionSearch.candidates(paths: [item.relativePath], root: root, query: "").contains(where: { $0.relativePath == item.relativePath }) else {
+            refreshMentions(force: true)
+            return
+        }
+        let replacement = item.insertion
+        guard shouldChangeText(in: query.range, replacementString: replacement) else { return }
+        textStorage?.replaceCharacters(in: query.range, with: NSAttributedString(string: replacement, attributes: typingAttributes))
+        setSelectedRange(NSRange(location: query.range.location + (replacement as NSString).length, length: 0))
+        didChangeText()
+        window?.makeFirstResponder(self)
+    }
+
+    private func mentionKey(_ code: UInt16) -> Bool {
+        guard mentionMenuVisible else { return false }
+        switch code {
+        case 53: dismissMentions()
+        case 125, 126:
+            if !mentionSuggestions.isEmpty {
+                mentionSelection = (mentionSelection + (code == 125 ? 1 : mentionSuggestions.count - 1)) % mentionSuggestions.count
+                onMentionMenuChange?()
+            }
+        case 48, 36, 76:
+            if !mentionSuggestions.isEmpty { completeMention(at: mentionSelection) }
+        default: return false
+        }
+        return true
     }
 
     // MARK: Copy
@@ -318,7 +450,7 @@ final class ComposerActionButton: NSControl {
     override var acceptsFirstResponder: Bool { false }
 
     private func updateHelp() {
-        toolTip = kind == .send ? "Send  ⏎" : "Stop \(agentName)  esc"
+        toolTip = kind == .send ? "Send  ⏎" : "Interrupt \(agentName) with Esc. Its native queued messages may still be delivered."
     }
 
     override func updateTrackingAreas() {
@@ -462,6 +594,7 @@ final class ComposerBox: NSView {
     var onHeightChange: (() -> Void)?
     /// The attachments changed: added, removed, or swapped for another chat's.
     var onAttachmentsChange: (() -> Void)?
+    var onRetryAttachment: ((UUID) -> Void)?
     /// What goes out with the next message, in the order it was added.
     private(set) var attachments: [ComposerAttachment] = []
     static let padTop: CGFloat = 12
@@ -536,6 +669,7 @@ final class ComposerBox: NSView {
             self.remove(id)
             self.window?.makeFirstResponder(self.textView)
         }
+        strip.onRetry = { [weak self] id in self?.onRetryAttachment?(id) }
         attach.target = self
         attach.action = #selector(addFiles)
         updateColors()
@@ -575,8 +709,16 @@ final class ComposerBox: NSView {
         guard !list.isEmpty else { return }
         // The same file twice is one attachment.
         let have = Set(attachments.map { $0.url.standardizedFileURL.path })
-        attachments += list.filter { !have.contains($0.url.standardizedFileURL.path) }
+        let added = list.filter { !have.contains($0.url.standardizedFileURL.path) }
+        attachments += added
         attachmentsChanged()
+        for item in added where PastedImages.isPending(item.url) {
+            PastedImages.whenReady(item.url) { [weak self] in
+                guard let self, let index = self.attachments.firstIndex(where: { $0.id == item.id }) else { return }
+                self.attachments[index].preparation = PastedImages.preparation(for: item.url)
+                self.attachmentsChanged()
+            }
+        }
     }
 
     func remove(_ id: ComposerAttachment.ID) {
@@ -642,7 +784,7 @@ final class ComposerBox: NSView {
         window?.makeFirstResponder(textView)
     }
 
-    @objc private func addFiles() {
+    @objc func addFiles() {
         let panel = NSOpenPanel()
         panel.canChooseFiles = true
         panel.canChooseDirectories = true

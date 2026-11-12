@@ -65,7 +65,8 @@ extension SelfTest {
         model.followSession(freshChat, session: .init(id: first, path: firstFile.path), verifiedCodex: true)
         check("codex title: first verified rollout retains pending input", !freshChat.codexTitleIdentity.waiting && freshChat.pendingMessages.entries.count == 1 && freshChat.follower != nil)
         model.acceptCodexTitle(freshChat, title: "77777777-7777-4777-8777-777777777777 | Different thread")
-        check("codex title: changing an established thread still blocks input and clears its queue", freshChat.codexIdentityWaiting && freshChat.pendingMessages.isEmpty)
+        check("codex title: changing an established thread blocks input and retains recovery",
+              freshChat.codexIdentityWaiting && freshChat.pendingMessages.queuePaused && freshChat.pendingMessages.stage(id: "first-send") == .failed)
         model.followSession(freshChat, session: .init(id: "77777777-7777-4777-8777-777777777777", path: root.appendingPathComponent("missing.jsonl").path))
         _ = waitUntil(3) { freshChat.codexSessionRequest == nil }
         check("codex title: unverified hook cannot release the input gate", freshChat.codexIdentityWaiting && freshChat.follower == nil)

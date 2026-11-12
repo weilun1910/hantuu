@@ -57,9 +57,52 @@ final class ReaderModeController: NSObject {
     private var drafts: [UUID: String] = [:]
     private var draftFiles: [UUID: [ComposerAttachment]] = [:]
     /// Messages waiting to be typed, one at a time, so two sends never interleave.
-    private var outbox: [(id: String, chatID: UUID, tracksPending: Bool, terminal: TerminalView, steps: [SendStep], files: [URL], command: String?)] = []
+    private struct Outgoing {
+        var id: String
+        var chatID: UUID
+        var tracksPending: Bool
+        var terminal: TerminalView
+        var steps: [SendStep]
+        var files: [URL]
+        var command: String?
+        var sessionID: String?
+        var typedAny = false
+        var promote = false
+    }
+    private var outbox: [Outgoing] = []
     private var typing = false
-    /// How long to wait for the agent to show a pasted image before going on anyway.
+    private var preparing = Set<String>()
+    private var preparationTargets: [String: (UUID, String?, TerminalView)] = [:]
+    private var queueReadySince: [UUID: Date] = [:]
+    private var submittedAt: [UUID: Date] = [:]
+    private var editingQueueIDs: [UUID: String] = [:]
+    private var editingQueueID: String? {
+        get { shownChatID.flatMap { editingQueueIDs[$0] } }
+        set { if let id = shownChatID { editingQueueIDs[id] = newValue } }
+    }
+    private var restoringDraft = false
+    private let draftStore = ComposerDraftStore()
+    private let deliveryBar = NSStackView()
+    private let queueButton = NSButton(title: "Queue", target: nil, action: nil)
+    private let steerButton = NSButton(title: "Steer", target: nil, action: nil)
+    private let resumeQueueButton = NSButton(title: "Resume queue", target: nil, action: nil)
+    private let previousDraftButton = NSButton(title: "Previous draft", target: nil, action: nil)
+    private let reviewedInputButton = NSButton(title: "Input reviewed", target: nil, action: nil)
+    private let keymapButton = NSButton(title: "Shortcuts", target: nil, action: nil)
+    private let cancelQueueEdit = NSButton(title: "Cancel edit", target: nil, action: nil)
+    private let deliveryChoice = NSPopUpButton(frame: .zero, pullsDown: false)
+    private let recoveryLabel = NSTextField(labelWithString: "")
+    private let agentControls = ComposerAgentControlsView()
+    private let mentionMenu = ComposerMentionMenu()
+    private var mentionMenuHeight: NSLayoutConstraint!
+    private var controlsState: ComposerAgentControlsState?
+    private var controlsReadAt = Date.distantPast
+    private var controlsRecords: [Data] = []
+    private var controlsSession: String?
+    private var pendingControl: ComposerAgentControlAction?
+    enum DeliveryIntent { case steer, queue }
+
+    /// How long to wait for the agent to acknowledge an image before retaining the failed send.
     var imageWait: TimeInterval = 3
     private var calmChecks = 0
     /// When Stop was pressed, per chat. Claude Code doesn't always report a stopped turn (an
@@ -96,8 +139,17 @@ final class ReaderModeController: NSObject {
         statusHost = ChromeHostingView(rootView: ReaderModeStatus(state: status))
         peekBar = ChromeHostingView(rootView: PeekBar { [weak self] in self?.backToReader() }.environmentObject(model))
         buildBottom()
+        draftStore.onFailure = { [weak self] _ in self?.recoveryLabel.stringValue = "Draft could not be saved. Keep this window open and copy your input." }
         let tv = composer.textView
         tv.onSend = { [weak self] in self?.send() }
+        tv.onAlternateSend = { [weak self] in
+            guard let self else { return }
+            _ = self.send(intent: self.deliveryChoice.indexOfSelectedItem == 0 ? .queue : .steer)
+        }
+        tv.onSelectionChange = { [weak self] in self?.saveDraft() }
+        tv.onMentionMenuChange = { [weak self] in self?.updateMentionMenu() }
+        tv.onRecallPrompt = { [weak self] in self?.recoveryLabel.stringValue = "Recalled text. Check attachments before sending." }
+        mentionMenu.onChoose = { [weak self] index in self?.composer.textView.completeMention(at: index) }
         tv.onSendNow = { [weak self] in
             guard let self, self.model.selectedChat?.agent.id == "claude" else { return false }
             return self.sendFirstQueuedNow()
@@ -118,7 +170,29 @@ final class ReaderModeController: NSObject {
         }
         composer.onHeightChange = { [weak self] in self?.textChanged() }
         composer.onAttachmentsChange = { [weak self] in self?.textChanged() }
+        composer.onRetryAttachment = { [weak self] _ in
+            guard let self, let chat = self.model.selectedChat else { return }
+            let owner = chat.id
+            let originalIDs = self.composer.attachments.map(\.id)
+            ComposerAttachmentTransport.prepare(self.composer.attachments, agentID: chat.agentID, changed: { [weak self] attachments in
+                guard let self, self.model.selectedChatID == owner, self.composer.attachments.map(\.id) == originalIDs else { return }
+                self.composer.setAttachments(attachments)
+                self.saveDraft()
+            }) { [weak self] attachments, result in
+                guard let self, self.model.selectedChatID == owner, self.composer.attachments.map(\.id) == originalIDs else { return }
+                self.composer.setAttachments(attachments)
+                if case .failure(let error) = result { self.recoveryLabel.stringValue = error.localizedDescription }
+                self.saveDraft()
+            }
+        }
+        PastedImages.protectedPathsProvider = { [weak self] in
+            guard let self else { return [] }
+            return self.draftStore.referencedAttachmentPaths.union(self.model.chats.reduce(into: Set<String>()) { $0.formUnion($1.pendingMessages.referencedAttachmentPaths) })
+        }
         PastedImages.cleanUpOnce()
+        NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)
+            .sink { [weak self] _ in self?.saveDraft(); try? self?.draftStore.flush(); self?.model.save() }
+            .store(in: &bag)
         composer.action.target = self
         composer.action.action = #selector(actionPressed)
         mode.objectWillChange
@@ -149,7 +223,7 @@ final class ReaderModeController: NSObject {
             bottom.trailingAnchor.constraint(equalTo: root.trailingAnchor),
             bottom.bottomAnchor.constraint(equalTo: root.bottomAnchor),
             bottomHeight!, statusHeight!, composerHeight!,
-            composer.bottomAnchor.constraint(equalTo: bottom.bottomAnchor, constant: -16),
+            composer.bottomAnchor.constraint(equalTo: bottom.bottomAnchor, constant: -78),
         ]
         // The working line sits just above the box; the banner is tucked onto its top edge.
         statusGap = statusHost.bottomAnchor.constraint(equalTo: composer.topAnchor, constant: -6)
@@ -165,6 +239,51 @@ final class ReaderModeController: NSObject {
             ]
         }
         NSLayoutConstraint.activate(cs)
+        deliveryBar.orientation = .horizontal
+        deliveryBar.spacing = 10
+        deliveryChoice.addItems(withTitles: ["Return: Steer", "Return: Queue"])
+        deliveryChoice.controlSize = .small
+        deliveryChoice.toolTip = "While working: Return uses this action; Command-Return uses the other. Queue stays in hantuu until the next turn."
+        for button in [queueButton, steerButton, resumeQueueButton, cancelQueueEdit, previousDraftButton, reviewedInputButton, keymapButton] {
+            button.isBordered = false
+            button.font = .systemFont(ofSize: 11)
+            button.target = self
+        }
+        queueButton.action = #selector(queuePressed)
+        steerButton.action = #selector(steerPressed)
+        resumeQueueButton.action = #selector(resumeQueuePressed)
+        cancelQueueEdit.action = #selector(cancelEditPressed)
+        previousDraftButton.action = #selector(previousDraftPressed)
+        reviewedInputButton.action = #selector(reviewedInputPressed)
+        reviewedInputButton.toolTip = "Confirm you inspected and cleared any leftover input in the terminal. This does not send."
+        keymapButton.action = #selector(keymapPressed)
+        queueButton.toolTip = "Keep this message in hantuu for the next turn."
+        steerButton.toolTip = "Send to the current turn. Claude reads it at a tool boundary; Codex uses Enter steering."
+        [queueButton, steerButton, deliveryChoice, resumeQueueButton, cancelQueueEdit, previousDraftButton, reviewedInputButton, keymapButton].forEach { deliveryBar.addArrangedSubview($0) }
+        recoveryLabel.font = .systemFont(ofSize: 11)
+        recoveryLabel.textColor = .secondaryLabelColor
+        recoveryLabel.lineBreakMode = .byTruncatingTail
+        for view in [deliveryBar, agentControls, recoveryLabel, mentionMenu] as [NSView] {
+            view.translatesAutoresizingMaskIntoConstraints = false
+            bottom.addSubview(view)
+        }
+        agentControls.onAction = { [weak self] action in self?.requestControl(action) }
+        mentionMenuHeight = mentionMenu.heightAnchor.constraint(equalToConstant: 0)
+        NSLayoutConstraint.activate([
+            deliveryBar.leadingAnchor.constraint(equalTo: composer.leadingAnchor),
+            deliveryBar.topAnchor.constraint(equalTo: composer.bottomAnchor, constant: 4),
+            deliveryBar.heightAnchor.constraint(equalToConstant: 18),
+            agentControls.leadingAnchor.constraint(equalTo: composer.leadingAnchor),
+            agentControls.trailingAnchor.constraint(equalTo: composer.trailingAnchor),
+            agentControls.topAnchor.constraint(equalTo: deliveryBar.bottomAnchor, constant: 3),
+            agentControls.heightAnchor.constraint(equalToConstant: 22),
+            recoveryLabel.leadingAnchor.constraint(equalTo: composer.leadingAnchor),
+            recoveryLabel.trailingAnchor.constraint(equalTo: composer.trailingAnchor),
+            recoveryLabel.topAnchor.constraint(equalTo: agentControls.bottomAnchor, constant: 2),
+            mentionMenu.leadingAnchor.constraint(equalTo: composer.leadingAnchor),
+            mentionMenu.trailingAnchor.constraint(equalTo: composer.trailingAnchor),
+            mentionMenu.bottomAnchor.constraint(equalTo: composer.topAnchor, constant: -6), mentionMenuHeight,
+        ])
         commandMenu.translatesAutoresizingMaskIntoConstraints = false
         root.addSubview(commandMenu)
         commandMenuHeight = commandMenu.heightAnchor.constraint(equalToConstant: 0)
@@ -203,6 +322,8 @@ final class ReaderModeController: NSObject {
         guard reader == nil else { return }
         let r = ReaderController(model: model, page: "reader.html?layout=main", identifier: "hantuu.reader.main", focusless: true)
         r.onSendNow = { [weak self] chatID, id in _ = self?.sendNow(chatID: chatID, id: id) }
+        r.onQueueAction = { [weak self] chatID, id, action in self?.queueAction(chatID: chatID, id: id, action: action) }
+        r.onEditAsNew = { [weak self] chatID, id in self?.editAsNew(chatID: chatID, id: id) }
         r.onFocusComposer = { [weak self] in self?.focusComposer() }
         // Restore ordinary typing synchronously. The page requests focus for the actual
         // clicked control; a previously focused DOM element is not evidence of this click.
@@ -248,7 +369,8 @@ final class ReaderModeController: NSObject {
         guard let chat = selected else {
             root.isHidden = true
             peekBar.isHidden = true
-            stopTimer()
+            refreshQueues()
+            updateTimer()
             return Layout()
         }
         let shows = mode.showsReader(chat)
@@ -261,7 +383,7 @@ final class ReaderModeController: NSObject {
         peekBar.isHidden = !peeking
         if chat.id != shownChatID { switchChat(to: chat) }
         refresh()
-        if shows || peeking { startTimer() } else { stopTimer() }
+        updateTimer()
         if shows {
             // A chat terminal that had the keyboard is hidden now, so the message box takes it.
             if let w = root.window, let tv = w.firstResponder as? TerminalView, model.chats.contains(where: { $0.terminal === tv }) {
@@ -272,6 +394,13 @@ final class ReaderModeController: NSObject {
     }
 
     private func switchChat(to chat: Chat) {
+        if shownChatID != nil {
+            saveDraft()
+            try? draftStore.flush()
+        }
+        restoringDraft = true
+        defer { restoringDraft = false }
+        pendingControl = nil
         if (reader?.page.webView as? FocuslessWebView)?.allowsQueueFocus == true { focusComposer() }
         if let old = shownChatID {
             drafts[old] = composer.textView.string.isEmpty ? nil : composer.textView.string
@@ -284,9 +413,17 @@ final class ReaderModeController: NSObject {
         composer.textView.dismissCommands()
         composer.textView.allowsSkillMentions = chat.agent.id == "codex"
         composer.textView.commandCatalog = commandsForChat(ReaderCommandCatalog.builtins(agent: chat.agent.id), chat: chat)
-        composer.textView.text = drafts[chat.id] ?? ""
+        let savedDraft = draftStore.draft(chatID: chat.id)
+        composer.textView.mentionCheckout = URL(fileURLWithPath: model.workingDirectory(of: chat))
+        composer.textView.mentionChatID = chat.id
+        composer.textView.promptHistory = ComposerPromptHistory.prompts(from: chat.allEntries)
+        composer.textView.resetPromptRecall()
+        composer.textView.text = savedDraft?.text ?? drafts[chat.id] ?? ""
         composer.textView.setSelectedRange(NSRange(location: (composer.textView.string as NSString).length, length: 0))
-        composer.setAttachments(draftFiles[chat.id] ?? [])
+        composer.setAttachments(savedDraft?.restoredAttachments() ?? draftFiles[chat.id] ?? [])
+        if let savedDraft { composer.textView.setSelectedRange(savedDraft.clampedSelection) }
+        controlsSession = nil
+        controlsReadAt = .distantPast
         composer.textView.placeholder = "Message \(chat.agent.name)"
         composer.action.agentName = chat.agent.name
         calmChecks = 0
@@ -314,10 +451,59 @@ final class ReaderModeController: NSObject {
         timer = nil
     }
 
+    private func updateTimer() {
+        let visible = model.selectedChat.map { mode.showsReader($0) || mode.isPeeking($0) } ?? false
+        let pending = model.chats.contains { isLive($0) && !$0.pendingMessages.isEmpty }
+        if visible || pending || isTyping { startTimer() } else { stopTimer() }
+    }
+
+    /// First identity discovery binds an existing send. A replacement session never does.
+    private func matchesSession(_ chat: Chat, expected: String?, pendingID: String?) -> Bool {
+        if expected == chat.sessionID { return true }
+        guard expected == nil, let pendingID, let recovery = chat.pendingMessages.recovery(id: pendingID) else { return false }
+        return recovery.sessionID == chat.sessionID
+    }
+
+    /// Delivery belongs to the owning chat, regardless of the currently displayed face.
+    private func refreshQueues() {
+        for chat in model.chats where !chat.pendingMessages.isEmpty {
+            if chat.pendingMessages.expire() { model.save() }
+            guard isLive(chat), let terminal = chat.terminal else { continue }
+            let raw = terminal.activeScreenText()
+            let screen = TerminalScreen.analyze(raw)
+            if screen.ready && !screen.busy && screen.menu == nil, !chat.pendingMessages.inputNeedsReview,
+               !outbox.contains(where: { $0.chatID == chat.id }), chat.pendingMessages.isRestored(in: raw) {
+                chat.pendingMessages.inputNeedsReview = true
+                cancelTransport(chat, reason: "The terminal restored input. Check it before resending.")
+            }
+            let st = statusProvider(chat)
+            let editing = editingQueueIDs[chat.id] != nil
+            let controlWaiting = model.selectedChatID == chat.id && pendingControl != nil
+            let ready = ReaderQueueDrain.canStart(screen: screen, activity: chat.activity,
+                waiting: st?.waits.isEmpty == false, turnActive: st?.turnActive == true,
+                identityWaiting: chat.codexIdentityWaiting, paused: chat.pendingMessages.queuePaused,
+                inputNeedsReview: chat.pendingMessages.inputNeedsReview, editing: editing,
+                transportBusy: isTyping || !outbox.isEmpty || menuProbeChatID == chat.id || controlWaiting)
+            guard ready, let id = chat.pendingMessages.firstWaitingID else { queueReadySince[chat.id] = nil; continue }
+            // Wait for a stable ready frame after the previous Return. Status and screen
+            // updates can arrive separately, especially when the terminal is not selected.
+            let now = Date()
+            guard now.timeIntervalSince(submittedAt[chat.id] ?? .distantPast) >= 1 else { continue }
+            guard let since = queueReadySince[chat.id], now.timeIntervalSince(since) >= 0.5 else {
+                if queueReadySince[chat.id] == nil { queueReadySince[chat.id] = now }
+                continue
+            }
+            queueReadySince[chat.id] = nil
+            startPending(chat, id: id)
+        }
+    }
+
     // MARK: State
 
     /// Works out the message box's state for the selected chat and applies it.
     func refresh() {
+        refreshQueues()
+        updateTimer()
         guard let chat = model.selectedChat, chat.id == shownChatID else { return }
         let live = isLive(chat)
         if live, chat.codexIdentityWaiting {
@@ -334,10 +520,11 @@ final class ReaderModeController: NSObject {
             }
             // Esc in the terminal can restore queued text without writing an interruption.
             // Only trust the input box once our own paste has completely finished.
-            if screen.ready && !screen.busy && screen.menu == nil,
+            if screen.ready && !screen.busy && screen.menu == nil, !chat.pendingMessages.inputNeedsReview,
                !outbox.contains(where: { $0.chatID == chat.id }),
                chat.pendingMessages.isRestored(in: t.activeScreenText()) {
-                discardPendingMessages(chat)
+                chat.pendingMessages.inputNeedsReview = true
+                cancelTransport(chat, reason: "The terminal restored input. Check it before resending.")
             }
         }
         var activity = chat.activity
@@ -376,6 +563,12 @@ final class ReaderModeController: NSObject {
             showTerminal()
         }
         if hasSlashQuery { loadCommands() }
+        if chat.pendingMessages.expire() { model.save() }
+        refreshControls(chat)
+        composer.textView.promptHistory = ComposerPromptHistory.prompts(from: chat.allEntries)
+        if composerMode == .ready, !screen.busy, screen.ready, outbox.isEmpty, preparing.isEmpty {
+            if let action = pendingControl { pendingControl = nil; requestControl(action); return }
+        }
 
         // A peek ends once nothing has waited in the terminal for two checks in a row.
         if mode.isPeeking(chat) {
@@ -406,6 +599,15 @@ final class ReaderModeController: NSObject {
         composer.enabled = !m.isBlocked
         composer.textView.isEditable = m != .none
         composer.textView.placeholder = m.isBlocked ? "Answer in the terminal to carry on" : "Message \(chat.agent.name)"
+        deliveryBar.isHidden = m == .none
+        agentControls.isHidden = m == .none
+        queueButton.isHidden = !m.isWorking
+        steerButton.isHidden = !m.isWorking
+        deliveryChoice.isHidden = !m.isWorking
+        resumeQueueButton.isHidden = !chat.pendingMessages.queuePaused || chat.pendingMessages.firstWaitingID == nil
+        cancelQueueEdit.isHidden = editingQueueID == nil
+        previousDraftButton.isHidden = draftStore.draft(chatID: chat.id, scope: "before-recovery") == nil || editingQueueID != nil
+        reviewedInputButton.isHidden = !chat.pendingMessages.inputNeedsReview
         updateAction()
         updateHeights()
     }
@@ -414,7 +616,7 @@ final class ReaderModeController: NSObject {
     private func updateAction() {
         let hasContent = ComposerMessage.prepare(composer.textView.string) != nil || !composer.attachments.isEmpty
         composer.action.kind = composerMode.isWorking && !hasContent ? .stop : .send
-        composer.action.active = composerMode.canSend && hasContent
+        composer.action.active = composerMode.canSend && hasContent && model.selectedChat?.pendingMessages.inputNeedsReview != true && !composer.attachments.contains { $0.preparation == .preparing }
     }
 
     private func updateHeights() {
@@ -425,10 +627,11 @@ final class ReaderModeController: NSObject {
         statusGap.constant = -gap
         composerHeight.constant = c
         // An ended chat leaves room for the Resume bar MainAreaController draws there.
-        bottomHeight.constant = composerMode == .none ? 38 : 14 + s + gap + c + 16
+        bottomHeight.constant = composerMode == .none ? 38 : 14 + s + gap + c + 78
     }
 
     private func textChanged() {
+        saveDraft()
         updateAction()
         updateHeights()
     }
@@ -538,7 +741,7 @@ final class ReaderModeController: NSObject {
     /// Types the message and its attachments into the chat's terminal and presses Return.
     /// Returns false, and keeps everything in the box, when it can't send right now.
     @discardableResult
-    func send() -> Bool {
+    func send(intent: DeliveryIntent? = nil) -> Bool {
         guard let chat = model.selectedChat, chat.id == shownChatID, let t = chat.terminal else { return false }
         guard !chat.codexIdentityWaiting else { return false }
         if waitingToSendAfterProbe { return false }
@@ -552,7 +755,7 @@ final class ReaderModeController: NSObject {
                 guard let chat, self.model.selectedChat === chat, self.composer.textView.string == draft else { return }
                 // Never join a command to a probe that could not restore its empty input.
                 guard CommandMenuScreen.emptyInput(t.activeScreenText(), agent: chat.agent.id) else { self.showTerminal(); return }
-                _ = self.send()
+                _ = self.send(intent: intent)
             }
             return true
         }
@@ -575,33 +778,35 @@ final class ReaderModeController: NSObject {
             drafts[chat.id] = nil
             return true
         }
-        guard composerMode.canSend else {
+        guard composerMode.canSend, !chat.pendingMessages.inputNeedsReview,
+              !attachments.contains(where: { $0.preparation == .preparing }) else {
+            recoveryLabel.stringValue = chat.pendingMessages.inputNeedsReview ? "Check terminal input, then choose Input reviewed." : "Wait for attachments to finish preparing."
             NSSound.beep()
             return false
         }
-        let files = ComposerMessage.outgoingFiles(attachments, agentID: chat.agent.id)
-        let steps = ComposerMessage.steps(text: text, files: files, agentID: chat.agent.id)
-        // A message sent while the agent works joins its turn; otherwise it starts a new one.
-        if !composerMode.isWorking { sentThisTurn[chat.id] = [] }
-        for step in steps {
-            switch step {
-            case .paste(let s), .command(let s): sentThisTurn[chat.id, default: []].append(s)
-            case .image: sentThisTurn[chat.id, default: []].append("[Image #")
-            case .pressReturn: break
-            }
+        if let editingQueueID, chat.pendingMessages.stage(id: editingQueueID) != .waiting {
+            recoveryLabel.stringValue = "This queued message changed. Cancel editing to restore your previous draft."
+            return false
         }
-        let sendID = "pending-" + UUID().uuidString
-        if composerMode.isWorking {
-            chat.pendingMessages.enqueue(id: sendID, text: text, files: files, agentID: chat.agent.id, existing: chat.allEntries)
+        let sendID = editingQueueID ?? "pending-" + UUID().uuidString
+        let chosen = intent ?? (deliveryChoice.indexOfSelectedItem == 1 ? .queue : .steer)
+        let wait = composerMode.isWorking && chosen == .queue || editingQueueID != nil
+        chat.pendingMessages.enqueue(id: sendID, text: text, files: [], agentID: chat.agent.id,
+                                     existing: chat.allEntries, stage: wait ? .waiting : .preparing,
+                                     attachments: attachments, sessionID: chat.sessionID)
+        model.save()
+        if editingQueueID != nil { finishQueueEdit(chat) }
+        else {
+            composer.textView.text = ""
+            composer.setAttachments([])
+            drafts[chat.id] = nil
+            draftFiles[chat.id] = nil
+            saveDraft()
         }
-        type(steps, into: t, chatID: chat.id, id: sendID, queued: composerMode.isWorking, after: files.map { URL(fileURLWithPath: $0.path) })
-        composer.textView.text = ""
-        composer.setAttachments([])
-        drafts[chat.id] = nil
-        draftFiles[chat.id] = nil
+        queueReadySince[chat.id] = nil
+        startTimer()
+        if !wait { startPending(chat, id: sendID) }
         stoppedAt[chat.id] = nil
-        Log.write("reader mode: sent \(text?.count ?? 0) characters and \(files.count) attachments (\(files.filter(\.image).count) as images) to chat=\(chat.id)")
-        // Follow the conversation from here, even if you'd scrolled up to read.
         reader?.page.webView.evaluateJavaScript("window.scrollTo(0, document.scrollingElement.scrollHeight); 0", completionHandler: nil)
         return true
     }
@@ -618,11 +823,13 @@ final class ReaderModeController: NSObject {
             waiting: status.map { !$0.waits.isEmpty } ?? chat.activity.isNeeds,
             ready: screen.ready || status?.structured == true || chat.agent.transcript == nil,
             screenMenu: screen.menu)
-        guard ComposerMode.resolve(input).canSend else { return false }
-        chat.pendingMessages.enqueue(id: id, text: text, files: [], agentID: chat.agent.id, existing: chat.allEntries)
-        sentThisTurn[chat.id, default: []].append(text)
-        type(ComposerMessage.steps(text: text, files: [], agentID: chat.agent.id), into: terminal,
-             chatID: chat.id, id: id, queued: true)
+        guard ComposerMode.resolve(input).canSend, !chat.codexIdentityWaiting,
+              !chat.pendingMessages.inputNeedsReview else { return false }
+        chat.pendingMessages.enqueue(id: id, text: text, files: [], agentID: chat.agent.id,
+                                     existing: chat.allEntries, stage: .preparing, sessionID: chat.sessionID)
+        model.save()
+        startTimer()
+        startPending(chat, id: id)
         return true
     }
 
@@ -633,37 +840,269 @@ final class ReaderModeController: NSObject {
             let old = composer.textView.string
             composer.textView.text = old + (old.isEmpty ? "" : "\n\n") + text
             drafts[chatID] = composer.textView.string
+            saveDraft()
             focusComposer()
         } else {
-            let old = drafts[chatID] ?? ""
-            drafts[chatID] = old + (old.isEmpty ? "" : "\n\n") + text
+            var draft = draftStore.draft(chatID: chatID) ?? ComposerDraft(text: drafts[chatID] ?? "", selection: NSRange(location: 0, length: 0), attachments: [])
+            draft.text += (draft.text.isEmpty ? "" : "\n\n") + text
+            draft.selectionLocation = (draft.text as NSString).length
+            draft.selectionLength = 0
+            draftStore.save(draft, chatID: chatID)
+            drafts[chatID] = draft.text
         }
         return true
+    }
+
+    @objc private func previousDraftPressed() { if let chat = model.selectedChat { finishQueueEdit(chat) } }
+    @objc private func reviewedInputPressed() {
+        guard let chat = model.selectedChat else { return }
+        chat.pendingMessages.inputNeedsReview = false
+        stoppedAt[chat.id] = nil
+        sentThisTurn[chat.id] = nil
+        model.save()
+        recoveryLabel.stringValue = "Input review confirmed. Queued work stays held until Resume queue."
+        refresh()
+    }
+    @objc private func keymapPressed() {
+        let alert = NSAlert()
+        alert.messageText = "Reader shortcuts"
+        alert.informativeText = "Command-L: focus message box\nOption-Command-A: attach files\nReturn: send or the selected Queue/Steer action\nCommand-Return: alternate Queue/Steer action\nShift-Return or Option-Return: newline\nControl-Return: Claude Send queue now\nEscape: dismiss suggestions first; Codex may send its pending steers, otherwise native interrupt\nShift-Tab: focus pending message actions\nUp/Down: recall at a text boundary\n@: search this checkout\nShift-Command-R: reader/terminal"
+        alert.addButton(withTitle: "Done")
+        if let window = root.window { alert.beginSheetModal(for: window) }
+    }
+    @objc private func queuePressed() { _ = send(intent: .queue) }
+    @objc private func steerPressed() { _ = send(intent: .steer) }
+    @objc private func cancelEditPressed() { if let chat = model.selectedChat { finishQueueEdit(chat) } }
+    @objc private func resumeQueuePressed() {
+        guard let chat = model.selectedChat else { return }
+        chat.pendingMessages.queuePaused = false
+        model.save()
+        refresh()
+        if composerMode == .ready, !isTyping, editingQueueID == nil, let id = chat.pendingMessages.firstWaitingID { startPending(chat, id: id) }
+    }
+
+    private func saveDraft() {
+        guard !restoringDraft, let id = shownChatID else { return }
+        draftStore.save(ComposerDraft(text: composer.textView.string, selection: composer.textView.selectedRange(), attachments: composer.attachments), chatID: id)
+    }
+
+    private func installDraft(_ draft: ComposerDraft) {
+        restoringDraft = true
+        composer.textView.text = draft.text
+        composer.setAttachments(draft.restoredAttachments())
+        composer.textView.setSelectedRange(draft.clampedSelection)
+        restoringDraft = false
+        saveDraft()
+        focusComposer()
+    }
+
+    private func preserveDraft(_ chat: Chat) {
+        draftStore.save(ComposerDraft(text: composer.textView.string, selection: composer.textView.selectedRange(), attachments: composer.attachments), chatID: chat.id, scope: "before-recovery")
+        try? draftStore.flush()
+    }
+
+    private func finishQueueEdit(_ chat: Chat) {
+        editingQueueID = nil
+        if let original = draftStore.draft(chatID: chat.id, scope: "before-recovery") { installDraft(original) }
+        draftStore.save(nil, chatID: chat.id, scope: "before-recovery")
+        cancelQueueEdit.isHidden = true
+    }
+
+    private func queueAction(chatID: UUID, id: String, action: String) {
+        guard let chat = model.selectedChat, chat.id == chatID,
+              let recovery = chat.pendingMessages.recovery(id: id) else { return }
+        let owned = chat.pendingMessages.stage(id: id) == .waiting
+        switch action {
+        case "terminal": showTerminal()
+        case "resume": resumeQueuePressed()
+        case "remove" where owned: chat.pendingMessages.remove(id: id)
+        case "up" where owned: chat.pendingMessages.move(id: id, offset: -1)
+        case "down" where owned: chat.pendingMessages.move(id: id, offset: 1)
+        case "send" where owned, "sendWithQueue" where owned:
+            refresh()
+            guard composerMode.canSend, !isTyping, editingQueueID != id else { return }
+            startPending(chat, id: id, promote: composerMode.isWorking)
+        case "edit" where owned:
+            preserveDraft(chat)
+            editingQueueID = id
+            installDraft(ComposerDraft(text: recovery.text ?? "", selection: NSRange(location: (recovery.text ?? "").utf16.count, length: 0), attachments: recovery.attachments))
+            cancelQueueEdit.isHidden = false
+            recoveryLabel.stringValue = "Editing a queued message. Send saves the edit; Cancel restores your draft."
+        case "restore":
+            if chat.pendingMessages.stage(id: id) == .preparing || chat.pendingMessages.stage(id: id) == .typing {
+                cancelTransport(chat, reason: "Restored for review before submission finished.")
+            }
+            preserveDraft(chat)
+            installDraft(ComposerDraft(text: recovery.text ?? "", selection: NSRange(location: 0, length: 0), attachments: recovery.attachments))
+            recoveryLabel.stringValue = "Restored a copy. Check terminal delivery before sending again. Previous draft is saved."
+        default: break
+        }
+        model.save()
+    }
+
+    private func editAsNew(chatID: UUID, id: String) {
+        guard let chat = model.selectedChat, chat.id == chatID,
+              let entry = chat.allEntries.first(where: { $0.id == id && $0.kind == .user }) else { return }
+        preserveDraft(chat)
+        let attachments = entry.images.filter { $0.hasPrefix("/") }.map { ComposerAttachment(url: URL(fileURLWithPath: $0)) }
+        installDraft(ComposerDraft(text: entry.text, selection: NSRange(location: (entry.text as NSString).length, length: 0), attachments: attachments))
+        recoveryLabel.stringValue = entry.images.count == attachments.count ? "Editing as a new message. History and files are unchanged." : "Editing as new. Some original images must be reattached."
+    }
+
+    private func startPending(_ chat: Chat, id: String, promote: Bool = false) {
+        guard let recovery = chat.pendingMessages.recovery(id: id), let terminal = chat.terminal,
+              model.chats.contains(where: { $0 === chat }), !chat.codexIdentityWaiting,
+              chat.status != .ended, !terminal.processExited,
+              !chat.pendingMessages.inputNeedsReview, !preparing.contains(id), !outbox.contains(where: { $0.id == id }) else { return }
+        // A queue from a different conversation is recoverable, but never replayed into it.
+        guard recovery.sessionID == chat.sessionID else {
+            chat.pendingMessages.update(id: id, stage: .failed, detail: "The conversation changed. Restore this message for review before sending.")
+            model.save()
+            return
+        }
+        chat.pendingMessages.update(id: id, stage: .preparing)
+        preparing.insert(id)
+        preparationTargets[id] = (chat.id, chat.sessionID, terminal)
+        model.save()
+        ComposerAttachmentTransport.prepare(recovery.attachments, agentID: chat.agentID, changed: { [weak self, weak chat] attachments in
+            guard let self, let chat, self.preparing.contains(id),
+                  chat.pendingMessages.stage(id: id) == .preparing,
+                  let target = self.preparationTargets[id], self.model.chats.contains(where: { $0 === chat && $0.id == target.0 }),
+                  self.matchesSession(chat, expected: target.1, pendingID: id), chat.terminal === target.2, chat.status != .ended else { return }
+            chat.pendingMessages.update(id: id, stage: .preparing, attachments: attachments)
+            self.model.save()
+        }) { [weak self, weak chat] attachments, result in
+            guard let self, let chat, let target = self.preparationTargets[id], self.preparing.remove(id) != nil else { return }
+            self.preparationTargets[id] = nil
+            guard chat.pendingMessages.stage(id: id) == .preparing else { return }
+            guard chat.status != .ended, !terminal.processExited, self.model.chats.contains(where: { $0 === chat && $0.id == target.0 }), self.matchesSession(chat, expected: target.1, pendingID: id), chat.terminal === target.2 else {
+                chat.pendingMessages.update(id: id, stage: .failed, detail: "The chat changed during preparation. Restore the saved input to continue.", attachments: attachments)
+                self.model.save()
+                return
+            }
+            switch result {
+            case .failure(let error):
+                chat.pendingMessages.update(id: id, stage: .failed, detail: error.localizedDescription, attachments: attachments)
+                if self.shownChatID == chat.id { self.recoveryLabel.stringValue = error.localizedDescription }
+            case .success(let files):
+                if let error = ComposerAttachmentTransport.failure(for: files) {
+                    chat.pendingMessages.update(id: id, stage: .failed, detail: error.localizedDescription, attachments: attachments)
+                } else {
+                    chat.pendingMessages.prepareTransport(id: id, files: files, attachments: attachments)
+                    let steps = ComposerMessage.steps(text: recovery.text, files: files, agentID: chat.agentID)
+                    self.type(steps, into: terminal, chatID: chat.id, id: id, queued: true, after: files.map { URL(fileURLWithPath: $0.path) }, promote: promote)
+                }
+            }
+            self.model.save()
+        }
+    }
+
+    private func promoteSubmitted(chatID: UUID, id: String, until deadline: Date) {
+        guard let chat = model.chats.first(where: { $0.id == chatID }), chat.pendingMessages.stage(id: id) == .sent else { return }
+        if sendNativeQueue(chat, id: id) { return }
+        guard Date() < deadline else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in self?.promoteSubmitted(chatID: chatID, id: id, until: deadline) }
+    }
+
+    private func updateMentionMenu() {
+        let text = composer.textView
+        mentionMenu.show(items: text.mentionSuggestions, selection: text.mentionSelection, status: text.mentionStatus)
+        mentionMenuHeight?.constant = text.mentionMenuVisible ? CGFloat(max(1, min(6, text.mentionSuggestions.count))) * 38 : 0
+        if text.mentionMenuVisible { commandMenu.isHidden = true }
+        else { commandMenu.isHidden = !text.commandMenuVisible }
+    }
+
+    private func refreshControls(_ chat: Chat) {
+        guard let provider = chat.agent.transcript else { agentControls.isHidden = true; return }
+        if controlsSession != chat.sessionID || Date().timeIntervalSince(controlsReadAt) > 2 {
+            if controlsSession != chat.sessionID { composer.textView.resetPromptRecall(); pendingControl = nil }
+            controlsSession = chat.sessionID
+            controlsReadAt = Date()
+            controlsRecords = []
+            if let path = chat.transcriptPath, let file = FileHandle(forReadingAtPath: path) {
+                defer { try? file.close() }
+                // Keep session metadata and a bounded recent tail, never scan a whole chat on a timer.
+                let size = (try? file.seekToEnd()) ?? 0
+                try? file.seek(toOffset: 0)
+                let header = (try? file.read(upToCount: 8192)) ?? Data()
+                controlsRecords += header.split(separator: 10).dropLast().map { Data($0) }
+                let offset = size > 262144 ? size - 262144 : 0
+                try? file.seek(toOffset: offset)
+                let tail = (try? file.read(upToCount: 262144)) ?? Data()
+                let lines = tail.split(separator: 10)
+                controlsRecords += (offset > 0 ? Array(lines.dropFirst()) : Array(lines)).map { Data($0) }
+            }
+        }
+        let state = ComposerAgentControlsParser.snapshot(provider: provider, sessionID: chat.sessionID, records: controlsRecords, screen: chat.terminal?.activeScreenText() ?? "")
+        controlsState = state
+        agentControls.update(state: state, enabled: composerMode.canSend && !isTyping && !chat.pendingMessages.inputNeedsReview,
+                             disabledReason: composerMode.isBlocked ? "Answer the current terminal dialog first." : nil)
+    }
+
+    private func requestControl(_ action: ComposerAgentControlAction) {
+        guard let chat = model.selectedChat, let provider = chat.agent.transcript else { return }
+        refresh()
+        if composerMode.isWorking {
+            pendingControl = action
+            recoveryLabel.stringValue = "\(action.label) will open after this turn."
+            return
+        }
+        guard composerMode == .ready, !isTyping, !chat.pendingMessages.inputNeedsReview else { return }
+        if action == .plan, controlsState?.planNeedsTerminal == true { showTerminal(); return }
+        let command = action.command(for: provider)
+        let id = "control-" + UUID().uuidString
+        chat.pendingMessages.enqueue(id: id, text: command, files: [], agentID: chat.agentID, existing: chat.allEntries, stage: .typing, sessionID: chat.sessionID)
+        model.save()
+        type([.command(command), .pressReturn], into: chat.terminal!, chatID: chat.id, id: id, queued: true)
+        // Keep the native dialog visible; never choose its current default on the user's behalf.
+        commandPeekAt[chat.id] = Date()
+        showTerminal()
     }
 
     // MARK: Typing into the terminal
 
     /// Queues a message's steps for a terminal and starts typing if nothing else is. Typing
     /// waits for any of `files` still being converted (PastedImages).
-    private func type(_ steps: [SendStep], into t: TerminalView, chatID: UUID, id: String, queued: Bool, after files: [URL] = []) {
+    private func type(_ steps: [SendStep], into t: TerminalView, chatID: UUID, id: String, queued: Bool, after files: [URL] = [], promote: Bool = false) {
         guard !steps.isEmpty else { return }
+        if model.chats.first(where: { $0.id == chatID })?.activity != .working { sentThisTurn[chatID] = [] }
+        for step in steps {
+            switch step {
+            case .paste(let text), .command(let text): sentThisTurn[chatID, default: []].append(text)
+            case .image: sentThisTurn[chatID, default: []].append("[Image #")
+            case .pressReturn: break
+            }
+        }
         let command = steps.compactMap { step -> String? in
             if case .command(let text) = step { return text }; return nil
         }.first
-        outbox.append((id, chatID, queued, t, steps, files, command))
+        outbox.append(Outgoing(id: id, chatID: chatID, tracksPending: queued, terminal: t, steps: steps, files: files, command: command, sessionID: model.chats.first { $0.id == chatID }?.sessionID, promote: promote))
         if !typing { typeNext() }
     }
 
     private func canType(_ id: String) -> Bool {
-        guard let first = outbox.first, first.id == id, first.terminal.surface != nil,
-              let chat = model.chats.first(where: { $0.id == first.chatID }), chat.status != .ended else { return false }
-        if id.hasPrefix("pending-review-") {
-            let screen = TerminalScreen.analyze(first.terminal.activeScreenText())
-            guard screen.menu == nil, !chat.activity.isNeeds,
-                  statusProvider(chat)?.waits.isEmpty != false else { return false }
+        guard let first = outbox.first, first.id == id, first.terminal.surface != nil, !first.terminal.processExited,
+              let chat = model.chats.first(where: { $0.id == first.chatID }), chat.status != .ended,
+              first.files.allSatisfy({ FileManager.default.isReadableFile(atPath: $0.path) }),
+              !chat.pendingMessages.inputNeedsReview, chat.terminal === first.terminal, matchesSession(chat, expected: first.sessionID, pendingID: first.tracksPending ? id : nil), !chat.codexIdentityWaiting else { return false }
+        if outbox[0].sessionID == nil { outbox[0].sessionID = chat.sessionID }
+        let waits = chat.activity.isNeeds || (statusProvider(chat).map { !$0.waits.isEmpty } ?? false)
+        return ReaderSubmissionGuard.refusal(screen: first.terminal.activeScreenText(), waiting: waits, command: first.command) == nil &&
+            permitsSubmit(first.terminal) && (!first.tracksPending || chat.pendingMessages.stage(id: id) == .typing)
+    }
+
+    private func failTyping(_ id: String, _ reason: String) {
+        guard let first = outbox.first, first.id == id else { return }
+        if let chat = model.chats.first(where: { $0.id == first.chatID }), first.tracksPending {
+            chat.pendingMessages.update(id: id, stage: .failed, detail: reason + (first.typedAny ? " Some input is already in the terminal; inspect it before restoring." : ""))
+            model.save()
         }
-        // A session change or an interruption can drop the queue while a paste is waiting.
-        return !first.tracksPending || chat.pendingMessages.entries.contains { $0.id == id }
+        outbox.removeFirst()
+        if first.typedAny, let chat = model.chats.first(where: { $0.id == first.chatID }) {
+            chat.pendingMessages.inputNeedsReview = true
+            cancelTransport(chat, reason: "Partial input remains in the terminal. Inspect it before another send.")
+        }
+        typeNext()
     }
 
     private func typeNext() {
@@ -671,6 +1110,9 @@ final class ReaderModeController: NSObject {
         typing = true
         let id = outbox[0].id
         let chat = model.chats.first { $0.id == outbox[0].chatID }
+        if outbox[0].tracksPending, chat?.pendingMessages.stage(id: id) != .typing {
+            return failTyping(id, "This input is no longer awaiting submission.")
+        }
         if chat?.codexIdentityWaiting == true, chat?.status != .ended {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
                 guard let self, self.outbox.first?.id == id else { return }
@@ -678,100 +1120,75 @@ final class ReaderModeController: NSObject {
             }
             return
         }
-        guard canType(id) else {
-            chat?.pendingMessages.remove(id: id)
-            outbox.removeFirst()
-            return typeNext()
-        }
-        guard !outbox[0].steps.isEmpty else {
-            outbox.removeFirst()
-            return typeNext()
-        }
-        if let busy = outbox[0].files.first(where: PastedImages.isPending) {
-            return PastedImages.whenReady(busy) { [weak self] in
-                guard let self, self.outbox.first?.id == id else { return }
-                self.typeNext()
-            }
-        }
-        let t = outbox[0].terminal
+        guard canType(id) else { return failTyping(id, "Session or terminal input state changed. Nothing else was typed.") }
+        guard !outbox[0].steps.isEmpty else { outbox.removeFirst(); return typeNext() }
+        let terminal = outbox[0].terminal
         let step = outbox[0].steps.removeFirst()
-        let next = { [weak self] (delay: TimeInterval) in
-            DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+        let next: (TimeInterval) -> Void = { [weak self] delay in
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
                 guard let self, self.outbox.first?.id == id else { return }
                 self.typeNext()
             }
         }
         switch step {
         case .command(let text):
-            if let invocation = ReaderCommandLogic.invocation(text) {
-                // Only the arguments use bracketed paste. The token is paced ordinary
-                // input, and one Return follows after the paste-burst suppression window.
-                let hasArguments = !invocation.arguments.isEmpty
-                t.typeCommandToken("/" + invocation.name + (hasArguments ? " " : ""), while: { [weak self] in
-                    self?.canType(id) == true
-                }) { [weak self] in
-                    guard let self, self.canType(id) else { next(0); return }
-                    if hasArguments { t.pasteText(invocation.arguments) }
-                    next(0.2)
-                }
-            } else {
-                t.pasteText(text)
-                next(0.15)
+            guard let invocation = ComposerCommandTransport.invocation(text) else { return failTyping(id, "The command could not be prepared.") }
+            outbox[0].typedAny = true
+            terminal.typeCommandToken("/" + invocation.name + (invocation.arguments.isEmpty ? "" : " "), while: { [weak self] in
+                self?.canType(id) == true
+            }) { [weak self] in
+                guard let self, self.outbox.first?.id == id else { return }
+                guard self.canType(id) else { return self.failTyping(id, "The terminal changed before command arguments were pasted.") }
+                if !invocation.arguments.isEmpty { terminal.pasteText(invocation.arguments) }
+                next(0.2)
             }
         case .paste(let text):
-            t.pasteText(text)
+            terminal.pasteText(text)
+            outbox[0].typedAny = true
             next(0.15)
         case .image(let path):
-            let before = ComposerMessage.imageMarks(t.activeScreenText())
-            t.pasteText(path)
+            guard outbox[0].files.allSatisfy({ FileManager.default.isReadableFile(atPath: $0.path) }) else { return failTyping(id, "An attachment is no longer readable.") }
+            let before = ComposerMessage.imageMarks(terminal.activeScreenText())
+            terminal.pasteText(path)
+            outbox[0].typedAny = true
             let deadline = Date().addingTimeInterval(imageWait)
             func check() {
                 guard self.outbox.first?.id == id else { return }
-                if ComposerMessage.imageMarks(t.activeScreenText()) > before { return next(0.1) }
-                if Date() >= deadline {
-                    Log.write("reader mode: no image chip showed for a pasted image; carrying on")
-                    return next(0)
-                }
+                guard self.canType(id) else { return self.failTyping(id, "The terminal changed while attaching the image.") }
+                if ComposerMessage.imageMarks(terminal.activeScreenText()) > before { return next(0.1) }
+                if Date() >= deadline { return self.failTyping(id, "The agent did not confirm the image attachment. The message was not submitted.") }
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { check() }
             }
             check()
         case .pressReturn:
-            let command = outbox[0].command
-            // The same pause TerminalView.submit leaves, so the agent has taken the paste in.
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
-                guard let self, self.outbox.first?.id == id else { return }
-                let screen = t.activeScreenText()
-                let suggestions = !CommandMenuScreen.rows(screen).isEmpty
-                let commandSafe = command == nil || (CommandMenuScreen.safe(screen) &&
-                    (TerminalScreen.analyze(screen).menu == nil || suggestions))
-                let panelSafe = !id.hasPrefix("pending-review-") || {
-                    let state = TerminalScreen.analyze(t.activeScreenText())
-                    guard let chat = self.model.chats.first(where: { $0.terminal === t }) else { return false }
-                    return state.menu == nil && !chat.activity.isNeeds && chat.status != .ended
-                }()
-                if self.canType(id) && self.permitsSubmit(t) && commandSafe && panelSafe {
-                    t.pressReturn()
-                    self.model.chats.first { $0.id == self.outbox[0].chatID }?.pendingMessages.markSubmitted(id: id)
-                    if let command { self.didSendCommand(command, terminal: t) }
-                } else if command != nil, self.model.selectedChat?.terminal === t {
-                    self.showTerminal()
-                } else if id.hasPrefix("pending-review-"), let chat = self.model.chats.first(where: { $0.terminal === t }) {
-                    chat.pendingMessages.remove(id: id)
+                guard let self, let first = self.outbox.first, first.id == id else { return }
+                guard self.canType(id) else { return self.failTyping(id, "A menu or session change prevented submission.") }
+                if let chat = self.model.chats.first(where: { $0.id == first.chatID }), first.tracksPending {
+                    // Persist before the irreversible Return so a crash never permits replay.
+                    chat.pendingMessages.markSubmitted(id: id, existing: chat.allEntries)
+                    self.model.save()
                 }
+                self.submittedAt[first.chatID] = Date()
+                self.queueReadySince[first.chatID] = nil
+                terminal.pressReturn()
+                if let command = first.command { self.didSendCommand(command, terminal: terminal) }
+                self.outbox.removeFirst()
                 self.typeNext()
+                if first.promote { self.promoteSubmitted(chatID: first.chatID, id: id, until: Date().addingTimeInterval(3)) }
             }
         }
     }
 
     /// True while a message is still being typed into a terminal.
-    var isTyping: Bool { typing }
+    var isTyping: Bool { typing || !preparing.isEmpty }
 
-    func hasPanelFeedbackTransport(id: String) -> Bool { outbox.contains { $0.id == id } }
+    func hasPanelFeedbackTransport(id: String) -> Bool { preparing.contains(id) || outbox.contains { $0.id == id } }
 
     private func didSendCommand(_ text: String, terminal: TerminalView) {
         guard let chat = model.chats.first(where: { $0.terminal === terminal }),
-              let invocation = ReaderCommandLogic.invocation(text) else { return }
-        if let name = ReaderCommandLogic.invocation(text)?.name,
+              let invocation = ComposerCommandTransport.invocation(text) else { return }
+        if let name = ComposerCommandTransport.invocation(text)?.name,
            ["cd", "model", "login", "logout", "plugin", "plugins", "reload-plugins", "reload-skills", "config", "experimental", "restart", "resume", "clear"].contains(name) {
             observedMenus[chat.id] = nil
             commandLoadAt = .distantPast
@@ -789,13 +1206,26 @@ final class ReaderModeController: NSObject {
     @discardableResult
     func sendNow(chatID: UUID, id: String) -> Bool {
         guard let chat = model.selectedChat, chat.id == chatID, chat.id == shownChatID,
-              mode.showsReader(chat), let terminal = chat.terminal, terminal.surface != nil,
-              !terminal.processExited, !outbox.contains(where: { $0.chatID == chatID }),
-              let action = QueuedSendNow.action(agentID: chat.agent.id) else { return false }
+              mode.showsReader(chat) else { return false }
         refresh()
-        guard composerMode.isWorking, permitsSubmit(terminal),
-              chat.pendingMessages.entries.contains(where: { $0.id == id && $0.sendNowLabel != nil }) else { return false }
-        guard chat.pendingMessages.requestDelivery(id: id) else { return false }
+        return sendNativeQueue(chat, id: id)
+    }
+
+    /// A promotion already requested by the user finishes against its original terminal.
+    private func sendNativeQueue(_ chat: Chat, id: String) -> Bool {
+        guard let terminal = chat.terminal, terminal.surface != nil, isLive(chat),
+              !chat.codexIdentityWaiting, !chat.pendingMessages.inputNeedsReview, !isTyping,
+              !outbox.contains(where: { $0.chatID == chat.id }),
+              let action = QueuedSendNow.action(agentID: chat.agent.id) else { return false }
+        let screen = terminal.activeScreenText()
+        let waiting = chat.activity.isNeeds || (statusProvider(chat).map { !$0.waits.isEmpty } ?? false)
+        guard chat.activity == .working, QueuedSendNow.available(agentID: chat.agent.id, screen: screen),
+              ReaderSubmissionGuard.refusal(screen: screen, waiting: waiting, command: nil) == nil,
+              permitsSubmit(terminal) else { return false }
+        chat.pendingMessages.sendNowEnabled = true
+        guard chat.pendingMessages.entries.contains(where: { $0.id == id && $0.sendNowLabel != nil }),
+              chat.pendingMessages.requestDelivery(id: id) else { return false }
+        model.save()
         terminal.pressKeys(action.keys)
         return true
     }
@@ -810,7 +1240,7 @@ final class ReaderModeController: NSObject {
     /// on the transcript steal the keyboard from the message box.
     private func focusQueue() -> Bool {
         guard let chat = model.selectedChat, mode.showsReader(chat),
-              chat.pendingMessages.entries.contains(where: { $0.sendNowLabel != nil }),
+              chat.pendingMessages.entries.contains(where: { $0.sendNowLabel != nil || !($0.pendingActions ?? []).isEmpty }),
               let web = reader?.page.webView as? FocuslessWebView, let window = web.window else { return false }
         web.allowsQueueFocus = true
         window.makeFirstResponder(web)
@@ -825,31 +1255,33 @@ final class ReaderModeController: NSObject {
     @discardableResult
     func stop() -> Bool {
         guard composerMode.isWorking, let chat = model.selectedChat, let t = chat.terminal else { return false }
-        discardPendingMessages(chat)
+        cancelTransport(chat, reason: "Stopped. The CLI may retain or deliver submitted input; queued work is held.")
         t.pressEscape()
         stoppedAt[chat.id] = Date()
         Log.write("reader mode: stop (Esc) chat=\(chat.id)")
         return true
     }
 
-    /// After a stop, Claude Code puts the stopped message back in its input box, hidden behind
-    /// the reader, and the next message would be typed onto the end of it. Deletes it, but only
-    /// when the bottom of the screen shows text reader mode sent this turn.
+    /// A stopped agent can restore input without a transcript entry. Preserve that text and
+    /// require inspection when the screen contains input reader mode sent this turn.
     private func clearRestoredInput(_ chat: Chat) {
-        discardPendingMessages(chat)
-        guard let sent = sentThisTurn.removeValue(forKey: chat.id), let t = chat.terminal else { return }
-        let n = ComposerMessage.restoredLength(screen: t.activeScreenText(), sent: sent)
-        guard n > 0 else { return }
-        t.pressBackspace(times: n)
-        Log.write("reader mode: cleared \(n) restored characters after stop chat=\(chat.id)")
+        guard let terminal = chat.terminal else { return }
+        let screen = terminal.activeScreenText()
+        guard chat.pendingMessages.isRestored(in: screen) ||
+                ComposerMessage.restoredLength(screen: screen, sent: sentThisTurn[chat.id] ?? []) > 0 else { return }
+        chat.pendingMessages.inputNeedsReview = true
+        cancelTransport(chat, reason: "The terminal restored input after interruption. Review it before sending again.")
     }
 
-    /// A cancelled send must not press Return later from an image or paste callback.
-    private func discardPendingMessages(_ chat: Chat) {
-        chat.pendingMessages.removeAll()
-        let wasTyping = outbox.first?.chatID == chat.id
+    private func cancelTransport(_ chat: Chat, reason: String) {
+        if outbox.contains(where: { $0.chatID == chat.id && $0.typedAny }) { chat.pendingMessages.inputNeedsReview = true }
+        chat.pendingMessages.hold(reason: reason)
+        let ids = preparationTargets.filter { $0.value.0 == chat.id }.map(\.key)
+        for id in ids { preparing.remove(id); preparationTargets[id] = nil }
+        let active = outbox.first?.chatID == chat.id
         outbox.removeAll { $0.chatID == chat.id }
-        if wasTyping { typeNext() }
+        if active { typeNext() }
+        model.save()
     }
 
     /// Shows the live terminal so a menu can be answered there.

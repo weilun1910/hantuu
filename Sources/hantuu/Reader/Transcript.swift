@@ -30,6 +30,9 @@ struct ReaderEntry: Codable, Equatable {
     var links: [DetectedPath] = []
     /// Transient reader state. These fields are never written to an agent transcript.
     var pending: Bool? = nil
+    var pendingState: String? = nil
+    var pendingDetail: String? = nil
+    var pendingActions: [String]? = nil
     var replacesPendingID: String? = nil
     var replacesPendingIDs: [String]? = nil
     var deliveryRequested: Bool? = nil

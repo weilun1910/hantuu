@@ -683,3 +683,11 @@ body.reader.main .entry.user > .queued-label { display: block; text-align: right
 .entry.user:hover .send-now, .entry.user:focus-within .send-now { opacity: 1; }
 .entry.user .send-now:hover { text-decoration: underline; }
 .entry.user .send-now:focus-visible { outline: 1px solid currentColor; outline-offset: 3px; }
+
+.pending-actions { font-size: 11px; max-width: 100%; text-align: right; }
+.pending-actions button, .edit-as-new { border: 0; background: transparent; color: var(--secondary); font: inherit; font-size: 11px; padding: 3px 5px; cursor: pointer; }
+.pending-actions button:hover, .edit-as-new:hover { text-decoration: underline; }
+.pending-actions button:focus-visible, .edit-as-new:focus-visible { outline: 1px solid currentColor; outline-offset: 2px; }
+.pending-detail { color: var(--secondary); max-width: 480px; margin: 3px 0 6px; }
+.edit-as-new { opacity: 0; }
+.entry.user:hover .edit-as-new, .entry.user:focus-within .edit-as-new { opacity: 1; }
