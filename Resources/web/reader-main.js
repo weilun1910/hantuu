@@ -70,6 +70,9 @@
   // The two most frequent kinds, then a count of the rest: "Read 3 files, ran 2 commands and
   // 2 more". Ties keep the order they happened in.
   function summary(tools) {
+    if (tools.some(t => t.dataset.operationState && t.dataset.operationState !== 'completed')) {
+      return { text: tools.length + ' operations | ' + tools.filter(t => t.dataset.operationState !== 'completed').length + ' without a completed result', icon: 'other' };
+    }
     const counts = new Map();
     for (const t of tools) counts.set(t.dataset.tool, (counts.get(t.dataset.tool) || 0) + 1);
     const kinds = Array.from(counts.keys()).sort((a, b) => counts.get(b) - counts.get(a));
@@ -144,6 +147,7 @@
     if (fresh) fadeIn(el);
     if (e.kind === 'tool') {
       el.dataset.tool = kindOf(e);
+      for (const a of el.querySelectorAll('a.parity-file')) a.textContent = relative(a.dataset.path);
       const line = el.querySelector('.toolline');
       if (line) {
         line.insertAdjacentHTML('afterbegin', svg(el.dataset.tool));
@@ -160,7 +164,7 @@
       return;
     }
     codeBlocks(el);
-    if (e.kind === 'assistant' || e.kind === 'user') {
+    if (['assistant', 'user', 'question', 'attention', 'error', 'plan'].includes(e.kind)) {
       const meta = document.createElement('div');
       meta.className = 'meta';
       const when = clock(e.time);
@@ -176,7 +180,7 @@
   }
 
   function isTool(node) {
-    return node && ((node.classList.contains('entry') && node.classList.contains('tool')) || node.classList.contains('toolgroup'));
+    return node && !node.matches('.parity-failure, .parity-checklist, .parity-delegated') && ((node.classList.contains('entry') && node.classList.contains('tool')) || node.classList.contains('toolgroup'));
   }
 
   function toolsIn(nodes) {
@@ -195,13 +199,16 @@
     if (fresh) fadeIn(g);
     g.dataset.key = key;
     const s = summary(tools);
-    const sum = document.createElement('div');
+    const sum = document.createElement('button');
+    sum.type = 'button';
+    sum.setAttribute('aria-expanded', String(openGroups.has(key)));
     sum.className = 'toolsum';
     sum.title = 'Show the steps';
     sum.innerHTML = svg(s.icon) + '<span class="sumtext"></span>' + svg('chevron', 'chev');
     sum.querySelector('.sumtext').textContent = s.text;
     sum.addEventListener('click', () => {
       g.classList.toggle('open');
+      sum.setAttribute('aria-expanded', String(g.classList.contains('open')));
       if (g.classList.contains('open')) openGroups.add(key); else openGroups.delete(key);
     });
     const rows = document.createElement('div');

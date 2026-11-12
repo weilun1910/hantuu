@@ -22,12 +22,15 @@ final class ReaderController {
     let mediaKeys: ReaderMediaKeys
     var onSendNow: ((UUID, String) -> Void)?
     var onFocusComposer: (() -> Void)?
+    let interaction: ReaderInteraction
+    var retryReading: (() -> Void)?
 
     /// Reader mode makes a second one for the main area, with `layout=main` in the page URL.
     init(model: AppModel, page: String = "reader.html", identifier: String = "hantuu.reader", focusless: Bool = false, observesSelection: Bool = true) {
         self.page = WebPage(page: page, identifier: identifier, focusless: focusless)
         self.model = model
         mediaKeys = ReaderMediaKeys(page: self.page)
+        interaction = ReaderInteraction(page: self.page, model: model, ownsMainChat: focusless && observesSelection, observesSelection: observesSelection)
         self.page.onReady = { [weak self] in self?.reload() }
         self.page.onMessage = { [weak self] msg in self?.handle(msg) }
         guard observesSelection else { return }
@@ -44,7 +47,7 @@ final class ReaderController {
         model.readerAppend
             .sink { [weak self] id, entries in
                 guard let self, id == self.shownChatID else { return }
-                self.page.call("append", ReaderPayload(chatID: id.uuidString, entries: entries, pending: self.model.selectedChat?.pendingMessages.entries ?? [], emptyText: ""))
+                self.page.call("append", ReaderPayload(chatID: id.uuidString, entries: ReaderDelegation.applying(model.selectedChat?.readerWork, to: entries), pending: model.selectedChat?.pendingMessages.entries ?? [], emptyText: ""))
             }
             .store(in: &bag)
     }
@@ -58,7 +61,7 @@ final class ReaderController {
 
     func appendTranscript(_ entries: [ReaderEntry]) {
         guard var payload = externalPayload else { return }
-        payload.entries += entries
+        payload.entries = ReaderEntries.merging(payload.entries, entries)
         externalPayload = payload
         payload.entries = entries
         page.call("append", payload)
@@ -72,6 +75,7 @@ final class ReaderController {
     }
 
     func reload() {
+        defer { interaction.reset() }
         if let externalPayload { page.call("reset", externalPayload); return }
         let chat = model.selectedChat
         shownChatID = chat?.id
@@ -102,6 +106,7 @@ final class ReaderController {
     }
 
     private func handle(_ msg: [String: Any]) {
+        guard !interaction.message(msg) else { return }
         let base = model.selectedChat.flatMap { model.project($0.projectID)?.path }
         switch msg["type"] as? String {
         case "sendNow":
@@ -111,13 +116,21 @@ final class ReaderController {
             onSendNow?(chatID, id)
         case "focusComposer":
             onFocusComposer?()
+        case "retryReader":
+            if let retryReading { retryReading() } else { model.selectedChat?.follower?.retry() }
+            interaction.refresh()
+        case "selectAgent":
+            guard let id = msg["id"] as? String, let chat = model.selectedChat else { return }
+            if let agent = chat.readerWork?.subagents.first(where: { $0.id == id }) {
+                model.subagentBrowser.selection = SubagentBrowser.Selection(chatID: chat.id, agent: SidebarSubagent(agent))
+            } else { model.selectSubagent(id, in: chat.id) }
         case "open":
             guard let path = msg["path"] as? String else { return }
             let line = msg["line"] as? Int
             if var route = FileRouter.shared.route(for: path, base: base) {
                 if case .code(let p, _) = route, let line { route = .code(p, line) }
                 FileRouter.shared.perform(route)
-            }
+            } else { page.call("readerFileResult", ["path": path]) }
         case "link":
             guard let href = msg["href"] as? String else { return }
             let b = (msg["base"] as? String) ?? base

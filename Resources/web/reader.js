@@ -2,6 +2,7 @@
 (function () {
   'use strict';
   const R = window.hantuuRender;
+  const parity = window.ReaderParity;
   const list = document.getElementById('entries');
   const empty = document.getElementById('empty');
   const pill = document.getElementById('newpill');
@@ -28,9 +29,10 @@
 
   window.addEventListener('scroll', () => {
     if (chatID) scrollMemory[chatID] = atBottom() ? 'bottom' : scroller.scrollTop;
-    if (atBottom()) pill.hidden = true;
+    pill.hidden = atBottom();
   });
   pill.addEventListener('click', scrollToBottom);
+  if (window.ResizeObserver) new ResizeObserver(() => { pill.hidden = atBottom(); }).observe(list);
 
   function label(text, cls) {
     const d = document.createElement('div');
@@ -97,6 +99,8 @@
   }
 
   function renderEntry(e) {
+    const evidence = parity && parity.renderEntry(e);
+    if (evidence) return evidence;
     const el = document.createElement('section');
     el.className = 'entry ' + e.kind;
     el.dataset.id = e.id;
@@ -124,11 +128,14 @@
           c.textContent = e.detail.split('\n')[0];
           line.appendChild(c);
           line.classList.add('expandable');
+          line.tabIndex = 0; line.setAttribute('role', 'button'); line.setAttribute('aria-expanded', 'false');
+          line.addEventListener('keydown', ev => { if ((ev.key === 'Enter' || ev.key === ' ') && ev.target === line) { ev.preventDefault(); line.click(); } });
           line.title = 'Show the full command';
           line.addEventListener('click', (ev) => {
             if (ev.target.closest('a')) return;
             const open = el.querySelector('pre.full');
-            if (open) { open.remove(); return; }
+            if (open) { open.remove(); line.setAttribute('aria-expanded', 'false'); return; }
+            line.setAttribute('aria-expanded', 'true');
             const pre = document.createElement('pre');
             pre.className = 'full';
             pre.textContent = e.detail;
@@ -164,19 +171,44 @@
       case 'notice':
       default:
         el.textContent = e.text;
+        if (parity) parity.register(e, el);
         return el;
     }
     const pics = images(e.images);
     if (pics) el.appendChild(pics);
     const media = R.mediaFor(e.links, shown);
     if (media) el.appendChild(media);
+    if (parity) parity.register(e, el);
     return el;
   }
 
   function add(entries, fresh) {
     const frag = document.createDocumentFragment();
+    // Unwrap affected groups before reconciling evidence so failures cannot stay hidden.
+    const updated = new Set(entries.filter(e => seen.has(e.id)).map(e => e.id));
+    if (updated.size) for (const group of Array.from(list.querySelectorAll('.toolgroup'))) {
+      if (!Array.from(group.querySelectorAll('.entry')).some(el => updated.has(el.dataset.id))) continue;
+      for (const row of Array.from(group.querySelectorAll('.toolrows > .entry'))) list.insertBefore(row, group);
+      group.remove();
+    }
+    const existing = new Map(Array.from(list.querySelectorAll('.entry[data-id]')).map(el => [el.dataset.id, el]));
     for (const e of entries) {
-      if (seen.has(e.id)) continue;
+      if (seen.has(e.id)) {
+        if (sideVersions.get(e.id) === JSON.stringify(e)) continue;
+        sideVersions.set(e.id, JSON.stringify(e));
+        const prior = existing.get(e.id);
+        if (prior) {
+          const replacement = renderEntry(e);
+          if (main) main.decorate(replacement, e, false);
+          prior.replaceWith(replacement);
+          existing.set(e.id, replacement);
+        } else {
+          const replacement = renderEntry(e);
+          if (main) main.decorate(replacement, e, false);
+          frag.appendChild(replacement); existing.set(e.id, replacement);
+        }
+        continue;
+      }
       seen.add(e.id);
       for (const id of (e.replacesPendingIDs || [])) {
         const grouped = pendingNodes.get(id);
@@ -186,6 +218,7 @@
           pendingNodes.delete(id);
         }
       }
+      sideVersions.set(e.id, JSON.stringify(e));
       const old = pendingNodes.get(e.replacesPendingID);
       let el;
       if (old && e.kind === 'user') {
@@ -195,6 +228,7 @@
         pendingNodes.delete(e.replacesPendingID);
         el.dataset.id = e.id;
         el.classList.remove('pending', 'fresh');
+        if (parity) parity.register(e, el);
         const queued = el.querySelector('.queued-label');
         if (queued) queued.remove();
         const action = el.querySelector('.send-now');
@@ -208,10 +242,12 @@
         if (main) main.decorate(el, e, fresh && !e.replacesPendingID && !e.replacesPendingIDs);
       }
       frag.appendChild(el);
+      existing.set(e.id, el);
     }
     const firstPending = Array.from(list.children).find((el) => el.classList.contains('pending'));
     list.insertBefore(frag, firstPending || null);
-    if (main) main.settle(list, !fresh);
+    if (main) main.settle(list, !fresh || updated.size > 0);
+    if (parity) { parity.prune(); parity.refreshSearch(); }
     empty.hidden = list.childElementCount > 0;
   }
 
@@ -237,6 +273,7 @@
       list.appendChild(el);
     }
     empty.hidden = list.childElementCount > 0;
+    if (parity) { parity.prune(); parity.refreshSearch(); }
   }
 
   window.hantuu = {
@@ -246,12 +283,30 @@
       buttons[buttons.length - 1].focus();
       return true;
     },
+    readerFind(payload) {
+      if (!parity) return;
+      if (payload.action === 'close') parity.closeFind();
+      else if (payload.action === 'next') parity.nextMatch(payload.backwards);
+      else parity.openFind();
+    },
+    readerHealth(payload) { if (parity) parity.setStatus(payload); },
+    readerRequests(payload) { if (parity) parity.setRequests(payload); },
+    readerRequestResult(payload) { if (parity) parity.requestResult(payload); },
+    readerFileResult(payload) {
+      for (const link of list.querySelectorAll('a.parity-file')) if (link.dataset.path === payload.path) {
+        link.title = 'This file is unavailable. Its recorded patch and path remain in the conversation.';
+        if (!link.nextElementSibling?.classList.contains('parity-unavailable')) {
+          const note = document.createElement('span'); note.className = 'parity-note parity-unavailable'; note.textContent = 'File unavailable'; link.after(note);
+        }
+      }
+    },
     // Esc while the message box has the keyboard: shrink an opened-out preview first.
     collapseMedia() { return R.collapseMedia(); },
     pdfInfo(payload) { R.pdfInfo(payload); },
     // Show a chat from scratch. Restores where you were last time you read it.
     reset(payload) {
       chatID = payload.chatID || null;
+      if (parity) parity.reset(chatID);
       seen.clear();
       pendingNodes.clear();
       sideVersions.clear();
@@ -286,9 +341,14 @@
       const stick = atBottom();
       const top = scroller.scrollTop;
       const entries = payload.entries || [];
+      // Reconcile in transcript order; work groups are a presentation wrapper only.
+      for (const group of Array.from(list.querySelectorAll('.toolgroup'))) {
+        for (const row of Array.from(group.querySelectorAll('.toolrows > .entry'))) list.insertBefore(row, group);
+        group.remove();
+      }
       let changed = false;
       const wanted = new Set(entries.map(e => e.id));
-      const nodes = new Map(Array.from(list.children).map(el => [el.dataset.id, el]));
+      const nodes = new Map(Array.from(list.querySelectorAll('.entry[data-id]')).map(el => [el.dataset.id, el]));
       for (const [id, el] of nodes) {
         if (!wanted.has(id)) { el.remove(); seen.delete(id); sideVersions.delete(id); changed = true; }
       }
@@ -297,6 +357,7 @@
         if (sideVersions.get(e.id) === version) continue;
         changed = true;
         const node = renderEntry(e);
+        if (main) main.decorate(node, e, false);
         const old = nodes.get(e.id);
         if (old && old.isConnected) old.replaceWith(node);
         else list.appendChild(node);
@@ -307,10 +368,12 @@
       const ordered = new Map(Array.from(list.children).map(el => [el.dataset.id, el]));
       for (let i = 0; i < entries.length; i++) {
         const node = ordered.get(entries[i].id);
-        if (list.children[i] !== node) list.insertBefore(node, list.children[i] || null);
+        if (node && list.children[i] !== node) list.insertBefore(node, list.children[i] || null);
       }
+      if (main) main.settle(list, true);
       empty.textContent = payload.emptyText || '';
       empty.hidden = list.childElementCount > 0;
+      if (parity) { parity.prune(); parity.refreshSearch(); }
       if (stick) scrollToBottom();
       else { scroller.scrollTop = top; if (changed) pill.hidden = false; }
     },

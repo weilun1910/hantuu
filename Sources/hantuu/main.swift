@@ -1,6 +1,7 @@
 import AppKit
 
 let args = CommandLine.arguments
+if args.contains(ReaderRequestBridge.flag) { exit(ReaderRequestBridge.runHook()) }
 let known: Set<String> = ["--self-test", "--workdir", "--data-dir", "--no-pmset", "--open-project", "--new-chat"]
 let valueFlags: Set<String> = ["--workdir", "--data-dir", "--open-project", "--new-chat"]
 

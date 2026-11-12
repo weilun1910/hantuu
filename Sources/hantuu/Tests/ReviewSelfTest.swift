@@ -98,6 +98,7 @@ extension SelfTest {
             #"{"type":"assistant","uuid":"a1","message":{"model":"claude-opus-5-5","role":"assistant","content":[{"type":"text","text":"hi"}],"usage":{"input_tokens":10,"cache_creation_input_tokens":2000,"cache_read_input_tokens":48000,"output_tokens":300}}}"#,
             #"{"type":"assistant","uuid":"s1","isSidechain":true,"message":{"model":"claude-haiku","usage":{"input_tokens":190000}}}"#,
             #"{"type":"assistant","uuid":"a2","message":{"model":"claude-opus-5-5","content":[{"type":"tool_use","id":"tw","name":"TodoWrite","input":{"todos":[{"content":"Read the parser","status":"completed","activeForm":"Reading"},{"content":"Fix the off-by-one","status":"in_progress","activeForm":"Fixing"},{"content":"Add a test","status":"pending","activeForm":"Adding"}]}}]}}"#,
+            #"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"tw","content":"Todos have been modified successfully"}]}}"#,
             #"{"type":"assistant","uuid":"a3","message":{"model":"<synthetic>","content":[]}}"#,
         ]
         for l in claudeLines { claude.consume(Data(l.utf8)) }
@@ -115,7 +116,9 @@ extension SelfTest {
             #"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"tc2","name":"TaskCreate","input":{"subject":"Ship it","description":"d"}}]}}"#,
             #"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"tc2","content":[{"type":"text","text":"Task #2 created successfully: Ship it"}]}]}}"#,
             #"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"tu1","name":"TaskUpdate","input":{"taskId":"1","status":"completed"}}]}}"#,
+            #"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"tu1","content":"Updated task #1 status"}]}}"#,
             #"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"tu2","name":"TaskUpdate","input":{"taskId":"2","status":"in_progress"}}]}}"#,
+            #"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"tu2","content":"Updated task #2 status"}]}}"#,
         ] { tasks.consume(Data(l.utf8)) }
         check("plan: Claude task list (TaskCreate, TaskUpdate)", tasks.insights.plan.map { "\($0.text)=\($0.state.rawValue)" } == ["Write docs=completed", "Ship it=inProgress"], "\(tasks.insights.plan)")
 
@@ -125,6 +128,7 @@ extension SelfTest {
             #"{"timestamp":"t","type":"event_msg","payload":{"type":"token_count","info":null}}"#,
             #"{"timestamp":"t","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"total_tokens":99999},"last_token_usage":{"input_tokens":64000,"cached_input_tokens":13312,"output_tokens":600,"total_tokens":64600},"model_context_window":258400}}}"#,
             #"{"timestamp":"t","type":"response_item","payload":{"type":"function_call","name":"update_plan","arguments":"{\"explanation\":\"x\",\"plan\":[{\"step\":\"Scan the repo\",\"status\":\"completed\"},{\"step\":\"Patch the bug\",\"status\":\"in_progress\"},{\"step\":\"Run tests\",\"status\":\"pending\"}]}","call_id":"c1"}}"#,
+            #"{"type":"response_item","payload":{"type":"function_call_output","call_id":"c1","output":"Plan updated"}}"#,
         ] { codex.consume(Data(l.utf8)) }
         let xi = codex.insights
         check("context: Codex token_count with its window size", xi.contextUsed == 64600 && xi.contextWindow == 258400 && !xi.windowIsGuess, "\(xi)")
@@ -554,6 +558,7 @@ extension SelfTest {
                 ["content": "Update the README", "status": "pending", "activeForm": "Updating"],
             ]]]],
             "usage": ["input_tokens": 6, "cache_creation_input_tokens": 3120, "cache_read_input_tokens": 71890, "output_tokens": 410]]]))
+        lines.append(line(["type": "user", "message": ["content": [["type": "tool_result", "tool_use_id": "tw1", "content": "Todos have been modified successfully"]]]]))
         try? (lines.joined(separator: "\n") + "\n").write(to: url, atomically: true, encoding: .utf8)
     }
 

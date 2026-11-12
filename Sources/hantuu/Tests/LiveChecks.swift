@@ -6,7 +6,7 @@ import GhosttyKit
 /// parsing and selection rules below. No fixture test launches an agent or reads its home.
 enum LiveCheckRules {
     static let agents = ["claude", "codex"]
-    static let features = ["slash", "queued", "send-now", "relaunch", "subagents"]
+    static let features = ["slash", "queued", "send-now", "relaunch", "subagents", "reader"]
 
     static func codexModel(for feature: String, configured: String?) -> String {
         configured ?? (feature == "subagents" ? "gpt-6.1-sol" : "gpt-6-luna")
@@ -159,7 +159,7 @@ extension SelfTest {
         guard let raw = env["HANTUU_LIVE"], !raw.isEmpty else { return }
         guard let agents = LiveCheckRules.selection(env["HANTUU_LIVE_AGENTS"], allowed: LiveCheckRules.agents),
               let features = LiveCheckRules.selection(env["HANTUU_LIVE_FEATURES"], allowed: LiveCheckRules.features) else {
-            check("live configuration: selectors", false, "Use claude,codex and slash,queued,send-now,relaunch,subagents.")
+            check("live configuration: selectors", false, "Use claude,codex and slash,queued,send-now,relaunch,subagents,reader.")
             return
         }
         let folder = URL(fileURLWithPath: raw).standardizedFileURL.resolvingSymlinksInPath()
@@ -208,6 +208,7 @@ extension SelfTest {
                 case "send-now": probe.sendNow()
                 case "relaunch": probe.relaunch()
                 case "subagents": probe.subagents()
+                case "reader": probe.readerParity()
                 default: break
                 }
             }
@@ -216,7 +217,8 @@ extension SelfTest {
 }
 
 /// Each feature has its own chat and helper PID. Failure never carries a menu into the
-/// next feature. All app data stays in the self test; only CLIs write their own transcripts.
+/// next feature. App data stays in the self test. The reader probe also creates one uniquely
+/// named text file in the explicitly selected probe folder; CLIs write their own transcripts.
 private final class LiveCheckSession {
     let agent: String
     let feature: String
@@ -704,6 +706,87 @@ private final class LiveCheckSession {
                "first=\(countUser(first)), second=\(countUser(second)); \(String(screen.suffix(450)))")
     }
 
+    /// One inexpensive turn supplies real evidence. No tool gate or permission policy is changed.
+    func readerParity() {
+        guard let chat else { return }
+        let suffix = UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
+        let stdout = "readerstdout" + suffix
+        let stderr = "readerfailure" + suffix
+        let done = "readerdone" + suffix
+        let before = "readerbefore" + suffix
+        let after = "readerafter" + suffix
+        let planText = "Reader probe " + suffix
+        let file = folder.appendingPathComponent("hantuu-reader-probe-" + suffix + ".txt")
+        guard LiveCheckRules.inside(file, folder), !FileManager.default.fileExists(atPath: file.path) else {
+            report("unique probe-owned file", false); return
+        }
+        let editTools = agent == "claude" ? "Write then Edit" : "apply_patch for both creation and edit"
+        let planTools = agent == "claude" ? "TaskCreate/TaskUpdate or TodoWrite" : "update_plan"
+        let prompt = """
+        Run this small reader integration probe. Do not inspect other files or use subagents.
+        If checklist tools (\(planTools)) are already available, record one in-progress step titled '\(planText)' and complete it after the probe. Do not change configuration to expose tools. Otherwise finish without a checklist.
+        Run two separate shell calls: first printf '\(stdout)\\n'; second sh -c 'printf "\(stderr)\\n" >&2; exit 7'. The exit 7 is intentional; continue afterwards without retrying it.
+        Using \(editTools), create only the new file \(file.path) containing '\(before)' and then edit that content to '\(after)'. Do not create or edit any other file. Do not use shell redirection for these file changes.
+        Finish with exactly \(done). If a permission or trust prompt appears, leave it for the user. Do not change permissions.
+        """
+        let sent = send(prompt)
+        let answered = sent && wait(180) { self.reply(done) && self.reader?.composerMode == .ready }
+        report("probe completed without answering safety prompts", answered)
+        guard answered, let page = reader?.reader?.page else { return }
+        let operations = chat.allEntries.compactMap(\.operation)
+        let successful = operations.first { ($0.output ?? "").contains(stdout) && $0.state == "completed" }
+        report("successful shell retains actual stdout", successful != nil)
+        let failed = operations.first { ($0.output ?? "").contains(stderr) && $0.state == "failed" }
+        report("intentional shell failure retains output and exit 7", failed?.exitCode == 7,
+               "state=\(failed?.state ?? "missing"), exit=\(failed?.exitCode.map(String.init) ?? "unrecorded")")
+        let edits = operations.filter { ($0.patch ?? "").contains(before) || ($0.patch ?? "").contains(after) }
+        report("successful edit retains historical before and after patch",
+               edits.contains { $0.state == "completed" && ($0.patch ?? "").contains(before) && ($0.patch ?? "").contains(after) })
+        let contents = try? String(contentsOf: file, encoding: .utf8)
+        report("probe-owned file has final content", contents?.trimmingCharacters(in: .whitespacesAndNewlines) == after,
+               "Artifact retained at \(file.path)")
+        let planCalls = operations.filter { ["TodoWrite", "TaskCreate", "TaskUpdate", "update_plan"].contains($0.name) }
+        if planCalls.isEmpty {
+            report("SKIP live checklist: provider emitted no checklist call", true,
+                   "Tool availability is not inferred from absence. No launch configuration was changed.")
+        } else {
+            let checklist = chat.allEntries.compactMap(\.checklist).last
+            report("confirmed checklist reaches reader model and DOM",
+                   checklist?.state == "completed" && checklist?.items.contains { $0.text == planText && $0.status == "completed" } == true &&
+                   body().contains(planText), "state=\(checklist?.state ?? "missing")")
+        }
+        func literal(_ value: String) -> String {
+            String(decoding: try! JSONEncoder().encode(value), as: UTF8.self)
+        }
+        let dom = SelfTest.js(page, """
+        (() => {
+          const success = [...document.querySelectorAll('.parity-entry[data-operation-state="completed"]')].find(e => e.querySelector('[data-full-text]') && [...e.querySelectorAll('[data-full-text]')].some(n => n.dataset.fullText.includes(\(literal(stdout)))));
+          const failed = [...document.querySelectorAll('.parity-failure')].find(e => e.textContent.includes(\(literal(stderr))));
+          const patch = [...document.querySelectorAll('.parity-patch')].some(e => e.textContent.includes(\(literal(before))) && e.textContent.includes(\(literal(after))));
+          if (!success) return { output: false, failure: !!failed, patch };
+          const detail = success.querySelector('details'); const summary = detail?.querySelector('summary');
+          if (!detail || !summary) return { output: true, failure: !!failed, patch, disclosure: false };
+          success.closest('.toolgroup')?.classList.add('open');
+          detail.open = false; summary.focus(); const focusable = document.activeElement === summary;
+          summary.click(); const opens = detail.open; summary.click(); const closes = !detail.open;
+          document.dispatchEvent(new KeyboardEvent('keydown', { key: 'f', metaKey: true, bubbles: true }));
+          const input = document.querySelector('.reader-find input');
+          if (input) { input.value = \(literal(stdout)); input.dispatchEvent(new Event('input', { bubbles: true })); }
+          for (let i = 0; i < 50 && !success.classList.contains('reader-search-hit'); i++) document.dispatchEvent(new KeyboardEvent('keydown', { key: 'g', metaKey: true, bubbles: true }));
+          const found = success.classList.contains('reader-search-hit') && detail.open && !document.querySelector('.reader-find').hidden;
+          document.dispatchEvent(new KeyboardEvent('keydown', { key: 'g', metaKey: true, bubbles: true }));
+          document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+          const restored = document.querySelector('.reader-find').hidden && !detail.open;
+          return { output: true, failure: !!failed && failed.textContent.includes('Exit 7'), patch, disclosure: focusable && opens && closes, found, restored };
+        })()
+        """) as? [String: Any] ?? [:]
+        report("real operation output, failure and historical patch render", dom["output"] as? Bool == true && dom["failure"] as? Bool == true && dom["patch"] as? Bool == true)
+        report("native summary receives focus and toggles disclosure", dom["disclosure"] as? Bool == true)
+        report("find keyboard handlers reveal hidden real output and Esc restores disclosure", dom["found"] as? Bool == true && dom["restored"] as? Bool == true)
+        report("SKIP live approval/question response: manual interaction required", true,
+               "This harness never answers a safety prompt. Provider request fixtures cover correlation and one-shot responses separately.")
+    }
+
     func subagents() {
         guard let app = model, let chat, let host else { return }
         let token = "child" + UUID().uuidString.prefix(8).lowercased()
@@ -721,6 +804,12 @@ private final class LiveCheckSession {
                found ? "open=\(app.subagentBrowser.count(for: chat.id))"
                : "No active row observed. A missing tool is not established by an assistant refusal. For Codex, multi_agent was checked before launch; retry with HANTUU_LIVE_CODEX_MODEL set to an available delegating model. \(String(screen.suffix(450)))")
         guard found, let child = app.subagentBrowser.open[chat.id]?.first else { return }
+        let inlineLaunch = wait(10) {
+            guard let page = self.reader?.reader?.page else { return false }
+            return chat.allEntries.contains { $0.operation?.childID != nil } &&
+                (SelfTest.js(page, "[...document.querySelectorAll('.parity-delegated button')].some(b => b.textContent === 'Open agent conversation')") as? Bool) == true
+        }
+        report("parent reader retains inline child navigation", inlineLaunch)
         app.selectSubagent(child.id, in: chat.id)
         let childReader = SubagentReaderController(model: app)
         self.childReader = childReader
@@ -747,6 +836,14 @@ private final class LiveCheckSession {
         }
         report("completed child leaves open sidebar list", retired,
                "open=\(app.subagentBrowser.count(for: chat.id)).")
+        let parentEvidence = wait(15) {
+            chat.allEntries.contains { entry in
+                guard let operation = entry.operation else { return false }
+                return operation.childID != nil && operation.state == "completed" &&
+                    ((operation.report ?? "").contains(token) || (operation.output ?? "").contains(token))
+            }
+        }
+        report("parent inline child card retains completion and report", parentEvidence)
         report("finished child keeps its final answer visible", rendered && retired && !childReader.root.isHidden &&
                (SelfTest.js(childReader.reader.page,
                             "Array.from(document.querySelectorAll('section.entry.assistant')).filter(e => e.textContent.includes('\(token)')).length === 1") as? Bool) == true)

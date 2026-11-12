@@ -204,7 +204,15 @@ final class ReaderModeController: NSObject {
         let r = ReaderController(model: model, page: "reader.html?layout=main", identifier: "hantuu.reader.main", focusless: true)
         r.onSendNow = { [weak self] chatID, id in _ = self?.sendNow(chatID: chatID, id: id) }
         r.onFocusComposer = { [weak self] in self?.focusComposer() }
-        (r.page.webView as? FocuslessWebView)?.onMouseDown = { [weak self] in self?.focusComposer() }
+        (r.page.webView as? FocuslessWebView)?.onMouseDown = { [weak self, weak r] in
+            r?.page.webView.evaluateJavaScript("!!document.activeElement?.closest('button,summary,input,textarea,select,a')") { interactive, _ in
+                guard let self, let r else { return }
+                if interactive as? Bool == true {
+                    (r.page.webView as? FocuslessWebView)?.allowsInteraction = true
+                    r.page.webView.window?.makeFirstResponder(r.page.webView)
+                } else { self.focusComposer() }
+            }
+        }
         // Files and pictures dropped anywhere on the reader go into the message box.
         (r.page.webView as? FocuslessWebView)?.onDropAttachments = { [weak self] content in
             guard let self, !self.composer.isHidden, self.composerMode != .none else { return false }
@@ -925,17 +933,22 @@ final class FadeEdge: NSView {
     override func hitTest(_ point: NSPoint) -> NSView? { nil }
 }
 
-/// Reader mode's page only takes keyboard focus when traversing queued message actions.
-/// An ordinary click hands the keyboard back to the message box. Text can still be
-/// selected; Copy with nothing selected in the box copies it. The shared HantuuWebView stays
-/// as it was, so the panel's pages behave exactly as before.
+/// Reader mode keeps ordinary typing in the message box. Queued message actions, search,
+/// disclosures and live request controls can take keyboard focus explicitly and hand it
+/// back to the composer. Text can still be selected; Copy with nothing selected in the box
+/// copies it. The shared HantuuWebView stays as it was, so the panel's pages behave as before.
 final class FocuslessWebView: HantuuWebView {
     var onMouseDown: (() -> Void)?
     /// Files and pictures dropped on the page. Returns false to leave the drop to the page.
     var onDropAttachments: ((ComposerPasteboard.Content) -> Bool)?
-    var allowsQueueFocus = false
-    override var acceptsFirstResponder: Bool { allowsQueueFocus }
-    override func becomeFirstResponder() -> Bool { allowsQueueFocus && super.becomeFirstResponder() }
+    var allowsInteraction = false
+    /// Send now's keyboard traversal uses the same switch.
+    var allowsQueueFocus: Bool {
+        get { allowsInteraction }
+        set { allowsInteraction = newValue }
+    }
+    override var acceptsFirstResponder: Bool { allowsInteraction }
+    override func becomeFirstResponder() -> Bool { allowsInteraction && super.becomeFirstResponder() }
     override func mouseDown(with event: NSEvent) {
         super.mouseDown(with: event)
         onMouseDown?()

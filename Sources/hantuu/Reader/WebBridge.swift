@@ -145,6 +145,10 @@ final class WebPage: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
 
     func userContentController(_ ucc: WKUserContentController, didReceive message: WKScriptMessage) {
         guard let body = message.body as? [String: Any] else { return }
+        if body["type"] as? String == "readerRequest" {
+            guard message.frameInfo.isMainFrame, message.frameInfo.request.url?.scheme == "hantuu",
+                  message.frameInfo.request.url?.host == "app" else { return }
+        }
         if body["type"] as? String == "ready" {
             ready = true
             let pending = queue

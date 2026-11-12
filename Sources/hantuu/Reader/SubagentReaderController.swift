@@ -88,6 +88,8 @@ final class SubagentReaderController {
                     self.reader.showTranscript(id: nextID, entries: [], base: base, emptyText: "Nothing to show yet.")
                 }
                 follower = tail
+                reader.interaction.externalHealth = { [weak tail] in tail?.health ?? .missing }
+                reader.retryReading = { [weak tail] in tail?.retry() }
                 tail.start()
             }
             // The hidden parent terminal must never retain the keyboard.
@@ -108,6 +110,7 @@ final class SubagentReaderController {
         let back = flags == .command && event.charactersIgnoringModifiers == "["
         let escape = flags.isEmpty && event.keyCode == 53
         guard back || escape else { return event }
+        if escape, reader.interaction.handle(event) == nil { return nil }
         if escape, reader.mediaKeys.handle(event) == nil { return nil }
         _ = model.backFromSubagent()
         return nil

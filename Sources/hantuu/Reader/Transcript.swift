@@ -10,6 +10,7 @@ struct ReaderEntry: Codable, Equatable {
         case attention   // a permission request or "waiting for you" (stands out)
         case error       // a failed tool, API error, aborted turn (stands out)
         case notice      // small system line: /command, interrupted, compacted
+        case reasoning, checklist
         case plan        // a proposed plan, shown in full
     }
 
@@ -33,9 +34,11 @@ struct ReaderEntry: Codable, Equatable {
     var sendNowLabel: String? = nil
     /// A delegated task or followup comes from another agent, not the person at the keyboard.
     var author: String? = nil
+    var operation: ReaderOperation? = nil
+    var checklist: ReaderChecklist? = nil
 }
 
-/// Only a subagent's own file includes sidechain lines and successful tool results.
+/// Only a subagent's own file includes sidechain lines. Every scope keeps tool outcomes.
 enum TranscriptScope: Equatable { case chat, subagent, side }
 
 protocol TranscriptParser {
@@ -62,7 +65,14 @@ struct ClaudeTranscriptParser: TranscriptParser {
         "<local-command-caveat>", "Caveat:", "<user-prompt-submit-hook>", "<bash-stdout>", "<bash-stderr>",
     ]
 
+    private var evidence = ReaderEvidence(kind: .claude)
+
     mutating func parse(line: Data) -> [ReaderEntry] {
+        let entries = parseContent(line: line)
+        return evidence.consume(line, entries: entries, includeSidechain: scope != .chat)
+    }
+
+    private mutating func parseContent(line: Data) -> [ReaderEntry] {
         lineNo += 1
         guard let obj = (try? JSONSerialization.jsonObject(with: line)) as? [String: Any],
               let type = obj["type"] as? String else { return [] }
@@ -369,7 +379,15 @@ struct CodexTranscriptParser: TranscriptParser {
     private var sideBoundarySeen = false
     private var agentPath: String?
 
+    private var evidence = ReaderEvidence(kind: .codex)
+
     mutating func parse(line: Data) -> [ReaderEntry] {
+        let entries = parseContent(line: line)
+        if scope == .side, !sideBoundarySeen { return [] }
+        return evidence.consume(line, entries: entries)
+    }
+
+    private mutating func parseContent(line: Data) -> [ReaderEntry] {
         lineNo += 1
         guard let obj = (try? JSONSerialization.jsonObject(with: line)) as? [String: Any],
               let type = obj["type"] as? String,
@@ -662,6 +680,9 @@ final class TranscriptFollower {
     private let kind: TranscriptKind
     private let scope: TranscriptScope
     private var initialRead = true
+    private var fileNumber: UInt64?
+    private var invalidRecords = false
+    private(set) var health: ReaderHealth = .loading
     private var skipToNewline = false
     static let subagentTailBytes: UInt64 = 2 << 20
     private let queue = DispatchQueue(label: "hantuu.transcript", qos: .userInitiated)
@@ -699,12 +720,26 @@ final class TranscriptFollower {
     }
 
     /// Reads and parses on a serial worker. Only delivery touches the reader on main.
-    private func requestPoll() {
+    func retry() { requestPoll(restart: true) }
+
+    private func requestPoll(restart: Bool = false) {
         guard !pollPending else { return }
         pollPending = true
         queue.async { [self] in
             let start = Date()
-            let batch = read()
+            if restart {
+                offset = 0
+                partial = Data()
+                initialRead = true
+                invalidRecords = false
+                skipToNewline = false
+                switch kind {
+                case .claude: parser = ClaudeTranscriptParser(scope: scope)
+                case .codex: parser = CodexTranscriptParser(scope: scope)
+                }
+            }
+            var batch = read()
+            if restart, !["missing", "unreadable"].contains(batch.health.state) { batch.reset = true }
             let elapsed = Date().timeIntervalSince(start)
             let onMain = Thread.isMainThread
             DispatchQueue.main.async { [self] in
@@ -728,12 +763,14 @@ final class TranscriptFollower {
     private struct Batch {
         var entries: [ReaderEntry] = []
         var reset = false
+        var health: ReaderHealth = .connected
     }
 
     private func deliver(_ batch: Batch) {
+        health = batch.health
         if batch.reset { entries = []; onReset?() }
         guard !batch.entries.isEmpty else { return }
-        entries += batch.entries
+        entries = ReaderEntries.merging(entries, batch.entries)
         onAppend?(batch.entries)
     }
 
@@ -762,13 +799,20 @@ final class TranscriptFollower {
     private func read() -> Batch {
         var batch = Batch()
         guard let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
-              let size = (attrs[.size] as? NSNumber)?.uint64Value else { return batch }
-        if size < offset {
+              let size = (attrs[.size] as? NSNumber)?.uint64Value else {
+            batch.health = FileManager.default.fileExists(atPath: url.path) ? .unreadable : .missing
+            return batch
+        }
+        let number = (attrs[.systemFileNumber] as? NSNumber)?.uint64Value
+        let replaced = fileNumber != nil && number != nil && fileNumber != number
+        fileNumber = number
+        if size < offset || replaced {
             // File was replaced or truncated: start over.
             offset = 0
             partial = Data()
             batch.reset = true
             initialRead = true
+            invalidRecords = false
             skipToNewline = false
             switch kind {
             case .claude: parser = ClaudeTranscriptParser(scope: scope)
@@ -785,12 +829,18 @@ final class TranscriptFollower {
                 batch.entries.append(ReaderEntry(id: "tail-notice", kind: .notice, text: "Showing the latest part of this subagent's conversation."))
             }
         }
-        guard size > offset, let h = try? FileHandle(forReadingFrom: url) else { return batch }
+        guard size > offset else {
+            batch.health = invalidRecords ? .malformed : (partial.isEmpty ? (size == 0 ? .waiting : .connected) : .incomplete)
+            return batch
+        }
+        guard let h = try? FileHandle(forReadingFrom: url) else { batch.health = .unreadable; return batch }
         defer { try? h.close() }
-        do { try h.seek(toOffset: offset) } catch { return batch }
+        do { try h.seek(toOffset: offset) } catch { batch.health = .unreadable; return batch }
         let data: Data
-        if scope == .subagent || scope == .side { data = (try? h.read(upToCount: 4 << 20)) ?? Data() }
-        else { data = (try? h.readToEnd()) ?? Data() }
+        do {
+            if scope == .subagent || scope == .side { data = try h.read(upToCount: 4 << 20) ?? Data() }
+            else { data = try h.readToEnd() ?? Data() }
+        } catch { batch.health = .unreadable; return batch }
         offset += UInt64(data.count)
         var buf = partial.isEmpty ? data : partial + data
         if skipToNewline {
@@ -804,9 +854,11 @@ final class TranscriptFollower {
             let line = buf[start..<nl]
             start = buf.index(after: nl)
             if line.isEmpty { continue }
+            if (try? JSONSerialization.jsonObject(with: Data(line))) == nil { invalidRecords = true; continue }
             fresh += parser.parse(line: Data(line))
         }
         partial = Data(buf[start...])
+        batch.health = invalidRecords ? .malformed : (partial.isEmpty ? (size == 0 ? .waiting : .connected) : .incomplete)
         if fresh.isEmpty { return batch }
         for i in fresh.indices {
             fresh[i].links = PathDetector.detect(in: fresh[i].text + "\n" + (fresh[i].detail ?? ""), base: baseDir)

@@ -1,0 +1,45 @@
+.parity-entry { min-width: 0; }
+.parity-disclosure { border: 1px solid var(--rule); border-radius: 6px; margin: 6px 0; }
+.parity-disclosure > summary { padding: 9px 11px; cursor: pointer; color: var(--secondary); overflow-wrap: anywhere; }
+.parity-disclosure[open] > summary { border-bottom: 1px solid var(--rule); }
+.parity-disclosure > :not(summary) { margin: 10px 12px; }
+.parity-output-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; font-size: 11px; color: var(--secondary); }
+.parity-output { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 360px; overflow: auto; padding: 10px; background: var(--fill); border-radius: 4px; font-size: 12px; }
+.parity-action { border: 1px solid var(--rule); border-radius: 4px; background: transparent; color: var(--secondary); font: inherit; font-size: 11px; padding: 4px 7px; cursor: pointer; overflow-wrap: anywhere; }
+.parity-action:hover { color: var(--text); background: var(--fill); }
+.parity-action:focus-visible, .parity-disclosure > summary:focus-visible, .toolsum:focus-visible { outline: 2px solid var(--link); outline-offset: 2px; }
+.parity-note { font-size: 11px; color: var(--secondary); overflow-wrap: anywhere; }
+.parity-failure > .parity-disclosure { border-left: 3px solid var(--hl-del); }
+.parity-failure > .parity-disclosure > summary { color: var(--hl-del); }
+.parity-checklist-title { font-weight: 600; margin-top: 10px; }
+.parity-tasks { padding-left: 18px; }
+.parity-tasks li { padding: 4px 0; }
+.parity-task-state { color: var(--secondary); font-size: 11px; }
+.parity-tasks [data-status="completed"] { color: var(--secondary); }
+.reader-find, .reader-status { position: sticky; top: 0; z-index: 20; display: flex; align-items: center; gap: 8px; padding: 8px; background: #161616; border-bottom: 1px solid var(--rule); font-size: 11px; flex-wrap: wrap; }
+.reader-find[hidden], .reader-status[hidden] { display: none; }
+.reader-find input { flex: 1; min-width: 100px; color: var(--text); background: var(--fill); border: 1px solid var(--rule); border-radius: 4px; padding: 6px; font: inherit; }
+.reader-search-hit { outline: 2px solid var(--link); outline-offset: 4px; }
+body.reader.main button.toolsum { background: transparent; border: 0; font: inherit; width: 100%; text-align: left; }
+
+@media (prefers-color-scheme: light) { .reader-find, .reader-status { background: #fff; } }
+
+.reader-requests[hidden] { display: none; }
+.reader-request { border: 1px solid var(--rule); border-left: 3px solid var(--accent); border-radius: 6px; padding: 12px; margin: 12px 0; }
+.reader-request h3 { margin: 0 0 10px; font-size: 13px; }
+.reader-request > button { margin: 6px 6px 4px 0; }
+.reader-question { border: 0; padding: 0; margin: 12px 0; }
+.reader-question legend { margin-bottom: 8px; }
+.reader-option { display: grid; grid-template-columns: 20px 1fr; align-items: baseline; gap: 4px; margin: 8px 0; }
+.reader-option small { grid-column: 2; color: var(--secondary); }
+.reader-other { width: 100%; box-sizing: border-box; padding: 7px; color: var(--text); background: var(--fill); border: 1px solid var(--rule); border-radius: 4px; font: inherit; }
+.parity-action:disabled { cursor: default; opacity: .5; }
+
+.reader-checklist-pin { position: fixed; left: 0; right: 0; bottom: 0; z-index: 15; background: #161616; border-top: 1px solid var(--rule); padding: 4px 16px; }
+.reader-checklist-pin[hidden] { display: none; }
+.reader-checklist-pin .parity-disclosure { margin: 0 auto; max-width: 760px; border: 0; }
+.reader-checklist-pin summary { font-size: 12px; }
+.reader-checklist-pin .parity-tasks { max-height: 30vh; overflow: auto; }
+body.reader #entries { padding-bottom: calc(64px + var(--reader-checklist-height, 0px)); }
+body.reader .newpill { bottom: calc(16px + var(--reader-checklist-height, 0px)); }
+@media (prefers-color-scheme: light) { .reader-checklist-pin { background: #fff; } }

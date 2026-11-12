@@ -41,6 +41,13 @@ enum SelfTest {
         Paths.ensure(workdir)
         print("hantuu self test, workdir \(workdir.path)\n")
 
+        readerRequests()
+        readerRequestFiles(workdir)
+        readerChecklist()
+        readerEvidence()
+        readerEvidenceLifetimes()
+        readerHealthFixtures(workdir)
+        readerEvidenceRendering(workdir)
         claudeParsing()
         codexParsing()
         queuedMessages(workdir)
@@ -187,19 +194,19 @@ enum SelfTest {
         for line in claudeFixture { all += p.parse(line: Data(line.utf8)) }
         let kinds = all.map(\.kind.rawValue)
         check("claude: user prompt kept as prose", all.first?.kind == .user && all.first?.text.contains("Bayes") == true)
-        check("claude: thinking and meta hidden", !all.contains { $0.text.contains("secret") || $0.text.contains("hidden") })
+        check("claude: published reasoning retained and meta hidden", all.contains { $0.kind == .reasoning && $0.text.contains("secret") } && !all.contains { $0.text.contains("hidden") })
         check("claude: assistant answer with LaTeX", all.contains { $0.kind == .assistant && $0.text.contains("\\frac") })
         check("claude: Bash collapsed to one line with the command", all.contains { $0.kind == .tool && $0.text == "List files" && $0.detail == "ls -la" })
-        check("claude: failed tool stands out as an error", all.contains { $0.kind == .error && $0.text == "Bash failed" && $0.detail?.contains("boom") == true })
+        check("claude: failed tool stands out as an error", all.contains { $0.operation?.state == "failed" && $0.operation?.name == "Bash" && $0.operation?.output?.contains("boom") == true })
         check("claude: Read records the file", all.contains { $0.kind == .tool && $0.files == ["/tmp/plot.png"] })
         check("claude: image returned by a tool shown inline", all.contains { $0.images.first?.hasPrefix("data:image/png;base64,") == true && $0.kind == .tool })
         check("claude: AskUserQuestion becomes a question", all.contains { $0.kind == .question && $0.text.contains("Which proof?") && $0.text.contains("Algebraic") })
-        check("claude: declined permission stays visible", all.contains { $0.kind == .attention })
+        check("claude: declined permission stays visible", all.contains { $0.operation?.state == "declined" })
         check("claude: pasted image kept with the prompt", all.contains { $0.kind == .user && $0.images.count == 1 })
         check("claude: slash command becomes a notice", all.contains { $0.kind == .notice && $0.text == "Ran /model opus" })
         check("claude: command output is a notice", all.contains { $0.kind == .notice && $0.text.contains("Set model") })
         check("claude: interruption noted", all.contains { $0.kind == .notice && $0.text == "Interrupted" })
-        check("claude: API errors stand out", all.filter { $0.kind == .error }.count == 3, "kinds \(kinds)")
+        check("claude: API errors stand out", all.filter { $0.kind == .error }.count == 2, "kinds \(kinds)")
         check("claude: sidechain hidden", !all.contains { $0.text.contains("subagent chatter") })
         check("claude: project folder name mangling", ClaudeTranscriptParser.projectFolderName(for: "/Users/a/Desktop/🫣 Solo Projects") == "-Users-a-Desktop----Solo-Projects")
     }
@@ -234,11 +241,11 @@ enum SelfTest {
         check("codex: pasted image kept", users.first?.images.count == 1)
         check("codex: shell call collapsed with command", all.contains { $0.kind == .tool && $0.detail == "cat README.md" })
         check("codex: exec custom tool collapsed", all.contains { $0.kind == .tool && $0.detail == "rg TODO" })
-        check("codex: apply_patch lists files", all.contains { $0.kind == .tool && $0.text == "Edited src/a.py" })
+        check("codex: apply_patch lists files", all.contains { $0.kind == .tool && $0.files == ["src/a.py"] && $0.operation?.patch?.contains("-x") == true })
         check("codex: answer shown once", all.filter { $0.kind == .assistant }.count == 1)
         check("codex: errors stand out", all.contains { $0.kind == .error && $0.text == "stream disconnected" })
         check("codex: interruption is a notice", all.contains { $0.kind == .notice && $0.text == "Turn interrupted" })
-        check("codex: reasoning and outputs hidden", !all.contains { $0.text.contains("zzz") || $0.text == "hello" })
+        check("codex: encrypted reasoning hidden and output retained", !all.contains { $0.text.contains("zzz") } && all.contains { $0.operation?.output == "hello" })
 
         // Tags Codex writes for its own UI, from a real 0.167 rollout.
         let cited = CodexTranscriptParser.answerEntries("Saved in the [course notes](/x/MEMORY.md).\n\n<oai-mem-citation>\n<citation_entries>\nMEMORY.md:1118-1122|note=[attempt first tutoring workflow]\n</citation_entries>\n<rollout_ids>\n01a0ca8d-965c-7f52-8b65-ac99fc83df95\n</rollout_ids>\n</oai-mem-citation>", id: "a", time: nil)
@@ -739,8 +746,8 @@ enum SelfTest {
         let loaded = waitUntil(5) { (js(page, "Array.from(document.querySelectorAll('img.inline-image')).every(i=>i.complete && i.naturalWidth>0)") as? Bool) == true }
         check("reader: local image served through hantuu://file", loaded)
         let thinking = js(page, "document.body.innerText.includes('secret reasoning')") as? Bool ?? true
-        check("reader: thinking never reaches the page", thinking == false)
-        let tools = js(page, "document.querySelectorAll('.entry.tool .toolline').length") as? Int ?? 0
+        check("reader: published reasoning starts collapsed", thinking == false && (js(page, "document.querySelector('.reasoning details')?.open === false") as? Bool == true))
+        let tools = js(page, "document.querySelectorAll('.entry.tool details > summary').length") as? Int ?? 0
         check("reader: tool calls collapsed to single lines", tools >= 2)
         let standout = js(page, "document.querySelectorAll('.entry.error, .entry.question, .entry.attention').length") as? Int ?? 0
         check("reader: errors, questions and permission notes stand out", standout >= 5, "count=\(standout)")

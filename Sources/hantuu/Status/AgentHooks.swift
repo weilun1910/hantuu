@@ -16,7 +16,9 @@ enum AgentHooks {
         Paths.ensure(eventsDir)
         Paths.ensure(ClaudeUsage.dir)
         // HANTUU_USAGE: where Claude's status line saves its usage limits (Usage/).
-        return [envKey: eventsFile(for: chatID).path, ClaudeUsage.envKey: ClaudeUsage.file(for: chatID).path]
+        return [envKey: eventsFile(for: chatID).path, ClaudeUsage.envKey: ClaudeUsage.file(for: chatID).path,
+                ReaderRequestBridge.envKey: ReaderRequestBridge.directory(for: chatID).path,
+                ReaderRequestBridge.chatEnvKey: chatID.uuidString]
     }
 
     // MARK: Claude Code
@@ -41,7 +43,17 @@ enum AgentHooks {
     }
 
     static func claudeCommand(for event: String) -> String {
-        event == "PostToolUse" || event == "PostToolUseFailure" ? compactCommand(event) : appendCommand
+        if event == "PermissionRequest" { return permissionCommand }
+        return event == "PostToolUse" || event == "PostToolUseFailure" ? compactCommand(event) : appendCommand
+    }
+
+    /// The helper owns one synchronous request; a missing reader lease produces no decision.
+    /// Keep the status event, and never run shell text supplied by a tool's arguments.
+    static var permissionCommand: String {
+        guard let executable = Bundle.main.executableURL?.path else { return appendCommand }
+        let quoted = "'" + executable.replacingOccurrences(of: "'", with: "'\\''") + "'"
+        return #"p=$(cat); if [ -n "$HANTUU_EVENTS" ]; then { lockf -s -t 5 1; printf '%s\n' "$p"; } >> "$HANTUU_EVENTS"; fi 2>/dev/null; printf '%s' "$p" | "#
+            + quoted + " " + ReaderRequestBridge.flag + " 2>/dev/null; exit 0"
     }
 
     /// The JSON for `claude --settings`. Hooks from it are added to the user's own hooks
@@ -52,7 +64,8 @@ enum AgentHooks {
     static func claudeSettingsJSON(statusLine: Bool) -> String {
         var hooks: [String: Any] = [:]
         for event in claudeEvents {
-            hooks[event] = [["hooks": [["type": "command", "command": claudeCommand(for: event), "timeout": 10]]]]
+            hooks[event] = [["hooks": [["type": "command", "command": claudeCommand(for: event),
+                                        "timeout": event == "PermissionRequest" ? 95 : 10]]]]
         }
         var settings: [String: Any] = ["hooks": hooks]
         if statusLine { settings["statusLine"] = ClaudeUsage.statusLineSettings }

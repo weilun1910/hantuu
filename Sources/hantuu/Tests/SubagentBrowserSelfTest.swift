@@ -225,7 +225,7 @@ extension SelfTest {
         check("subagent reader: ordinary readers still omit sidechains", normal.poll().isEmpty)
         let follower = TranscriptFollower(url: claude, kind: .claude, baseDir: base.path, scope: .subagent)
         let entries = follower.poll()
-        check("subagent reader: sidechain prompt, answer, call and result are kept", entries.map(\.kind) == [.user, .assistant, .tool, .tool] && entries.last?.detail == "A fixture tool result")
+        check("subagent reader: sidechain prompt, answer, call and result are kept", entries.map(\.kind) == [.user, .assistant, .tool, .tool] && entries.last?.operation?.output == "A fixture tool result" && follower.entries.count == 3)
         check("subagent reader: a second poll never duplicates entries", follower.poll().isEmpty)
         WorkFixture.append(claude, [message("later", "assistant", "New child output")])
         check("subagent reader: follows only new complete lines", follower.poll().map(\.text) == ["New child output"])

@@ -49,6 +49,7 @@ final class Chat: ObservableObject, Identifiable {
     var startedAt = Date()
     var terminal: TerminalView?
     var follower: TranscriptFollower?
+    var readerWork: AgentWork?
     /// Entries from an earlier transcript file (Codex resume), shown before the follower's.
     var earlierEntries: [ReaderEntry] = []
     /// "Needs you" notices raised by the terminal (permission prompts, waiting for input).
@@ -93,7 +94,7 @@ final class Chat: ObservableObject, Identifiable {
         return s
     }
 
-    var allEntries: [ReaderEntry] { earlierEntries + (follower?.entries ?? []) + liveEntries }
+    var allEntries: [ReaderEntry] { ReaderDelegation.applying(readerWork, to: ReaderEntries.merging(earlierEntries + (follower?.entries ?? []), liveEntries)) }
 }
 
 final class PanelShell: ObservableObject, Identifiable {
@@ -892,6 +893,7 @@ final class AppModel: ObservableObject, TerminalEvents {
         chat.follower?.stop()
         chat.follower = nil
         chat.earlierEntries = []
+        chat.readerWork = nil
         chat.liveEntries = []
         chat.firstPrompt = nil
         if changedID { chat.pendingMessages.removeAll() }

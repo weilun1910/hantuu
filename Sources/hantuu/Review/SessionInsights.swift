@@ -41,6 +41,7 @@ struct InsightsParser {
     private var state = SessionInsights()
     private var claudeWork = ClaudeWorkParser()
     private var codexWork = CodexWorkParser()
+    private var checklist: ReaderChecklistReducer
 
     var insights: SessionInsights {
         var i = state
@@ -48,16 +49,15 @@ struct InsightsParser {
         return i
     }
 
-    // Claude's task list: TaskCreate adds, TaskUpdate changes, TodoWrite replaces.
-    private var tasks: [PlanItem] = []
-    private var todoWrite: [PlanItem] = []
-    private var lastPlanSource = 0   // 1 = TodoWrite, 2 = tasks
-    private var pendingCreates: [String: String] = [:]   // tool_use id -> subject
-    private var nextTaskNumber = 1
-
-    init(kind: TranscriptKind) { self.kind = kind }
+    init(kind: TranscriptKind) {
+        self.kind = kind
+        checklist = ReaderChecklistReducer(kind: kind)
+    }
 
     mutating func consume(_ line: Data) {
+        state.plan = checklist.consume(line: line)?.items.map {
+            PlanItem(id: $0.id, text: $0.text, state: PlanItem.state($0.status))
+        } ?? []
         guard let obj = (try? JSONSerialization.jsonObject(with: line)) as? [String: Any] else { return }
         switch kind {
         case .claude:
@@ -85,47 +85,7 @@ struct InsightsParser {
                     state.windowIsGuess = guess
                 }
             }
-            for item in (msg["content"] as? [[String: Any]]) ?? [] where item["type"] as? String == "tool_use" {
-                let input = item["input"] as? [String: Any] ?? [:]
-                switch item["name"] as? String {
-                case "TodoWrite":
-                    let todos = (input["todos"] as? [[String: Any]]) ?? []
-                    todoWrite = todos.enumerated().map { i, t in
-                        PlanItem(id: (t["id"] as? String) ?? "t\(i)", text: (t["content"] as? String) ?? "", state: PlanItem.state(t["status"] as? String))
-                    }
-                    lastPlanSource = 1
-                case "TaskCreate":
-                    if let id = item["id"] as? String {
-                        pendingCreates[id] = (input["subject"] as? String) ?? (input["description"] as? String) ?? "Task"
-                    }
-                case "TaskUpdate":
-                    guard let tid = Self.string(input["taskId"]) else { break }
-                    if let i = tasks.firstIndex(where: { $0.id == tid }) {
-                        if let s = input["status"] as? String {
-                            if s == "deleted" { tasks.remove(at: i) } else { tasks[i].state = PlanItem.state(s) }
-                        }
-                        if let subj = input["subject"] as? String, !subj.isEmpty, i < tasks.count, tasks[i].id == tid { tasks[i].text = subj }
-                    }
-                    lastPlanSource = 2
-                default:
-                    break
-                }
-            }
-        } else if type == "user" {
-            for item in (msg["content"] as? [[String: Any]]) ?? [] where item["type"] as? String == "tool_result" {
-                guard let useID = item["tool_use_id"] as? String, let subject = pendingCreates.removeValue(forKey: useID) else { continue }
-                if item["is_error"] as? Bool == true { continue }
-                let text = ClaudeTranscriptParser.textOf(item["content"]) ?? ""
-                var tid = String(nextTaskNumber)
-                if let r = text.range(of: #"Task #(\S+) created"#, options: .regularExpression) {
-                    tid = String(text[r].dropFirst("Task #".count).dropLast(" created".count))
-                }
-                nextTaskNumber = (Int(tid) ?? nextTaskNumber) + 1
-                tasks.append(PlanItem(id: tid, text: subject, state: .pending))
-                lastPlanSource = 2
-            }
         }
-        state.plan = lastPlanSource == 2 ? tasks : todoWrite
     }
 
     /// Claude Code's transcript doesn't record the window size, so it's a guess: 200k, or 1M
@@ -155,14 +115,6 @@ struct InsightsParser {
             if let w = info["model_context_window"] as? NSNumber, w.intValue > 0 {
                 state.contextWindow = w.intValue
                 state.windowIsGuess = false
-            }
-        case ("response_item", "function_call"), ("response_item", "custom_tool_call"):
-            guard (p["name"] as? String) == "update_plan" else { return }
-            let raw = (p["arguments"] as? String) ?? (p["input"] as? String) ?? ""
-            guard let d = raw.data(using: .utf8), let args = (try? JSONSerialization.jsonObject(with: d)) as? [String: Any],
-                  let plan = args["plan"] as? [[String: Any]] else { return }
-            state.plan = plan.enumerated().map { i, s in
-                PlanItem(id: "p\(i)", text: (s["step"] as? String) ?? "", state: PlanItem.state(s["status"] as? String))
             }
         default:
             break

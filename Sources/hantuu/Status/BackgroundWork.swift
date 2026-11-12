@@ -201,6 +201,7 @@ final class BackgroundWatch {
         var url: URL
         var kind: TranscriptKind
         var processStart: Date
+        var readReports: Bool
     }
 
     func start(model: AppModel) {
@@ -223,7 +224,7 @@ final class BackgroundWatch {
         // The transcript can change during a chat's life (/resume, /clear), so it's read fresh each time.
         let jobs = model.chats.compactMap { c -> Job? in
             guard c.status != .ended, let p = c.transcriptPath, let kind = c.agent.transcript else { return nil }
-            return Job(id: c.id, url: URL(fileURLWithPath: p), kind: kind, processStart: c.startedAt)
+            return Job(id: c.id, url: URL(fileURLWithPath: p), kind: kind, processStart: c.startedAt, readReports: c.id == model.selectedChatID)
         }
         let codexRoot = self.codexRoot
         busy = true
@@ -241,6 +242,7 @@ final class BackgroundWatch {
                 agentUpdates.append((id, ended))
             }
             var out: [(UUID, BackgroundSummary)] = []
+            var readerWork: [(UUID, URL, AgentWork)] = []
             for j in jobs {
                 if self.followers[j.id]?.url != j.url {
                     self.followers[j.id] = WorkFollower(url: j.url, kind: j.kind)
@@ -248,15 +250,16 @@ final class BackgroundWatch {
                 }
                 guard let f = self.followers[j.id] else { continue }
                 var work = f.poll()
-                if work.subagents.contains(where: { $0.state.isActive }) || self.agentTrackers[j.id]?.hasOpenSubagents == true {
+                if (j.readReports && !work.subagents.isEmpty) || work.subagents.contains(where: { $0.state.isActive }) || self.agentTrackers[j.id]?.hasOpenSubagents == true {
                     let tracker = self.agentTrackers[j.id] ?? AgentWorkTracker()
                     tracker.codexRoot = codexRoot
                     self.agentTrackers[j.id] = tracker
-                    work = tracker.update(work, transcript: j.url, kind: j.kind, processStart: j.processStart, now: now, sidebarOnly: true)
+                    work = tracker.update(work, transcript: j.url, kind: j.kind, processStart: j.processStart, now: now, sidebarOnly: !j.readReports)
                 } else {
                     self.agentTrackers[j.id] = nil
                     BackgroundRules.settle(&work, transcript: j.url, processStart: j.processStart, now: now)
                 }
+                readerWork.append((j.id, j.url, work))
                 let agents = work.subagents.map(SidebarSubagent.init)
                 if self.lastAgents[j.id] != agents {
                     self.lastAgents[j.id] = agents
@@ -268,6 +271,7 @@ final class BackgroundWatch {
             }
             DispatchQueue.main.async {
                 self.busy = false
+                for (id, transcript, work) in readerWork { self.model?.updateReaderWork(work, chatID: id, transcript: transcript) }
                 for (id, agents) in agentUpdates {
                     self.model?.updateSubagents(agents, for: id)
                     self.deliverSubagents?(id, agents)
