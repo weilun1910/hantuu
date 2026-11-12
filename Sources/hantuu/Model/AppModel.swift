@@ -14,7 +14,7 @@ enum ChatStatus: String, Codable {
 
 enum PanelTab: String, Codable, CaseIterable {
     case overview = "Overview", changes = "Changes", files = "Files"
-    case code = "Code", terminal = "Terminal"
+    case code = "Code", browser = "Browser", terminal = "Terminal"
 
     /// The panel used to have a Reader tab. A saved "Reader", or any tab that's gone, opens
     /// Overview, so the rest of the saved state still loads.
@@ -469,6 +469,18 @@ final class AppModel: ObservableObject, TerminalEvents {
         if panel.folders == nil { panel.folders = [:] }
         panel.folders?[folder] = state
         projectPanels[project] = panel
+        scheduleSave()
+    }
+
+    func browserPanelState(project: UUID) -> BrowserSavedState {
+        projectPanels[project]?.browser ?? BrowserSavedState()
+    }
+
+    func setBrowserPanelState(_ browser: BrowserSavedState, project: UUID) {
+        guard projects.contains(where: { $0.id == project }) else { return }
+        var state = projectPanels[project] ?? ProjectPanelState()
+        state.browser = browser
+        projectPanels[project] = state
         scheduleSave()
     }
 

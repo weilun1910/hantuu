@@ -646,6 +646,34 @@ final class ReaderModeController: NSObject {
         reader?.page.webView.evaluateJavaScript(js, completionHandler: nil)
     }
 
+    /// Browser feedback only prepares input. Reuse the image pacing queue without its
+    /// Return step, and keep the selected chat fixed while the images are being pasted.
+    @discardableResult
+    func insertBrowserFeedback(_ feedback: BrowserFeedback, chatID: UUID) -> Bool {
+        guard let chat = model.selectedChat, chat.id == chatID,
+              model.subagentBrowser.selection == nil, !isTyping else { return false }
+        let inReader = mode.showsReader(chat)
+        if inReader {
+            guard composerMode != .none else { return false }
+        } else {
+            guard let terminal = chat.terminal, terminal.surface != nil,
+                  TerminalScreen.analyze(terminal.activeScreenText()).menu == nil else { return false }
+        }
+        feedback.compose(reader: inReader, agentID: chat.agent.id, addToReader: { attachments, text in
+            self.composer.setAttachments(self.composer.attachments + attachments)
+            let separator = self.composer.textView.string.isEmpty ? "" : "\n\n"
+            self.composer.textView.setSelectedRange(NSRange(location: (self.composer.textView.string as NSString).length, length: 0))
+            self.composer.textView.insertTyped(separator + text)
+            self.textChanged()
+            self.focusComposer()
+        }, pasteToTerminal: { steps in
+            guard let terminal = chat.terminal else { return }
+            self.type(steps, into: terminal, after: feedback.image.map { [$0] } ?? [])
+            self.model.focusRequest.send(terminal)
+        })
+        return true
+    }
+
     /// Option-click in Files types a path into the chat. In the reader it goes to the box.
     func insertIntoComposer(_ text: String) -> Bool {
         guard let chat = model.selectedChat, mode.showsReader(chat), composerMode != .none else { return false }

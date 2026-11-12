@@ -4,13 +4,15 @@ import SwiftUI
 
 /// The toggleable right panel: Overview (glance cards for the chat), Changes (the diff, with
 /// line comments for the agent), Files (the project tree), Code (any file: an editor for text,
-/// native viewers for the rest) and Terminal
+/// native viewers for the rest), Browser (a project preview) and Terminal
 /// (plain shells in the project folder). The reader isn't here: it replaces the chat's
 /// terminal in the main area (Shift-Cmd-R).
 final class PanelController: NSViewController {
     private let model: AppModel
     let code: FileViewerController
     let review: ReviewCenter
+    let browser: BrowserCoordinator
+    private var browserView: NSView!
     private let shells = TerminalContainer(color: Theme.background)
     private var header: NSView!
     private var noShells: NSView!
@@ -24,6 +26,7 @@ final class PanelController: NSViewController {
     init(model: AppModel, review: ReviewCenter = .shared) {
         self.model = model
         self.review = review
+        browser = BrowserCoordinator(model: model, review: review)
         code = FileViewerController(model: model)
         super.init(nibName: nil, bundle: nil)
         review.configure(model: model)
@@ -32,14 +35,15 @@ final class PanelController: NSViewController {
 
     override func loadView() {
         let root = FillView(color: Theme.chrome)
-        header = ChromeHostingView(rootView: PanelHeader().environmentObject(model).environmentObject(review))
+        header = ChromeHostingView(rootView: PanelHeader().environmentObject(model).environmentObject(review).environmentObject(browser))
         content = FillView(color: Theme.chrome)
         noShells = ChromeHostingView(rootView: NoShellsView().environmentObject(model))
         noFiles = ChromeHostingView(rootView: NoFilesView().environmentObject(model))
         overview = ChromeHostingView(rootView: OverviewView().environmentObject(model).environmentObject(review))
         changes = ChromeHostingView(rootView: ChangesView().environmentObject(model).environmentObject(review))
         files = ChromeHostingView(rootView: FilesView().environmentObject(model).environmentObject(review))
-        let views: [NSView] = [shells, code.view, noShells, noFiles, overview, changes, files]
+        browserView = ChromeHostingView(rootView: BrowserPanel(browser: browser))
+        let views: [NSView] = [shells, code.view, noShells, noFiles, overview, changes, files, browserView]
         for v in [header!, content!] {
             v.translatesAutoresizingMaskIntoConstraints = false
             root.addSubview(v)
@@ -88,6 +92,8 @@ final class PanelController: NSViewController {
         overview.isHidden = tab != .overview
         changes.isHidden = tab != .changes
         files.isHidden = tab != .files
+        browserView.isHidden = tab != .browser
+        browser.sync(visible: model.panelVisible && tab == .browser)
         review.setActiveTab(model.panelVisible ? tab : nil)
     }
 }
@@ -99,11 +105,12 @@ struct PanelHeader: View {
         VStack(spacing: 0) {
             ZStack {
                 WindowDragArea()
-                // Five labels fit at the default width; a narrow panel tightens the padding.
+                // Six labels fit at the minimum panel width with the tightest padding.
                 ViewThatFits(in: .horizontal) {
                     tabs(padding: 8)
                     tabs(padding: 5)
                     tabs(padding: 3)
+                    tabs(padding: 1)
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.horizontal, 10)
@@ -117,6 +124,7 @@ struct PanelHeader: View {
                 case .files: FilesBar()
                 case .terminal: ShellTabs()
                 case .code: CodeTabs()
+                case .browser: BrowserBar()
                 }
             }
             .frame(height: 31)

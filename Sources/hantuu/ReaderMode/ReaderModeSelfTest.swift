@@ -69,7 +69,7 @@ extension SelfTest {
         check("peek: flipping a chat ends its peek", !mode.isPeeking(a) && mode.face(of: a) == .terminal)
 
         // The reader lives in the main area only, flipped in place with Shift-Cmd-R.
-        check("panel: no Reader tab", PanelTab.allCases.map(\.rawValue) == ["Overview", "Changes", "Files", "Code", "Terminal"])
+        check("panel: no Reader tab", PanelTab.allCases.map(\.rawValue) == ["Overview", "Changes", "Files", "Code", "Browser", "Terminal"])
         let saved = try? JSONDecoder().decode([PanelTab].self, from: Data(#"["Reader", "Changes"]"#.utf8))
         check("panel: a saved Reader tab opens Overview and the rest still loads", saved == [.overview, .changes], "\(String(describing: saved))")
         let item = ReaderModeMenuTarget.toggleItem()

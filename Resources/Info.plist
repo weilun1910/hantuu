@@ -28,6 +28,11 @@
 	<string>26.0</string>
 	<key>NSAppleEventsUsageDescription</key>
 	<string>hantuu asks macOS for administrator rights only when you turn Keep awake on or off.</string>
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsArbitraryLoadsInWebContent</key>
+		<true/>
+	</dict>
 	<key>NSHighResolutionCapable</key>
 	<true/>
 	<key>NSPrincipalClass</key>

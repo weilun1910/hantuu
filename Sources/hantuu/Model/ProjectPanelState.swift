@@ -11,6 +11,7 @@ struct ProjectPanelState: Codable {
     var overview: OverviewPanelState?
     var shells: [SavedPanelShell]?
     var selectedShellID: UUID?
+    var browser: BrowserSavedState?
 
     init() {}
 
@@ -25,6 +26,7 @@ struct ProjectPanelState: Codable {
         overview = get(.overview)
         shells = (get(.shells) as [Lenient<SavedPanelShell>]?)?.compactMap(\.value)
         selectedShellID = get(.selectedShellID)
+        browser = get(.browser)
     }
 }
 

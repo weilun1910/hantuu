@@ -64,6 +64,7 @@ enum SelfTest {
         releaseSnapshots(workdir) // reader command menus and queued messages for the release
         agentWork(workdir)  // subagents, background tasks, the status they hold up, snapshots (Tests/AgentWorkSelfTest.swift)
         projectPanels(workdir)
+        browserTab(workdir)
         subagentBrowser(workdir) // sidebar navigation and read-only child transcripts
         fileViewer(workdir) // the Code tab as a file viewer and editor (FileViewer/FileViewerSelfTest.swift)
         usage(workdir)    // usage limits and the footer rings (Usage/UsageSelfTest.swift)
