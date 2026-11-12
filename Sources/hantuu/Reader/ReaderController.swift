@@ -65,8 +65,9 @@ final class ReaderController {
         guard var payload = externalPayload else { return }
         payload.entries = ReaderEntries.merging(payload.entries, entries)
         externalPayload = payload
-        payload.entries = entries
-        page.call("append", payload)
+        // A page reload or delayed reset can race the final child write. Reconcile the
+        // retained transcript so the update also restores its identity and earlier nodes.
+        page.call("reconcile", payload)
     }
 
     /// Side answers grow in place. Keep the reader's scroll position and unchanged nodes.

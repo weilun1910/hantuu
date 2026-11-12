@@ -94,6 +94,7 @@ enum SelfTest {
         autoreleasepool { panelRecovery(workdir) }
         autoreleasepool { usage(workdir) } // usage limits and the footer rings (Usage/UsageSelfTest.swift)
         autoreleasepool { keepAwake(workdir) } // the lid-shut switch, its limits, the crash check (Tests/KeepAwakeSelfTest.swift)
+        autoreleasepool { flexibleLayout(workdir) }
         autoreleasepool { liveChecksLogic(workdir) }
         autoreleasepool { appLifetimes(workdir) }
         autoreleasepool { liveChecks(workdir) } // Real agents only when HANTUU_LIVE names a trusted probe folder.

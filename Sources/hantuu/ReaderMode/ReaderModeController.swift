@@ -20,7 +20,7 @@ final class ReaderModeController: NSObject {
     /// Opt-in live probes veto Return if a safety menu appeared after the paste began.
     var permitsSubmit: (TerminalView) -> Bool = { _ in true }
 
-    let root = FillView(color: Theme.background)
+    let root = ReaderLayoutRoot(color: Theme.background)
     let bottom = NSView()
     let composer = ComposerBox()
     let commandMenu = CommandMenu()
@@ -88,7 +88,11 @@ final class ReaderModeController: NSObject {
     }
     private var restoringDraft = false
     private let draftStore = ComposerDraftStore()
-    private let deliveryBar = NSStackView()
+    let deliveryBar = ComposerControlFlow()
+    private var settledScreens: [UUID: (terminal: ObjectIdentifier, session: String?, raw: String, state: TerminalScreen.State)] = [:]
+    private var deliveryWidth: NSLayoutConstraint!
+    private var recoveryHeight: NSLayoutConstraint!
+    private var composerBottom: NSLayoutConstraint!
     private let queueButton = NSButton(title: "Queue", target: nil, action: nil)
     private let steerButton = NSButton(title: "Steer", target: nil, action: nil)
     private let resumeQueueButton = NSButton(title: "Resume queue", target: nil, action: nil)
@@ -133,7 +137,7 @@ final class ReaderModeController: NSObject {
 
     /// The width of the text column, the same as the reader page's (body.main in style.css).
     static let columnWidth: CGFloat = 720
-    static let sideMargin: CGFloat = 32
+    static let sideMargin: CGFloat = 16
 
     init(model: AppModel, mode: ReaderMode = .shared, commandCatalog: ReaderCommandCatalog = ReaderCommandCatalog()) {
         self.model = model
@@ -240,29 +244,34 @@ final class ReaderModeController: NSObject {
         bottomHeight = bottom.heightAnchor.constraint(equalToConstant: 0)
         statusHeight = statusHost.heightAnchor.constraint(equalToConstant: 0)
         composerHeight = composer.heightAnchor.constraint(equalToConstant: composer.preferredHeight)
+        composerBottom = composer.bottomAnchor.constraint(equalTo: bottom.bottomAnchor, constant: -90)
         var cs = [
             bottom.leadingAnchor.constraint(equalTo: root.leadingAnchor),
             bottom.trailingAnchor.constraint(equalTo: root.trailingAnchor),
             bottom.bottomAnchor.constraint(equalTo: root.bottomAnchor),
             bottomHeight!, statusHeight!, composerHeight!,
-            composer.bottomAnchor.constraint(equalTo: bottom.bottomAnchor, constant: -78),
+            composerBottom!,
         ]
         // The working line sits just above the box; the banner is tucked onto its top edge.
         statusGap = statusHost.bottomAnchor.constraint(equalTo: composer.topAnchor, constant: -6)
         cs.append(statusGap)
+        var columnWidths: [NSLayoutConstraint] = []
         for v in [statusHost!, composer] as [NSView] {
-            let wide = v.widthAnchor.constraint(equalToConstant: Self.columnWidth)
-            wide.priority = .defaultHigh
+            // Derive the column from the viewport without letting child content hugging
+            // shrink the box or impose a preferred minimum on the split view.
+            let width = v.widthAnchor.constraint(equalToConstant: Self.columnWidth)
+            columnWidths.append(width)
             cs += [
                 v.centerXAnchor.constraint(equalTo: bottom.centerXAnchor),
-                v.widthAnchor.constraint(lessThanOrEqualToConstant: Self.columnWidth),
-                v.leadingAnchor.constraint(greaterThanOrEqualTo: bottom.leadingAnchor, constant: Self.sideMargin),
-                wide,
+                width,
             ]
         }
         NSLayoutConstraint.activate(cs)
-        deliveryBar.orientation = .horizontal
-        deliveryBar.spacing = 10
+        root.onWidthChange = { width in
+            guard width > 0 else { return }
+            let inset: CGFloat = width < 480 ? 16 : 32
+            columnWidths.forEach { $0.constant = min(Self.columnWidth, max(0, width - 2 * inset)) }
+        }
         deliveryChoice.addItems(withTitles: ["Return: Steer", "Return: Queue"])
         deliveryChoice.selectItem(at: 1)
         deliveryChoice.controlSize = .small
@@ -282,27 +291,37 @@ final class ReaderModeController: NSObject {
         keymapButton.action = #selector(keymapPressed)
         queueButton.toolTip = "Keep this message in hantuu for the next turn."
         steerButton.toolTip = "Send to the current turn. Claude reads it at a tool boundary; Codex uses Enter steering."
-        [queueButton, steerButton, deliveryChoice, resumeQueueButton, cancelQueueEdit, previousDraftButton, reviewedInputButton, keymapButton].forEach { deliveryBar.addArrangedSubview($0) }
+        let actions: [(NSButton, String)] = [(queueButton, "tray"), (steerButton, "arrow.turn.up.right"),
+            (deliveryChoice, "return"), (resumeQueueButton, "play"), (cancelQueueEdit, "xmark"),
+            (previousDraftButton, "clock.arrow.circlepath"), (reviewedInputButton, "checkmark"), (keymapButton, "keyboard")]
+        actions.forEach { deliveryBar.addArrangedSubview($0.0, symbol: $0.1) }
         recoveryLabel.font = .systemFont(ofSize: 11)
         recoveryLabel.textColor = .secondaryLabelColor
-        recoveryLabel.lineBreakMode = .byTruncatingTail
-        for view in [deliveryBar, agentControls, recoveryLabel, mentionMenu] as [NSView] {
+        recoveryLabel.lineBreakMode = .byWordWrapping
+        recoveryLabel.maximumNumberOfLines = 2
+        recoveryLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        for view in [deliveryBar, agentControls, recoveryLabel] as [NSView] {
             view.translatesAutoresizingMaskIntoConstraints = false
-            bottom.addSubview(view)
+            composer.addSubview(view)
         }
+        mentionMenu.translatesAutoresizingMaskIntoConstraints = false
+        bottom.addSubview(mentionMenu)
         agentControls.onAction = { [weak self] action in self?.requestControl(action) }
         mentionMenuHeight = mentionMenu.heightAnchor.constraint(equalToConstant: 0)
+        deliveryWidth = deliveryBar.widthAnchor.constraint(equalToConstant: 0)
+        recoveryHeight = recoveryLabel.heightAnchor.constraint(equalToConstant: 0)
         NSLayoutConstraint.activate([
-            deliveryBar.leadingAnchor.constraint(equalTo: composer.leadingAnchor),
-            deliveryBar.topAnchor.constraint(equalTo: composer.bottomAnchor, constant: 4),
-            deliveryBar.heightAnchor.constraint(equalToConstant: 18),
-            agentControls.leadingAnchor.constraint(equalTo: composer.leadingAnchor),
-            agentControls.trailingAnchor.constraint(equalTo: composer.trailingAnchor),
-            agentControls.topAnchor.constraint(equalTo: deliveryBar.bottomAnchor, constant: 3),
+            deliveryBar.leadingAnchor.constraint(equalTo: composer.attach.trailingAnchor, constant: 4),
+            deliveryBar.centerYAnchor.constraint(equalTo: composer.action.centerYAnchor),
+            deliveryBar.heightAnchor.constraint(equalToConstant: 22), deliveryWidth!,
+            agentControls.leadingAnchor.constraint(equalTo: deliveryBar.trailingAnchor, constant: 4),
+            agentControls.trailingAnchor.constraint(equalTo: composer.action.leadingAnchor, constant: -4),
+            agentControls.centerYAnchor.constraint(equalTo: composer.action.centerYAnchor),
             agentControls.heightAnchor.constraint(equalToConstant: 22),
-            recoveryLabel.leadingAnchor.constraint(equalTo: composer.leadingAnchor),
-            recoveryLabel.trailingAnchor.constraint(equalTo: composer.trailingAnchor),
-            recoveryLabel.topAnchor.constraint(equalTo: agentControls.bottomAnchor, constant: 2),
+            recoveryLabel.leadingAnchor.constraint(equalTo: composer.leadingAnchor, constant: 12),
+            recoveryLabel.trailingAnchor.constraint(equalTo: composer.trailingAnchor, constant: -12),
+            recoveryLabel.topAnchor.constraint(equalTo: composer.action.bottomAnchor, constant: 8),
+            recoveryHeight!,
             mentionMenu.leadingAnchor.constraint(equalTo: composer.leadingAnchor),
             mentionMenu.trailingAnchor.constraint(equalTo: composer.trailingAnchor),
             mentionMenu.bottomAnchor.constraint(equalTo: composer.topAnchor, constant: -6), mentionMenuHeight,
@@ -495,7 +514,10 @@ final class ReaderModeController: NSObject {
         inputRestoration = inputRestoration.filter { pendingChats.contains($0.key) }
         for chat in model.chats where !chat.pendingMessages.isEmpty {
             if chat.pendingMessages.expire() { model.save() }
-            guard isLive(chat), let terminal = chat.terminal else { continue }
+            guard isLive(chat), let terminal = chat.terminal, terminal.geometryIsStable else {
+                queueReadySince[chat.id] = nil
+                continue
+            }
             let raw = terminal.activeScreenText()
             let screen = TerminalScreen.analyze(raw)
             observeRestoredInput(chat, terminal: terminal, raw: raw, screen: screen)
@@ -564,9 +586,16 @@ final class ReaderModeController: NSObject {
         }
         var screen = TerminalScreen.State()
         var rawScreen = ""
-        if live, let t = chat.terminal, mode.face(of: chat) == .reader {
+        if let t = chat.terminal, let previous = settledScreens[chat.id],
+           previous.terminal == ObjectIdentifier(t), previous.session == chat.sessionID {
+            rawScreen = previous.raw
+            screen = previous.state
+        }
+        let screenIsStable = chat.terminal?.geometryIsStable == true
+        if live, let t = chat.terminal, mode.face(of: chat) == .reader, screenIsStable {
             rawScreen = t.activeScreenText()
             screen = TerminalScreen.analyze(rawScreen)
+            settledScreens[chat.id] = (ObjectIdentifier(t), chat.sessionID, rawScreen, screen)
             if screen.ready { readyChats.insert(chat.id) }
             if menuProbe != nil {
                 if !mayProbe(chat, terminal: t) { cancelMenuProbe() }
@@ -575,14 +604,19 @@ final class ReaderModeController: NSObject {
         }
         reader?.interaction.refresh()
         let structured = reader?.interaction.hasPendingRequest == true
-        let parsed = live && mode.showsReader(chat) && menuProbe == nil && !structured
-            ? ReaderMenuParser.parse(rawScreen, agent: chat.agent.id) : nil
+        let sameScreenOwner = chat.terminal.map { terminal in
+            settledScreens[chat.id].map { $0.terminal == ObjectIdentifier(terminal) && $0.session == chat.sessionID } ?? false
+        } ?? false
+        let menuEligible = live && mode.showsReader(chat) && menuProbe == nil && !structured
+        let parsed = menuEligible
+            ? (screenIsStable ? ReaderMenuParser.parse(rawScreen, agent: chat.agent.id) : (sameScreenOwner ? mirroredMenu : nil))
+            : nil
         if parsed == nil { if menuOperation == nil || structured { clearMirroredMenu() } }
         else {
             let enteringInput = mirroredMenu?.input == nil && parsed?.input != nil
             if mirroredMenu?.identity != parsed?.identity { menuNotice = nil }
             mirroredMenu = parsed
-            menuCard.update(menu: parsed, busy: menuOperation != nil, notice: menuNotice)
+            menuCard.update(menu: parsed, busy: menuOperation != nil || !screenIsStable, notice: menuNotice)
             if enteringInput { menuCard.focusInput() }
             screen.menu = ScreenMenu(kind: .menu, line: parsed!.title)
             composer.textView.dismissCommands()
@@ -590,7 +624,7 @@ final class ReaderModeController: NSObject {
             mentionMenu.isHidden = true
         }
         var activity = chat.activity
-        if let at = stoppedAt[chat.id] {
+        if screenIsStable, let at = stoppedAt[chat.id] {
             if activity != .working || (screen.busy && Date().timeIntervalSince(at) > 3) {
                 // The status caught up, or the agent carried on after all.
                 stoppedAt[chat.id] = nil
@@ -613,12 +647,12 @@ final class ReaderModeController: NSObject {
         apply(ComposerMode.resolve(input), chat: chat)
         let sendNowAvailable = composerMode.isWorking && mode.showsReader(chat) &&
             !outbox.contains(where: { $0.chatID == chat.id }) &&
-            QueuedSendNow.available(agentID: chat.agent.id, screen: chat.terminal?.activeScreenText() ?? "")
+            screenIsStable && QueuedSendNow.available(agentID: chat.agent.id, screen: rawScreen)
         if chat.pendingMessages.sendNowEnabled != sendNowAvailable {
             chat.pendingMessages.sendNowEnabled = sendNowAvailable
         }
 
-        if !typing, menuProbe == nil, mirroredMenu == nil, !structured,
+        if screenIsStable, !typing, menuProbe == nil, mirroredMenu == nil, !structured,
            ReaderCommandLogic.autoPeek(sentAt: commandSentAt[chat.id], now: Date(), menu: screen.menu),
            mode.showsReader(chat) {
             commandPeekAt[chat.id] = Date()
@@ -633,7 +667,7 @@ final class ReaderModeController: NSObject {
         }
 
         // A peek ends once nothing has waited in the terminal for two checks in a row.
-        if mode.isPeeking(chat) {
+        if screenIsStable, mode.isPeeking(chat) {
             let commandWaiting = commandPeekAt[chat.id].map { Date().timeIntervalSince($0) < 2 || !screen.ready || screen.busy } ?? false
             if composerMode.isBlocked || !live || commandWaiting {
                 calmChecks = 0
@@ -670,6 +704,7 @@ final class ReaderModeController: NSObject {
         cancelQueueEdit.isHidden = editingQueueID == nil
         previousDraftButton.isHidden = draftStore.draft(chatID: chat.id, scope: "before-recovery") == nil || editingQueueID != nil
         reviewedInputButton.isHidden = !chat.pendingMessages.inputNeedsReview
+        deliveryBar.needsLayout = true
         updateAction()
         updateHeights()
     }
@@ -683,13 +718,25 @@ final class ReaderModeController: NSObject {
 
     private func updateHeights() {
         let s = mirroredMenu == nil ? ReaderModeStatusModel.height(for: composerMode) : menuCard.preferredHeight
+        let available = max(0, composer.bounds.width - 83)
+        let showLabels = deliveryBar.preferredWidth + 4 + agentControls.preferredWidth <= available
+        let modelWidth = showLabels ? agentControls.preferredWidth : 94
+        deliveryWidth.constant = max(0, min(deliveryBar.preferredWidth, available - modelWidth - 4))
+        deliveryBar.needsLayout = true
+        agentControls.needsLayout = true
+        let recovery: CGFloat = recoveryLabel.stringValue.isEmpty ? 0 : 28
+        recoveryLabel.isHidden = recovery == 0
+        recoveryHeight.constant = recovery
+        composer.accessoryHeight = recovery > 0 ? recovery + 9 : 0
         let c = composer.preferredHeight
+        composerBottom.constant = -7
+        recoveryLabel.toolTip = recoveryLabel.stringValue
         let gap: CGFloat = composerMode.isBlocked ? -1 : (s > 0 ? 6 : 0)
         statusHeight.constant = s
         statusGap.constant = -gap
         composerHeight.constant = c
         // An ended chat leaves room for the Resume bar MainAreaController draws there.
-        bottomHeight.constant = composerMode == .none ? 38 : 14 + s + gap + c + 78
+        bottomHeight.constant = composerMode == .none ? 38 : 14 + s + gap + c + 7
     }
 
     private func textChanged() {
@@ -727,7 +774,7 @@ final class ReaderModeController: NSObject {
 
     private func mayProbe(_ chat: Chat, terminal: TerminalView) -> Bool {
         CommandMenuProbe.supportsAutomaticHarvest(agent: chat.agent.id) && commandDiscoveryEnabled && model.selectedChat === chat && chat.id == shownChatID &&
-            chat.terminal === terminal && mode.showsReader(chat) && isLive(chat) &&
+            chat.terminal === terminal && terminal.geometryIsStable && mode.showsReader(chat) && isLive(chat) &&
             model.subagentBrowser.selection == nil && composerMode == .ready && !typing && outbox.isEmpty &&
             chat.activity != .working && chat.activity != .background && !chat.activity.isNeeds &&
             (statusProvider(chat)?.waits.isEmpty ?? true) && !root.isHidden && root.window != nil &&
@@ -749,7 +796,7 @@ final class ReaderModeController: NSObject {
         menuProbeGeneration = generation
         menuProbeChatID = chat.id
         let probe = CommandMenuProbe(agent: chat.agent.id, io: .init(
-            screen: { [weak terminal] in terminal?.activeScreenText() ?? "" },
+            screen: { [weak terminal] in terminal.flatMap { $0.geometryIsStable ? $0.activeScreenText() : nil } ?? "" },
             allowed: { [weak self, weak chat, weak terminal] in
                 guard let self, let chat, let terminal else { return false }
                 return self.menuProbeGeneration == generation && self.mayProbe(chat, terminal: terminal)
@@ -805,23 +852,7 @@ final class ReaderModeController: NSObject {
     @discardableResult
     func send(intent: DeliveryIntent? = nil) -> Bool {
         guard let chat = model.selectedChat, chat.id == shownChatID, let t = chat.terminal else { return false }
-        guard !chat.codexIdentityWaiting else { return false }
-        if waitingToSendAfterProbe { return false }
-        if menuProbe != nil {
-            cancelMenuProbe()
-            waitingToSendAfterProbe = true
-            let draft = composer.textView.string
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self, weak chat] in
-                guard let self else { return }
-                self.waitingToSendAfterProbe = false
-                guard let chat, self.model.selectedChat === chat, self.composer.textView.string == draft else { return }
-                // Never join a command to a probe that could not restore its empty input.
-                guard CommandMenuScreen.emptyInput(t.activeScreenText(), agent: chat.agent.id) else { self.showTerminal(); return }
-                _ = self.send(intent: intent)
-            }
-            return true
-        }
-        refresh()
+        // Side commands never use the parent terminal, even while it is resizing.
         let text = ComposerMessage.prepare(composer.textView.string)
         let attachments = composer.attachments
         guard text != nil || !attachments.isEmpty else { return false }
@@ -840,6 +871,23 @@ final class ReaderModeController: NSObject {
             drafts[chat.id] = nil
             return true
         }
+        guard !chat.codexIdentityWaiting else { return false }
+        if waitingToSendAfterProbe { return false }
+        if menuProbe != nil {
+            cancelMenuProbe()
+            waitingToSendAfterProbe = true
+            let draft = composer.textView.string
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self, weak chat] in
+                guard let self else { return }
+                self.waitingToSendAfterProbe = false
+                guard let chat, self.model.selectedChat === chat, self.composer.textView.string == draft else { return }
+                // Never join a command to a probe that could not restore its empty input.
+                guard CommandMenuScreen.emptyInput(t.activeScreenText(), agent: chat.agent.id) else { self.showTerminal(); return }
+                _ = self.send(intent: intent)
+            }
+            return true
+        }
+        refresh()
         guard composerMode.canSend, !chat.pendingMessages.inputNeedsReview,
               !attachments.contains(where: { $0.preparation == .preparing }) else {
             recoveryLabel.stringValue = chat.pendingMessages.inputNeedsReview ? "Check terminal input, then choose Input reviewed." : "Wait for attachments to finish preparing."
@@ -852,7 +900,7 @@ final class ReaderModeController: NSObject {
         }
         let sendID = editingQueueID ?? "pending-" + UUID().uuidString
         let chosen = intent ?? (deliveryChoice.indexOfSelectedItem == 1 ? .queue : .steer)
-        let working = composerMode.isWorking || TerminalScreen.analyze(t.activeScreenText()).busy || statusProvider(chat)?.turnActive == true
+        let working = composerMode.isWorking || chat.activity == .working || (t.geometryIsStable && TerminalScreen.analyze(t.activeScreenText()).busy) || statusProvider(chat)?.turnActive == true
         let wait = working && chosen == .queue || editingQueueID != nil
         chat.pendingMessages.enqueue(id: sendID, text: text, files: [], agentID: chat.agent.id,
                                      existing: chat.allEntries, stage: wait ? .waiting : .preparing,
@@ -1096,7 +1144,7 @@ final class ReaderModeController: NSObject {
                 controlsRecords += (offset > 0 ? Array(lines.dropFirst()) : Array(lines)).map { Data($0) }
             }
         }
-        let state = ComposerAgentControlsParser.snapshot(provider: provider, sessionID: chat.sessionID, records: controlsRecords, screen: chat.terminal?.activeScreenText() ?? "")
+        let state = ComposerAgentControlsParser.snapshot(provider: provider, sessionID: chat.sessionID, records: controlsRecords, screen: chat.terminal.flatMap { $0.geometryIsStable ? $0.activeScreenText() : nil } ?? "")
         controlsState = state
         agentControls.update(state: state, enabled: composerMode.canSend && !isTyping && !chat.pendingMessages.inputNeedsReview,
                              disabledReason: composerMode.isBlocked ? "Answer the current terminal dialog first." : nil)
@@ -1142,12 +1190,32 @@ final class ReaderModeController: NSObject {
         if !typing { typeNext() }
     }
 
-    private func canType(_ id: String) -> Bool {
+    private func currentTransport(_ id: String) -> Bool {
         guard let first = outbox.first, first.id == id, first.terminal.surface != nil, !first.terminal.processExited,
               let chat = model.chats.first(where: { $0.id == first.chatID }), chat.status != .ended,
               first.files.allSatisfy({ FileManager.default.isReadableFile(atPath: $0.path) }),
-              !chat.pendingMessages.inputNeedsReview, chat.terminal === first.terminal, matchesSession(chat, expected: first.sessionID, pendingID: first.tracksPending ? id : nil), !chat.codexIdentityWaiting else { return false }
+              !chat.pendingMessages.inputNeedsReview, chat.terminal === first.terminal,
+              matchesSession(chat, expected: first.sessionID, pendingID: first.tracksPending ? id : nil),
+              !first.tracksPending || chat.pendingMessages.stage(id: id) == .typing else { return false }
         if outbox[0].sessionID == nil { outbox[0].sessionID = chat.sessionID }
+        return true
+    }
+
+    /// Resizing pauses delivery. Session changes and Stop still cancel it immediately.
+    private func afterGeometrySettles(_ id: String, perform action: @escaping () -> Void) {
+        guard outbox.first?.id == id else { return }
+        guard currentTransport(id) else { return failTyping(id, "Session or terminal input state changed. Nothing else was typed.") }
+        let first = outbox[0]
+        if !first.terminal.geometryIsStable || model.chats.first(where: { $0.id == first.chatID })?.codexIdentityWaiting == true {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
+                self?.afterGeometrySettles(id, perform: action)
+            }
+        } else { action() }
+    }
+
+    private func canType(_ id: String) -> Bool {
+        guard currentTransport(id), let first = outbox.first, first.terminal.geometryIsStable,
+              let chat = model.chats.first(where: { $0.id == first.chatID }), !chat.codexIdentityWaiting else { return false }
         let waits = chat.activity.isNeeds || (statusProvider(chat).map { !$0.waits.isEmpty } ?? false)
         return ReaderSubmissionGuard.refusal(screen: first.terminal.activeScreenText(), waiting: waits, command: first.command) == nil &&
             permitsSubmit(first.terminal) && (!first.tracksPending || chat.pendingMessages.stage(id: id) == .typing)
@@ -1175,11 +1243,9 @@ final class ReaderModeController: NSObject {
         if outbox[0].tracksPending, chat?.pendingMessages.stage(id: id) != .typing {
             return failTyping(id, "This input is no longer awaiting submission.")
         }
-        if chat?.codexIdentityWaiting == true, chat?.status != .ended {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
-                guard let self, self.outbox.first?.id == id else { return }
-                self.typeNext()
-            }
+        guard currentTransport(id) else { return failTyping(id, "Session or terminal input state changed. Nothing else was typed.") }
+        if chat?.codexIdentityWaiting == true || !outbox[0].terminal.geometryIsStable {
+            afterGeometrySettles(id) { [weak self] in self?.typeNext() }
             return
         }
         guard canType(id) else { return failTyping(id, "Session or terminal input state changed. Nothing else was typed.") }
@@ -1194,15 +1260,24 @@ final class ReaderModeController: NSObject {
         }
         switch step {
         case .command(let text):
+            let firstChatID = outbox[0].chatID
             guard let invocation = ComposerCommandTransport.invocation(text) else { return failTyping(id, "The command could not be prepared.") }
             outbox[0].typedAny = true
             terminal.typeCommandToken("/" + invocation.name + (invocation.arguments.isEmpty ? "" : " "), while: { [weak self] in
-                self?.canType(id) == true
-            }) { [weak self] in
+                guard let self, self.currentTransport(id) else { return false }
+                let verifying = self.model.chats.first(where: { $0.id == firstChatID })?.codexIdentityWaiting == true
+                return !terminal.geometryIsStable || verifying || self.canType(id)
+            }, pausingWhile: { [weak self] in
+                !terminal.geometryIsStable || self?.model.chats.first(where: { $0.id == firstChatID })?.codexIdentityWaiting == true
+            }) { [weak self] completed in
                 guard let self, self.outbox.first?.id == id else { return }
-                guard self.canType(id) else { return self.failTyping(id, "The terminal changed before command arguments were pasted.") }
-                if !invocation.arguments.isEmpty { terminal.pasteText(invocation.arguments) }
-                next(0.2)
+                guard completed else { return self.failTyping(id, "Command entry was interrupted. Nothing else was typed.") }
+                self.afterGeometrySettles(id) { [weak self] in
+                    guard let self else { return }
+                    guard self.canType(id) else { return self.failTyping(id, "The terminal changed before command arguments were pasted.") }
+                    if !invocation.arguments.isEmpty { terminal.pasteText(invocation.arguments) }
+                    next(0.2)
+                }
             }
         case .paste(let text):
             terminal.pasteText(text)
@@ -1216,6 +1291,8 @@ final class ReaderModeController: NSObject {
             let deadline = Date().addingTimeInterval(imageWait)
             func check() {
                 guard self.outbox.first?.id == id else { return }
+                guard self.currentTransport(id) else { return self.failTyping(id, "The terminal changed while attaching the image.") }
+                if !terminal.geometryIsStable { self.afterGeometrySettles(id) { check() }; return }
                 guard self.canType(id) else { return self.failTyping(id, "The terminal changed while attaching the image.") }
                 if ComposerMessage.imageMarks(terminal.activeScreenText()) > before { return next(0.1) }
                 if Date() >= deadline { return self.failTyping(id, "The agent did not confirm the image attachment. The message was not submitted.") }
@@ -1225,20 +1302,23 @@ final class ReaderModeController: NSObject {
         case .pressReturn:
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
                 guard let self, let first = self.outbox.first, first.id == id else { return }
-                guard self.canType(id) else { return self.failTyping(id, "A menu or session change prevented submission.") }
-                if let chat = self.model.chats.first(where: { $0.id == first.chatID }), first.tracksPending {
-                    // Persist before the irreversible Return so a crash never permits replay.
-                    chat.pendingMessages.markSubmitted(id: id, existing: chat.allEntries)
-                    self.model.save()
+                self.afterGeometrySettles(id) { [weak self] in
+                    guard let self, let first = self.outbox.first, first.id == id else { return }
+                    guard self.canType(id) else { return self.failTyping(id, "A menu or session change prevented submission.") }
+                    if let chat = self.model.chats.first(where: { $0.id == first.chatID }), first.tracksPending {
+                        // Persist before the irreversible Return so a crash never permits replay.
+                        chat.pendingMessages.markSubmitted(id: id, existing: chat.allEntries)
+                        self.model.save()
+                    }
+                    self.submittedAt[first.chatID] = Date()
+                    self.inputRestoration[first.chatID] = ReaderInputRestoration(terminal: ObjectIdentifier(terminal), sessionID: self.model.chats.first(where: { $0.id == first.chatID })?.sessionID, pendingID: id)
+                    self.queueReadySince[first.chatID] = nil
+                    terminal.pressReturn()
+                    if let command = first.command { self.didSendCommand(command, terminal: terminal) }
+                    self.outbox.removeFirst()
+                    self.typeNext()
+                    if first.promote { self.promoteSubmitted(chatID: first.chatID, id: id, until: Date().addingTimeInterval(3)) }
                 }
-                self.submittedAt[first.chatID] = Date()
-                self.inputRestoration[first.chatID] = ReaderInputRestoration(terminal: ObjectIdentifier(terminal), sessionID: self.model.chats.first(where: { $0.id == first.chatID })?.sessionID, pendingID: id)
-                self.queueReadySince[first.chatID] = nil
-                terminal.pressReturn()
-                if let command = first.command { self.didSendCommand(command, terminal: terminal) }
-                self.outbox.removeFirst()
-                self.typeNext()
-                if first.promote { self.promoteSubmitted(chatID: first.chatID, id: id, until: Date().addingTimeInterval(3)) }
             }
         }
     }
@@ -1283,7 +1363,7 @@ final class ReaderModeController: NSObject {
 
     /// A promotion already requested by the user finishes against its original terminal.
     private func sendNativeQueue(_ chat: Chat, id: String) -> Bool {
-        guard let terminal = chat.terminal, terminal.surface != nil, isLive(chat),
+        guard let terminal = chat.terminal, terminal.surface != nil, terminal.geometryIsStable, isLive(chat),
               !chat.codexIdentityWaiting, !chat.pendingMessages.inputNeedsReview, !isTyping,
               !outbox.contains(where: { $0.chatID == chat.id }),
               let action = QueuedSendNow.action(agentID: chat.agent.id) else { return false }
@@ -1376,7 +1456,7 @@ final class ReaderModeController: NSObject {
     func chooseMenuOption(label: String, confirm: Bool = true, sessionOnly: Bool = false) -> Bool {
         reader?.interaction.refresh()
         guard menuOperation == nil, menuNotice == nil, let chat = model.selectedChat,
-              let terminal = chat.terminal, let menu = mirroredMenu, menu.actionable,
+              let terminal = chat.terminal, terminal.geometryIsStable, let menu = mirroredMenu, menu.actionable,
               menu.options.contains(where: { $0.label == label }),
               menuOwner(chat, terminal: terminal, session: chat.sessionID) else { return false }
         if sessionOnly && !menu.allowsSessionConfirm { return false }
@@ -1394,6 +1474,9 @@ final class ReaderModeController: NSObject {
             }
             guard Date() < deadline else {
                 self.failMenu("The menu action expired. No further key was sent. Use Show Terminal."); return
+            }
+            if !terminal.geometryIsStable {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { step() }; return
             }
             let raw = terminal.activeScreenText()
             let next = ReaderMenuParser.parse(raw, agent: chat.agent.id)
@@ -1425,7 +1508,7 @@ final class ReaderModeController: NSObject {
     func submitMenuText(_ text: String) -> Bool {
         reader?.interaction.refresh()
         guard menuOperation == nil, menuNotice == nil, let menu = mirroredMenu, menu.actionable,
-              let chat = model.selectedChat, let terminal = chat.terminal,
+              let chat = model.selectedChat, let terminal = chat.terminal, terminal.geometryIsStable,
               menuOwner(chat, terminal: terminal, session: chat.sessionID),
               ReaderMenuParser.parse(terminal.activeScreenText(), agent: chat.agent.id) == menu else { return false }
         guard let suffix = ReaderMenuTextSubmission.suffix(for: text, menu: menu) else {
@@ -1442,6 +1525,9 @@ final class ReaderModeController: NSObject {
             self.reader?.interaction.refresh()
             guard self.menuOwner(chat, terminal: terminal, session: session), Date() < deadline else {
                 self.failMenu("The answer could not be confirmed. Input may remain in the terminal. Use Show Terminal."); return
+            }
+            if !terminal.geometryIsStable {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { observe() }; return
             }
             let raw = terminal.activeScreenText()
             let current = ReaderMenuParser.parse(raw, agent: chat.agent.id)
@@ -1479,7 +1565,7 @@ final class ReaderModeController: NSObject {
         }
         let noteKey = key == .notes && menu.agent == "codex" && menu.kind == .question && menu.footer.lowercased().contains("tab to add notes")
         guard key == .escape || ((key == .left || key == .right) && menu.allowsHorizontal) || (key == .tab && menu.allowsTab) || noteKey,
-              menuOperation == nil, menuNotice == nil, let chat = model.selectedChat, let terminal = chat.terminal,
+              menuOperation == nil, menuNotice == nil, let chat = model.selectedChat, let terminal = chat.terminal, terminal.geometryIsStable,
               menuOwner(chat, terminal: terminal, session: chat.sessionID),
               ReaderMenuParser.parse(terminal.activeScreenText(), agent: chat.agent.id) == menu else { return false }
         let token = UUID(), session = chat.sessionID
@@ -1492,7 +1578,11 @@ final class ReaderModeController: NSObject {
         func observe() {
             guard self.menuOperation == token else { return }
             guard self.menuOwner(chat, terminal: terminal, session: session) else { self.failMenu("The input owner changed. Use Show Terminal."); return }
-            let raw = terminal.activeScreenText(), state = TerminalScreen.analyze(terminal.activeScreenText())
+            guard Date() < deadline else { self.failMenu("The menu action expired. Use Show Terminal."); return }
+            if !terminal.geometryIsStable {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { observe() }; return
+            }
+            let raw = terminal.activeScreenText(), state = TerminalScreen.analyze(raw)
             let next = ReaderMenuParser.parse(raw, agent: chat.agent.id)
             if raw != before, next != nil || state.menu == nil && (state.ready || state.busy) {
                 self.menuOperation = nil; self.refresh(); return

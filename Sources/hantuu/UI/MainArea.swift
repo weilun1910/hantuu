@@ -25,14 +25,19 @@ class FillView: NSView {
 /// Holds terminal views. All of them stay alive (and their agents keep running); only the
 /// selected one is visible. A bottom inset leaves room for the "ended" bar.
 final class TerminalContainer: FillView {
-    var bottomInset: CGFloat = 0 { didSet { needsLayout = true } }
+    var bottomInset: CGFloat = 0 { didSet { if oldValue != bottomInset { needsLayout = true } } }
+    var protectsHiddenTerminals = false
+    private weak var visibleTerminal: TerminalView?
     override func layout() {
         super.layout()
-        for v in subviews where v is TerminalView {
-            v.frame = NSRect(x: 0, y: bottomInset, width: bounds.width, height: max(0, bounds.height - bottomInset))
+        for terminal in subviews.compactMap({ $0 as? TerminalView }) {
+            let protect = protectsHiddenTerminals && (terminal !== visibleTerminal || isHiddenOrHasHiddenAncestor)
+            let width = protect ? max(bounds.width, terminal.minimumWidth(columns: 80)) : bounds.width
+            terminal.frame = NSRect(x: 0, y: bottomInset, width: width, height: max(1, bounds.height - bottomInset))
         }
     }
     func show(_ terminals: [TerminalView], visible: TerminalView?) {
+        visibleTerminal = visible
         for t in terminals where t.superview !== self {
             addSubview(t, positioned: .below, relativeTo: nil)
         }
@@ -51,19 +56,22 @@ final class MainAreaController: NSViewController {
     private var endedBar: NSView!
     private var emptyView: NSView!
     /// Reader mode: the chat as the reader with a message box, over its terminal (ReaderMode/).
-    private(set) lazy var readerMode = ReaderModeController(model: model)
+    private let mode: ReaderMode
+    var onFaceLayoutChange: (() -> Void)?
+    private(set) lazy var readerMode = ReaderModeController(model: model, mode: mode)
     private var subagentReader: SubagentReaderController?
     private var bag = Set<AnyCancellable>()
 
-    init(model: AppModel) {
+    init(model: AppModel, mode: ReaderMode = .shared) {
         self.model = model
+        self.mode = mode
         super.init(nibName: nil, bundle: nil)
     }
     required init?(coder: NSCoder) { fatalError() }
 
     override func loadView() {
         let root = FillView(color: Theme.background)
-        header = ChromeHostingView(rootView: ChatHeader().environmentObject(model))
+        header = ChromeHostingView(rootView: ChatHeader(layout: model.layoutState).environmentObject(model))
         endedBar = ChromeHostingView(rootView: EndedBar().environmentObject(model))
         emptyView = ChromeHostingView(rootView: EmptyStateView().environmentObject(model))
         for v in [header!, container, endedBar!, emptyView!] {
@@ -90,7 +98,14 @@ final class MainAreaController: NSViewController {
         ])
         readerMode.install(in: root, top: header.bottomAnchor, above: container)
         readerMode.onLayoutChange = { [weak self] in self?.sync() }
+        container.protectsHiddenTerminals = true
+        container.layer?.masksToBounds = true
         view = root
+    }
+
+    func layoutTerminals() {
+        container.needsLayout = true
+        container.layoutSubtreeIfNeeded()
     }
 
     override func viewDidLoad() {
@@ -145,19 +160,24 @@ final class MainAreaController: NSViewController {
             emptyView.isHidden = true
             endedBar.isHidden = false
         }
+        onFaceLayoutChange?()
     }
 }
 
 struct ChatHeader: View {
     @EnvironmentObject var model: AppModel
+    @ObservedObject var layout: WindowLayoutState = AppModel.shared.layoutState
 
     var body: some View {
         ZStack {
             WindowDragArea()
             HStack(spacing: 10) {
-                if !model.sidebarVisible {
+                if !model.sidebarVisible || layout.sidebarAutoHidden {
                     Spacer().frame(width: 66)
-                    IconButton(symbol: "sidebar.left", help: "Show Sidebar  ⌘0") { model.sidebarVisible = true }
+                    IconButton(symbol: "sidebar.left", help: "Show Sidebar  ⌘0") {
+                        if layout.sidebarAutoHidden { layout.requests.send(.navigation) }
+                        else { model.sidebarVisible = true }
+                    }
                 }
                 if let selected = model.subagentBrowser.selection, let chat = model.selectedChat {
                     IconButton(symbol: "chevron.left", help: "Back to parent chat") { _ = model.backFromSubagent() }
@@ -174,6 +194,10 @@ struct ChatHeader: View {
                 Spacer()
                 // Switches the chat between its terminal and the reader (Shift-Cmd-R).
                 if model.subagentBrowser.selection == nil { ChatFaceButtons() }
+                if layout.single {
+                    Button("Panel") { layout.requests.send(.panel) }
+                        .buttonStyle(.plain).font(.system(size: 12))
+                }
                 IconButton(symbol: "sidebar.right", help: model.panelVisible ? "Hide Panel  ⌥⌘0" : "Show Panel  ⌥⌘0", active: model.panelVisible) {
                     model.panelVisible.toggle()
                 }

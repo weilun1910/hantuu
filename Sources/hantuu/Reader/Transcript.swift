@@ -706,6 +706,9 @@ final class TranscriptFollower {
     static let subagentTailBytes: UInt64 = 2 << 20
     private let queue = DispatchQueue(label: "hantuu.transcript", qos: .userInitiated)
     private var pollPending = false
+    private var pollAgain = false
+    private var restartRequested = false
+    private var fileWatch: FileWatch?
     private(set) var lastReadDuration: TimeInterval = 0
     private(set) var lastReadWasOnMain = true
     var onAppend: (([ReaderEntry]) -> Void)?
@@ -722,27 +725,40 @@ final class TranscriptFollower {
         }
     }
 
-    deinit { timer?.invalidate() }
+    deinit { timer?.invalidate(); fileWatch?.stop() }
 
     func start(interval: TimeInterval = 0.5, follow: Bool = true) {
-        timer?.invalidate()
-        timer = nil
+        stop()
         requestPoll()
         if follow {
-            timer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in self?.requestPoll() }
+            fileWatch = FileWatch(path: url.path) { [weak self] in self?.requestPoll() }
+            let timer = Timer(timeInterval: interval, repeats: true) { [weak self] _ in self?.requestPoll() }
+            self.timer = timer
+            RunLoop.main.add(timer, forMode: .common)
         }
     }
 
     func stop() {
         timer?.invalidate()
         timer = nil
+        fileWatch?.stop()
+        fileWatch = nil
+        pollAgain = false
+        restartRequested = false
     }
 
     /// Reads and parses on a serial worker. Only delivery touches the reader on main.
     func retry() { requestPoll(restart: true) }
 
     private func requestPoll(restart: Bool = false) {
-        guard !pollPending else { return }
+        if pollPending {
+            pollAgain = true
+            restartRequested = restartRequested || restart
+            return
+        }
+        let restart = restart || restartRequested
+        restartRequested = false
+        pollAgain = false
         pollPending = true
         queue.async { [self] in
             let start = Date()
@@ -766,6 +782,9 @@ final class TranscriptFollower {
                 lastReadDuration = elapsed
                 lastReadWasOnMain = onMain
                 deliver(batch)
+                // A final append or explicit retry can arrive while the previous read is
+                // in flight. Deliver that request immediately instead of losing the edge.
+                if pollAgain || restartRequested { requestPoll(restart: restartRequested) }
             }
         }
     }

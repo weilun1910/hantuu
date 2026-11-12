@@ -607,6 +607,18 @@ final class ComposerBox: NSView {
     static let stripGap: CGFloat = 8
     private var scrollTop: NSLayoutConstraint!
     private var stripHeight: NSLayoutConstraint!
+    private var scrollBottom: NSLayoutConstraint!
+    private var attachBottom: NSLayoutConstraint!
+    private var actionBottom: NSLayoutConstraint!
+    private var laidOutWidth: CGFloat = -1
+    /// Space for the reader's wrapping actions and model controls inside the box.
+    var accessoryHeight: CGFloat = 0 {
+        didSet {
+            scrollBottom.constant = -Self.footer - accessoryHeight
+            attachBottom.constant = -6 - accessoryHeight
+            actionBottom.constant = -6 - accessoryHeight
+        }
+    }
 
     var enabled = true {
         didSet { alphaValue = enabled ? 1 : 0.7 }
@@ -639,6 +651,9 @@ final class ComposerBox: NSView {
         }
         scrollTop = scroll.topAnchor.constraint(equalTo: topAnchor, constant: Self.padTop)
         stripHeight = stripScroll.heightAnchor.constraint(equalToConstant: 0)
+        scrollBottom = scroll.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -Self.footer)
+        attachBottom = attach.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -6)
+        actionBottom = action.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -6)
         NSLayoutConstraint.activate([
             stripScroll.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Self.stripInset),
             stripScroll.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -Self.stripInset),
@@ -647,13 +662,13 @@ final class ComposerBox: NSView {
             scroll.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Self.padH),
             scroll.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -Self.padH),
             scrollTop,
-            scroll.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -Self.footer),
+            scrollBottom,
             attach.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 8),
-            attach.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -6),
+            attachBottom,
             attach.widthAnchor.constraint(equalToConstant: 28),
             attach.heightAnchor.constraint(equalToConstant: 28),
             action.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -7),
-            action.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -6),
+            actionBottom,
             action.widthAnchor.constraint(equalToConstant: 28),
             action.heightAnchor.constraint(equalToConstant: 28),
         ])
@@ -694,7 +709,7 @@ final class ComposerBox: NSView {
         let lines = min(max(textView.contentHeight, ComposerStyle.lineHeight * Self.minLines), ComposerStyle.lineHeight * ComposerStyle.maxLines)
         let chips = stripVisibleHeight
         let top = chips > 0 ? Self.stripTop + chips + Self.stripGap : Self.padTop
-        return top + lines + Self.footer
+        return top + lines + Self.footer + accessoryHeight
     }
 
     // MARK: Attachments
@@ -752,6 +767,10 @@ final class ComposerBox: NSView {
 
     override func layout() {
         super.layout()
+        if laidOutWidth != bounds.width {
+            laidOutWidth = bounds.width
+            onHeightChange?()
+        }
         // The chips rewrap when the box changes width.
         let w = stripWidth, h = strip.contentHeight(width: w)
         if strip.frame.width != w || strip.frame.height != h {

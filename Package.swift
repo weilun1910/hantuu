@@ -23,6 +23,7 @@ let package = Package(
                 .linkedFramework("IOSurface"),
                 .linkedFramework("Metal"),
                 .linkedFramework("QuartzCore"),
+                .linkedFramework("ScreenCaptureKit"),
                 .linkedFramework("WebKit"),
                 .linkedFramework("PDFKit"),
                 .linkedLibrary("c++"),

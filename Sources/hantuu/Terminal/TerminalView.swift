@@ -34,7 +34,48 @@ final class TerminalView: NSView, NSTextInputClient {
 
     private(set) var title: String = ""
     var pwd: String?
-    var cellSize: NSSize = .zero
+    static let geometryDidChange = Notification.Name("hantuu.terminal.geometryDidChange")
+    var cellSize: NSSize = .zero {
+        didSet { if oldValue != cellSize { refreshGeometry() } }
+    }
+    private var measuredCellPixels: CGFloat = 0
+    private var measuredScale: CGFloat = 0
+    private var measuredPaddingPixels: CGFloat = 0
+    private var settledGrid: (columns: Int, rows: Int)?
+    private(set) var geometryChangedAt = Date.distantPast
+    var geometryIsStable: Bool { Date().timeIntervalSince(geometryChangedAt) >= 0.2 }
+
+    var measuredColumns: Int {
+        surface.map { Int(ghostty_surface_size($0).columns) } ?? 0
+    }
+
+    /// The residual includes configured padding and less than one spare cell. Cache it
+    /// for this font and scale so the minimum does not oscillate while dragging.
+    func refreshGeometry() {
+        guard let surface else { return }
+        let size = ghostty_surface_size(surface)
+        let cell = CGFloat(size.cell_width_px)
+        let scale = convertToBacking(NSSize(width: 1, height: 1)).width
+        guard cell > 0, size.columns > 1, scale > 0 else { return }
+        let changed = cell != measuredCellPixels || scale != measuredScale
+        if let previous = settledGrid,
+           previous.columns != Int(size.columns) || previous.rows != Int(size.rows) || changed {
+            geometryChangedAt = Date()
+        }
+        settledGrid = (Int(size.columns), Int(size.rows))
+        if changed {
+            measuredCellPixels = cell
+            measuredScale = scale
+            measuredPaddingPixels = max(0, CGFloat(size.width_px) - CGFloat(size.columns) * cell)
+            NotificationCenter.default.post(name: Self.geometryDidChange, object: self)
+        }
+    }
+
+    func minimumWidth(columns: Int) -> CGFloat {
+        refreshGeometry()
+        guard measuredCellPixels > 0, measuredScale > 0 else { return max(800, frame.width) }
+        return ceil((CGFloat(columns) * measuredCellPixels + measuredPaddingPixels) / measuredScale)
+    }
     private(set) var exitCode: Int?
     private(set) var focused = false
 
@@ -207,7 +248,14 @@ final class TerminalView: NSView, NSTextInputClient {
         contentSize = size
         guard let surface, size.width > 0, size.height > 0 else { return }
         let px = convertToBacking(size)
-        ghostty_surface_set_size(surface, UInt32(px.width), UInt32(px.height))
+        let before = ghostty_surface_size(surface)
+        let width = UInt32(max(1, px.width)), height = UInt32(max(1, px.height))
+        guard before.width_px != width || before.height_px != height else { return }
+        ghostty_surface_set_size(surface, width, height)
+        let after = ghostty_surface_size(surface)
+        // Only a changed text grid requires the provider to reflow its screen.
+        if before.columns != after.columns || before.rows != after.rows { geometryChangedAt = Date() }
+        refreshGeometry()
     }
 
     override func viewDidMoveToWindow() {

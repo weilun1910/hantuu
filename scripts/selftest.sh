@@ -1,6 +1,7 @@
 #!/bin/bash
 # Builds a debug binary and runs the self test in a throwaway folder (tmp/selftest).
 # HANTUU_NO_PMSET=1 keeps the test from ever calling pmset.
+# HANTUU_LAYOUT_SNAPSHOTS=1 also renders the 260 whole-window layout combinations.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
@@ -11,7 +12,7 @@ cp "$ROOT"/Resources/ghostty-themes/* "$ROOT/vendor/ghostty-resources/ghostty/th
 # Keep the complete log outside the workdir that the binary clears at startup.
 mkdir -p "$ROOT/tmp"
 set +e
-HANTUU_NO_PMSET=1 "$ROOT/.build/debug/hantuu" --self-test --workdir "$ROOT/tmp/selftest" 2>&1 | tee "$ROOT/tmp/selftest-run.log"
+HANTUU_NO_PMSET=1 HANTUU_LAYOUT_SNAPSHOTS="${HANTUU_LAYOUT_SNAPSHOTS:-0}" "$ROOT/.build/debug/hantuu" --self-test --workdir "$ROOT/tmp/selftest" 2>&1 | tee "$ROOT/tmp/selftest-run.log"
 TEST_STATUS=${PIPESTATUS[0]}
 set -e
 printf 'Self-test process exit status: %s\n' "$TEST_STATUS" | tee -a "$ROOT/tmp/selftest-run.log"

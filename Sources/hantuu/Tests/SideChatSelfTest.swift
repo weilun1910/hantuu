@@ -222,11 +222,18 @@ extension SelfTest {
             window.orderFrontRegardless()
             _ = controller.sync(selected: chat)
             _ = waitUntil(5) { terminal.activeScreenText().contains("shortcuts") }
-            let before = (try? Data(contentsOf: terminalBytes)) ?? Data()
-            controller.composer.textView.text = agent == "claude" ? "/btw Explain this" : "/side Explain this"
-            check("side: \(agent) reader command routes to Side", controller.send() && model.panelTab == .side && model.panelVisible && controller.composer.textView.string.isEmpty)
-            _ = waitUntil(5) { !store.running.contains(chat.id) }
-            check("side: \(agent) reader side command never types into the parent", ((try? Data(contentsOf: terminalBytes)) ?? Data()) == before && store.histories[chat.id]?.count == 1)
+            let commands = agent == "claude" ? ["/btw"] : ["/side", "/btw"]
+            for (index, command) in commands.enumerated() {
+                let before = (try? Data(contentsOf: terminalBytes)) ?? Data()
+                model.panelVisible = false
+                model.panelTab = .overview
+                controller.composer.textView.text = command + " Explain this"
+                terminal.setFrameSize(NSSize(width: terminal.frame.width + 16, height: terminal.frame.height))
+                check("side: \(agent) \(command) routing fixture has an unsettled terminal", !terminal.geometryIsStable)
+                check("side: \(agent) \(command) reader command routes to Side", controller.send() && model.panelTab == .side && model.panelVisible && controller.composer.textView.string.isEmpty)
+                _ = waitUntil(5) { !store.running.contains(chat.id) }
+                check("side: \(agent) \(command) reader side command never types into the parent", ((try? Data(contentsOf: terminalBytes)) ?? Data()) == before && store.histories[chat.id]?.count == index + 1)
+            }
             terminal.destroy()
             window.orderOut(nil)
         }

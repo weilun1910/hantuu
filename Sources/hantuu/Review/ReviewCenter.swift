@@ -51,7 +51,9 @@ final class ReviewCenter: ObservableObject {
     @Published var prTitle = ""
     @Published var prBody = ""
     @Published var prDraft = true
-    private var gitRequest = 0
+    private var gitRefreshInFlight = false
+    private var gitRefreshAgain = false
+    private var gitRefreshCompletions: [() -> Void] = []
     private var diffRequest = 0
 
     // A folder that isn't a repository but holds some. This center scans them all and keeps
@@ -395,21 +397,29 @@ final class ReviewCenter: ObservableObject {
     func refreshNow() {
         if parentReview != nil { refreshGit(); return }
         invalidateDiscovery()
-        updateActivity(refresh: true)
+        updateActivity(refresh: false)
+        refreshGit()
     }
 
     // MARK: Git
 
     func refreshGit(completion: (() -> Void)? = nil) {
         guard let folder else { completion?(); return }
+        if gitRefreshInFlight {
+            gitRefreshAgain = true
+            if let completion { gitRefreshCompletions.append(completion) }
+            return
+        }
+        gitRefreshInFlight = true
         let target = selectedCheckout ?? (parentReview == nil ? folder : (repo?.root ?? folder))
         let gen = generation
-        gitRequest += 1
-        let request = gitRequest
         let scope = base
         let selection = gitSelection
         gitReadState.loading = true
         queue.async {
+            // Superseded queued scans must not delay the current explicit refresh.
+            let current = DispatchQueue.main.sync { gen == self.generation && scope == self.base && selection == self.gitSelection }
+            guard current else { DispatchQueue.main.async { self.finishGitRefresh(completion: completion) }; return }
             let info = RepoInfo.load(folder: target)
             var snapshot: GitReviewSnapshot?
             var failure: String?
@@ -429,14 +439,15 @@ final class ReviewCenter: ObservableObject {
                 if nested.count != discovered.repositories.count { failure = "Some repositories could not be read. Retry before reviewing them." }
             }
             DispatchQueue.main.async {
-                guard gen == self.generation, request == self.gitRequest else { completion?(); return }
+                defer { self.finishGitRefresh(completion: completion) }
+                let currentTarget = self.selectedCheckout ?? (self.parentReview == nil ? self.folder : (self.repo?.root ?? self.folder))
+                guard gen == self.generation, scope == self.base, selection == self.gitSelection, target == currentTarget else { return }
                 self.gitReadState.loading = false
                 self.gitReadState.error = failure
                 self.repoChecked = true
                 if let failure {
                     if !nested.isEmpty { self.applyRepositories(nested) }
                     self.operationMessage = failure
-                    completion?()
                     return
                 }
                 self.gitReadState.lastSuccess = Date()
@@ -466,9 +477,19 @@ final class ReviewCenter: ObservableObject {
                     parent.objectWillChange.send()
                     parent.repositoryListRefreshed()
                 }
-                completion?()
             }
         }
+    }
+
+    private func finishGitRefresh(completion: (() -> Void)?) {
+        gitRefreshInFlight = false
+        let again = gitRefreshAgain
+        gitRefreshAgain = false
+        let waiting = gitRefreshCompletions
+        gitRefreshCompletions = []
+        completion?()
+        if again { refreshGit { waiting.forEach { $0() } } }
+        else { waiting.forEach { $0() } }
     }
 
     /// Hands each repository its part of the scan. Centers of repositories that are still

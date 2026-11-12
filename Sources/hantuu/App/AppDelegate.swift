@@ -154,6 +154,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         view.addItem(item("Toggle Sidebar", #selector(toggleSidebar), "0"))
         view.addItem(item("Toggle Panel", #selector(togglePanel), "0", [.command, .option]))
         view.addItem(ReaderModeMenuTarget.toggleItem())
+        view.addItem(item("Expand / Restore Panel", #selector(togglePanelFocus), "f", [.command, .option, .control]))
+        let layout = NSMenuItem(title: "Chat Width", action: nil, keyEquivalent: "")
+        let widths = NSMenu(title: "Chat Width")
+        for (index, title) in ["Compact - 440 pt / 80 columns", "Balanced - 560 pt / 96 columns", "Reading - 720 pt / 120 columns"].enumerated() {
+            let preset = item(title, #selector(chatWidth(_:)), "")
+            preset.tag = index
+            widths.addItem(preset)
+        }
+        widths.addItem(.separator())
+        widths.addItem(item("Reset Split", #selector(resetSplit), ""))
+        layout.submenu = widths
+        view.addItem(layout)
         view.addItem(.separator())
         for (i, tab) in PanelTab.allCases.enumerated() {
             let it = item(tab.rawValue, #selector(showPanelTab(_:)), "\(i + 1)", [.command, .option])
@@ -223,7 +235,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         model.closeFocused(responder: windowController.window?.firstResponder)
     }
-    @objc func toggleSidebar() { model.sidebarVisible.toggle() }
+    @objc func toggleSidebar() {
+        if model.layoutState.sidebarAutoHidden { model.layoutState.requests.send(.navigation) }
+        else { model.sidebarVisible.toggle() }
+    }
+    @objc func togglePanelFocus() { model.layoutState.requests.send(.focus) }
+    @objc func chatWidth(_ sender: NSMenuItem) { model.layoutState.requests.send(.preset(sender.tag)) }
+    @objc func resetSplit() { model.layoutState.requests.send(.reset) }
     @objc func togglePanel() { model.panelVisible.toggle() }
     @objc func showPanelTab(_ sender: NSMenuItem) {
         if let raw = sender.representedObject as? String, let tab = PanelTab(rawValue: raw) { showPanel(tab) }

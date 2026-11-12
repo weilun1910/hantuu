@@ -37,7 +37,7 @@ final class PanelController: NSViewController {
 
     override func loadView() {
         let root = FillView(color: Theme.chrome)
-        header = ChromeHostingView(rootView: PanelHeader().environmentObject(model).environmentObject(review).environmentObject(browser))
+        header = ChromeHostingView(rootView: PanelHeader(layout: model.layoutState).environmentObject(model).environmentObject(review).environmentObject(browser))
         content = FillView(color: Theme.chrome)
         noShells = ChromeHostingView(rootView: NoShellsView().environmentObject(model))
         noFiles = ChromeHostingView(rootView: NoFilesView().environmentObject(model))
@@ -104,20 +104,41 @@ final class PanelController: NSViewController {
 
 struct PanelHeader: View {
     @EnvironmentObject var model: AppModel
+    @ObservedObject var layout: WindowLayoutState = AppModel.shared.layoutState
 
     var body: some View {
         VStack(spacing: 0) {
             ZStack {
                 WindowDragArea()
                 // Narrow panels use icons, so additional tabs never overflow the header.
-                ViewThatFits(in: .horizontal) {
-                    tabs(padding: 8)
-                    tabs(padding: 5)
-                    tabs(padding: 3)
-                    tabs(padding: 1)
-                    iconTabs
+                HStack(spacing: 4) {
+                    if layout.single && layout.showingPanel {
+                        Spacer().frame(width: 66)
+                        IconButton(symbol: "sidebar.left", help: "Browse Projects  ⌘0") { layout.requests.send(.navigation) }
+                        Button {
+                            layout.requests.send(.chat)
+                        } label: {
+                            HStack(spacing: 4) {
+                                Image(systemName: "chevron.left")
+                                Text("Chat")
+                                if model.chats.contains(where: { $0.activity.isNeeds }) {
+                                    Image(systemName: "circle.fill").font(.system(size: 6))
+                                }
+                            }
+                        }
+                        .buttonStyle(.plain).font(.system(size: 12))
+                        .help("Back to chat. Agents keep running while the panel is focused.")
+                    }
+                    ViewThatFits(in: .horizontal) {
+                        tabs(padding: 8)
+                        tabs(padding: 3)
+                        iconTabs
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    IconButton(symbol: layout.focused ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right",
+                               help: layout.focused ? "Restore Split  ⌃⌥⌘F" : "Expand Panel  ⌃⌥⌘F",
+                               active: layout.focused) { layout.requests.send(.focus) }
                 }
-                .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.horizontal, 10)
             }
             .frame(height: 40)
@@ -348,6 +369,8 @@ struct FileMenuButton: View {
                     .disabled(!(model.fileViewer?.canSaveSelected ?? false))
                 Divider()
             }
+            Button("Open in New Window") { model.fileViewer?.openInNewWindow() }
+            Divider()
             if let app = FileKinds.defaultApp(for: tab.path) {
                 Button("Open with \(app.name)") { FileViewerActions.openWithDefaultApp(tab.path) }
             }

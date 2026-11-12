@@ -132,32 +132,36 @@ final class ComposerAgentControlsView: NSView {
     var onAction: ((ComposerAgentControlAction) -> Void)?
     private(set) var displayedState: ComposerAgentControlsState?
     private var buttons: [NSButton] = []
+    private let row = NSView()
+
+    var preferredWidth: CGFloat {
+        let widest = ComposerAgentControlAction.allCases.map {
+            ceil(($0.label as NSString).size(withAttributes: [.font: NSFont.systemFont(ofSize: 11)]).width) + 10
+        }.max() ?? 22
+        return widest * 4 + 6
+    }
 
     override init(frame: NSRect) {
         super.init(frame: frame)
-        let row = NSStackView()
-        row.orientation = .horizontal
-        row.spacing = 4
-        row.distribution = .fillEqually
         row.translatesAutoresizingMaskIntoConstraints = false
         addSubview(row)
         for action in ComposerAgentControlAction.allCases {
             let button = NSButton(title: action.label, target: self, action: #selector(activate(_:)))
             button.tag = action.rawValue
-            button.bezelStyle = .accessoryBarAction
+            button.isBordered = false
             button.controlSize = .small
             button.font = .systemFont(ofSize: 11)
             button.lineBreakMode = .byTruncatingTail
             button.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
             button.setAccessibilityIdentifier("composer-agent-\(action.label.lowercased())")
-            row.addArrangedSubview(button)
+            row.addSubview(button)
             buttons.append(button)
         }
         NSLayoutConstraint.activate([
             row.leadingAnchor.constraint(equalTo: leadingAnchor),
             row.trailingAnchor.constraint(equalTo: trailingAnchor),
-            row.topAnchor.constraint(equalTo: topAnchor, constant: 2),
-            row.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -2)
+            row.topAnchor.constraint(equalTo: topAnchor),
+            row.bottomAnchor.constraint(equalTo: bottomAnchor)
         ])
     }
 
@@ -166,6 +170,7 @@ final class ComposerAgentControlsView: NSView {
 
     func update(state: ComposerAgentControlsState, enabled: Bool, disabledReason: String? = nil) {
         displayedState = state
+        needsLayout = true
         for action in ComposerAgentControlAction.allCases {
             let button = buttons[action.rawValue]
             let value = state.value(for: action)
@@ -184,6 +189,22 @@ final class ComposerAgentControlsView: NSView {
             button.toolTip = [operation, evidence, enabled ? nil : disabledReason].compactMap { $0 }.joined(separator: ". ")
             button.setAccessibilityLabel("\(action.label): \(suffix ?? "unknown")")
             button.setAccessibilityHelp(button.toolTip)
+        }
+    }
+
+    override func layout() {
+        super.layout()
+        let compact = bounds.width < preferredWidth
+        let gap: CGFloat = 2
+        let buttonWidth = max(0, (bounds.width - 3 * gap) / 4)
+        let symbols = ["cpu", "dial.low", "lock", "list.bullet.rectangle"]
+        for action in ComposerAgentControlAction.allCases {
+            let button = buttons[action.rawValue]
+            button.frame = NSRect(x: CGFloat(action.rawValue) * (buttonWidth + gap),
+                                  y: (bounds.height - 22) / 2, width: buttonWidth, height: 22)
+            button.title = action.label
+            button.imagePosition = compact ? .imageOnly : .noImage
+            button.image = compact ? NSImage(systemSymbolName: symbols[action.rawValue], accessibilityDescription: action.label) : nil
         }
     }
 

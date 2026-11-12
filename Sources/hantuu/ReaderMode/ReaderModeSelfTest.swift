@@ -715,6 +715,24 @@ extension SelfTest {
         let first = String(decoding: bytes(), as: UTF8.self)
         check("send: the message goes in as one bracketed paste, then Return", ok && arrived && first == "\u{1b}[200~Explain the build script\nin two lines\u{1b}[201~\r", first.debugDescription)
         check("send: the message box empties", rm.composer.textView.string.isEmpty)
+        let resizeMark = bytes().count
+        let originalSize = tv.frame.size
+        rm.composer.textView.text = "resize during Return"
+        let resizeSent = rm.send()
+        let resizePasted = waitUntil(3) { bytes().count > resizeMark }
+        tv.setFrameSize(NSSize(width: originalSize.width + 64, height: originalSize.height))
+        chat.activity = .working
+        rm.refresh()
+        check("send: resizing still updates structured working state and Stop",
+              rm.composerMode.isWorking && rm.composer.action.kind == .stop)
+        chat.activity = .idle
+        let resizeArrived = waitUntil(5) { !rm.isTyping && bytes().last == 0x0D }
+        let resizeBytes = String(decoding: bytes().suffix(from: resizeMark), as: UTF8.self)
+        check("send: resizing between paste and Return resumes exactly once",
+              resizeSent && resizePasted && resizeArrived && !chat.pendingMessages.inputNeedsReview &&
+              resizeBytes == "\u{1b}[200~resize during Return\u{1b}[201~\r", resizeBytes.debugDescription)
+        tv.setFrameSize(originalSize)
+        rm.refresh()
         // The same through the keyboard: Return in the box.
         rm.composer.textView.text = "second message"
         if let e = keyEvent(36, "\r", window: w) { rm.composer.textView.keyDown(with: e) }
@@ -839,7 +857,8 @@ extension SelfTest {
         let sessionStopped = waitUntil(5) { !rm.isTyping }
         check("send: native session change cancels Return without replay",
               sessionStarted && sessionStopped && chat.pendingMessages.inputNeedsReview && !bytes().suffix(from: sessionMark).contains(0x0D))
-        check("send: native session change retains failed input", chat.pendingMessages.entries.last.map { $0.text == "session replacement fixture" && chat.pendingMessages.stage(id: $0.id) == .failed } == true)
+        check("send: native session change retains failed input", chat.pendingMessages.entries.last.map { $0.text == "session replacement fixture" && chat.pendingMessages.stage(id: $0.id) == .failed } == true,
+              "started=\(sessionStarted) stopped=\(sessionStopped) review=\(chat.pendingMessages.inputNeedsReview) typing=\(rm.isTyping) geometryAge=\(Date().timeIntervalSince(tv.geometryChangedAt)) draft=\(rm.composer.textView.string.debugDescription)")
         chat.sessionID = oldSession
         rm.refresh()
         reviewInputForNextScenario()
@@ -885,7 +904,8 @@ extension SelfTest {
         model.readerAppend.send((chat.id, chat.pendingMessages.reconcile([queuedEntry])))
         model.selectedChatID = chat.id
         rm.sync(selected: chat)
-        check("queue send: delivery while another chat is selected clears the pending state", chat.pendingMessages.isEmpty)
+        check("queue send: delivery while another chat is selected clears the pending state", chat.pendingMessages.isEmpty,
+              "typing=\(rm.isTyping) pending=\(chat.pendingMessages.entries.map { ($0.text, String(describing: chat.pendingMessages.stage(id: $0.id))) }) draft=\(rm.composer.textView.string.debugDescription)")
         model.chats = [chat]
 
         // Stop during a delayed paste cancels Return and preserves a recoverable copy.
@@ -910,7 +930,8 @@ extension SelfTest {
         chat.activityDetail = "Running Bash: swift build"
         rm.refresh()
         check("working: the working line shows the detail", rm.composerMode == .working(detail: "Running Bash: swift build") && !rm.statusHost.isHidden && rm.status.mode.isWorking)
-        check("stop: the send button turns into Stop while the box is empty", rm.composer.action.kind == .stop)
+        check("stop: the send button turns into Stop while the box is empty", rm.composer.action.kind == .stop,
+              "mode=\(rm.composerMode) draft=\(rm.composer.textView.string.debugDescription) attachments=\(rm.composer.attachments.count) typing=\(rm.isTyping)")
         check("accessibility: the button reads as Stop", rm.composer.action.isAccessibilityElement() && rm.composer.action.accessibilityRole() == .button
               && rm.composer.action.accessibilityLabel() == "Stop Claude Code", rm.composer.action.accessibilityLabel() ?? "nil")
         rm.composer.textView.text = "queued thought"

@@ -102,6 +102,17 @@ final class FileViewerController: NSObject, ObservableObject {
     private var generation = UUID().uuidString
     private var shownKey = ""
     private var bag = Set<AnyCancellable>()
+    private(set) var documentWindows: [UUID: FileDocumentWindow] = [:]
+
+    func openInNewWindow() {
+        guard let document = selectedDoc else { return }
+        if let existing = documentWindows[document.id] { existing.showWindow(nil); existing.window?.makeKeyAndOrderFront(nil); return }
+        let controller = FileDocumentWindow(owner: self, document: document)
+        documentWindows[document.id] = controller
+        controller.onClose = { [weak self] in self?.documentWindows[document.id] = nil }
+        controller.showWindow(nil)
+        controller.window?.makeKeyAndOrderFront(nil)
+    }
 
     /// The self test answers the unsaved-changes prompt instead of a person.
     var promptOverride: (([CodeTab]) -> SaveChoice)?

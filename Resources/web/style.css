@@ -691,3 +691,9 @@ body.reader.main .entry.user > .queued-label { display: block; text-align: right
 .pending-detail { color: var(--secondary); max-width: 480px; margin: 3px 0 6px; }
 .edit-as-new { opacity: 0; }
 .entry.user:hover .edit-as-new, .entry.user:focus-within .edit-as-new { opacity: 1; }
+
+/* Match the native compact composer while keeping long code and math scrollable. */
+@media (max-width: 479px) {
+  body.reader.main #entries { padding-left: 16px; padding-right: 16px; }
+  .pending-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 2px; }
+}

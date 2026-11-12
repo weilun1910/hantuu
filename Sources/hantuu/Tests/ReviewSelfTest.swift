@@ -422,7 +422,8 @@ extension SelfTest {
         }
         check("nested: a repository with only committed work opens on Branch, local edits on Unstaged",
               waitUntil(15) { first.changesLoaded && other.changesLoaded } &&
-              first.base == .unstaged && other.base == .branch && other.changes.map(\.path) == ["source.txt"])
+              first.base == .unstaged && other.base == .branch && other.changes.map(\.path) == ["source.txt"],
+              "first loaded=\(first.changesLoaded) base=\(first.base) error=\(first.gitReadState.error ?? "none"); other loaded=\(other.changesLoaded) base=\(other.base) error=\(other.gitReadState.error ?? "none") files=\(other.changes.map(\.path))")
         check("nested: the first open repository's selected file shows its diff below the list",
               center.focusedRepository == primary.path && first.activeTab == .changes && other.activeTab == nil && first.showsSelection && !other.showsSelection)
         other.select("source.txt")
@@ -495,10 +496,20 @@ extension SelfTest {
         check("nested: the folder watcher picks up a new file in a repository", waitUntil(8) { center.changedInFolder["Studio/second/another.txt"] == "?" })
         let addedLater = makeRepo("added-on-refresh")
         center.refreshNow()
-        check("nested: Refresh finds a repository added since the last look", waitUntil(10) { center.repositories.contains { $0.id == addedLater.path } })
+        check("nested: Refresh finds a repository added since the last look", waitUntil(10) { center.repositories.contains { $0.id == addedLater.path } },
+              "loading=\(center.gitReadState.loading) error=\(center.gitReadState.error ?? "none") repos=\(center.repositories.map(\.id))")
         try? FileManager.default.removeItem(at: addedLater)
         center.refreshNow()
         check("nested: a repository that's gone loses its section", waitUntil(10) { !center.repositories.contains { $0.id == addedLater.path } && center.repositoryCenters[addedLater.path] == nil })
+        center.setActiveTab(nil)
+        let inactiveAdded = makeRepo("added-while-inactive")
+        center.refreshNow()
+        check("nested: explicit Refresh discovers repositories while the panel is inactive",
+              waitUntil(10) { center.repositories.contains { $0.id == inactiveAdded.path } },
+              "loading=\(center.gitReadState.loading) error=\(center.gitReadState.error ?? "none")")
+        try? FileManager.default.removeItem(at: inactiveAdded)
+        center.refreshNow()
+        center.setActiveTab(.changes)
 
         weak var closedPage: WebPage?
         do {

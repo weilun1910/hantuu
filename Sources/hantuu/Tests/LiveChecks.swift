@@ -7,7 +7,7 @@ import Darwin
 /// parsing and selection rules below. No fixture test launches an agent or reads its home.
 enum LiveCheckRules {
     static let agents = ["claude", "codex"]
-    static let features = ["slash", "queued", "send-now", "relaunch", "subagents", "reader", "review", "sidebar", "side", "composer", "command-arguments", "menus"]
+    static let features = ["slash", "queued", "send-now", "relaunch", "subagents", "reader", "review", "sidebar", "side", "composer", "command-arguments", "layout", "menus"]
 
     /// The only permission the menus probe can approve is its generated printf token.
     static func menuProbeCommandMatches(inputJSON: String, expected: String) -> Bool {
@@ -351,7 +351,7 @@ extension SelfTest {
         guard let raw = env["HANTUU_LIVE"], !raw.isEmpty else { return }
         guard let agents = LiveCheckRules.selection(env["HANTUU_LIVE_AGENTS"], allowed: LiveCheckRules.agents),
               let features = LiveCheckRules.selection(env["HANTUU_LIVE_FEATURES"] ?? LiveCheckRules.features.filter { $0 != "menus" }.joined(separator: ","), allowed: LiveCheckRules.features) else {
-            check("live configuration: selectors", false, "Use claude,codex and slash,queued,send-now,relaunch,subagents,reader,review,sidebar,side,composer,command-arguments,menus.")
+            check("live configuration: selectors", false, "Use claude,codex and slash,queued,send-now,relaunch,subagents,reader,review,sidebar,side,composer,command-arguments,layout,menus.")
             return
         }
         let folder = URL(fileURLWithPath: raw).standardizedFileURL.resolvingSymlinksInPath()
@@ -408,6 +408,7 @@ extension SelfTest {
                     case "side": probe.sideQuestions()
                     case "composer": probe.composerParity()
                     case "command-arguments": probe.commandArguments()
+                    case "layout": probe.layoutProbe()
                     case "menus": probe.menus()
                     default: break
                     }
@@ -578,7 +579,8 @@ private final class LiveCheckSession {
                          styleMask: [.titled], backing: .buffered, defer: false)
         w.isReleasedWhenClosed = false
         w.isRestorable = false
-        let host = FillView(color: Theme.background)
+        let host: FillView = feature == "layout" ? TerminalContainer(color: Theme.background) : FillView(color: Theme.background)
+        if let container = host as? TerminalContainer { container.protectsHiddenTerminals = true; container.layer?.masksToBounds = true }
         host.frame = NSRect(x: 0, y: 0, width: 1100, height: 780)
         w.contentView = host
         terminal.frame = host.bounds
@@ -624,6 +626,11 @@ private final class LiveCheckSession {
         guard let chat, let reader else { return }
         let layout = reader.sync(selected: chat)
         terminal?.setVisible(!layout.showsReader)
+        if feature == "layout", let terminal, let container = host as? TerminalContainer {
+            let width = layout.showsReader ? WindowLayout.readerMinimum : terminal.minimumWidth(columns: 80)
+            window?.setContentSize(NSSize(width: width, height: 780))
+            container.show([terminal], visible: layout.showsReader ? nil : terminal)
+        }
         host?.layoutSubtreeIfNeeded()
     }
 
@@ -723,6 +730,48 @@ private final class LiveCheckSession {
         _ = ghostty_surface_key(surface, key)
         key.action = GHOSTTY_ACTION_RELEASE
         _ = ghostty_surface_key(surface, key)
+    }
+
+    func layoutProbe() {
+        guard let reader, let terminal, let chat else { return }
+        layout()
+        guard pause(0.4) else { report("narrow layout settled", false); return }
+        report("reader is 380 pt and hidden terminal retains 80 columns",
+               abs((host?.bounds.width ?? 0) - WindowLayout.readerMinimum) < 1 &&
+               !reader.root.isHidden && terminal.measuredColumns >= 80)
+        let token = "layout" + UUID().uuidString.prefix(8).lowercased()
+        let sent = send("Without tools, write three brief sentences about resizing a window. Finish with \(token).")
+        var sawBusy = false
+        var sawReaderWorking = false
+        let replied = sent && wait(90) {
+            sawBusy = sawBusy || TerminalScreen.analyze(self.screen).busy
+            sawReaderWorking = sawReaderWorking || reader.composerMode.isWorking
+            return self.reply(token) && reader.composerMode == .ready && !reader.isTyping
+        }
+        report("narrow reader sees native busy state and the response", replied && sawBusy && sawReaderWorking,
+               "reply=\(replied), native busy observed=\(sawBusy), reader working observed=\(sawReaderWorking). An unobserved fast turn needs a rerun; it is not a layout pass.")
+        guard replied, safe() else {
+            report("picker probe could not begin after the response", false)
+            return
+        }
+        let stable = wait(3) { terminal.geometryIsStable }
+        report("terminal geometry settles before the picker", stable)
+        guard stable else { return }
+        terminal.typeCommandText("/model")
+        guard pause(0.3, allowingMenu: true), safe(allowingMenu: true) else { return }
+        terminal.pressReturn()
+        let detected = wait(10, allowingMenu: true) {
+            let picker = TerminalScreen.analyze(self.screen).menu
+            return picker != nil && (reader.composerMode.isBlocked || self.mode?.isPeeking(chat) == true)
+        }
+        report("picker is recognized after narrow hidden-terminal layout", detected,
+               "No selection was made. \(String(screen.suffix(300)))")
+        guard safe(allowingMenu: true) else { return }
+        terminal.pressEscape()
+        _ = pause(0.4, allowingMenu: true)
+        reader.backToReader()
+        layout()
+        report("returning to the reader preserves 80 terminal columns", terminal.measuredColumns >= 80)
     }
 
     /// A response file removes the pending hook before the terminal redraws. Observe that

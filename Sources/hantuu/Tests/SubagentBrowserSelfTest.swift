@@ -299,7 +299,8 @@ extension SelfTest {
         controller.sync()
         WorkFixture.append(claude, [message("final", "assistant", [["type": "tool_use", "id": "final-handback", "name": "SubagentHandback", "input": ["message": "Final **child output**"]]])])
         let handbackVisible = "Array.from(document.querySelectorAll('section.entry.assistant')).filter(e => e.textContent.includes('Final child output')).length === 1"
-        check("subagent reader: retirement retains the path and renders a late handback", !controller.root.isHidden && model.subagentBrowser.selection?.agent.detail == "Finished" && waitUntil(5) { (js(page, handbackVisible) as? Bool) == true })
+        check("subagent reader: retirement retains the path and renders a late handback", !controller.root.isHidden && model.subagentBrowser.selection?.agent.detail == "Finished" && waitUntil(5) { (js(page, handbackVisible) as? Bool) == true },
+              "hidden=\(controller.root.isHidden) selection=\(String(describing: model.subagentBrowser.selection)) pageReady=\(page.ready) rendered=\(String(describing: js(page, handbackVisible)))")
         controller.reader.reload()
         check("subagent reader: reload preserves one complete handback answer", waitUntil(5) { (js(page, handbackVisible) as? Bool) == true })
         _ = model.backFromSubagent()

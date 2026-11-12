@@ -215,6 +215,8 @@ struct SavedState: Codable {
     var windowFrame: String?
     var sidebarWidth: Double?
     var panelWidth: Double?
+    var readerWidth: Double?
+    var terminalWidth: Double?
     var selectedChatID: UUID?
     var pinnedExpanded: Bool?
     var projectPanels: [String: ProjectPanelState]?
@@ -233,6 +235,8 @@ struct SavedState: Codable {
         windowFrame = get(.windowFrame)
         sidebarWidth = get(.sidebarWidth)
         panelWidth = get(.panelWidth)
+        readerWidth = get(.readerWidth)
+        terminalWidth = get(.terminalWidth)
         projectPanels = (get(.projectPanels) as [String: Lenient<ProjectPanelState>]?)?.compactMapValues(\.value)
         pinnedExpanded = get(.pinnedExpanded)
         selectedChatID = get(.selectedChatID)
@@ -296,12 +300,15 @@ final class AppModel: ObservableObject, TerminalEvents {
     private var capturingPanelSnapshot = false
     /// Tests that construct a model without load() never write application state.
     private var persistenceEnabled = false
+    let layoutState = WindowLayoutState()
     let keepAwake = KeepAwake()
     lazy var sideChats = SideChatStore()
 
     var windowFrame: String?
     var sidebarWidth: Double?
     var panelWidth: Double?
+    var readerWidth: Double?
+    var terminalWidth: Double?
     /// Legacy preservation storage. Missing folders now remain visible for relocation.
     private var awayProjects: [Project] = []
     private var awayChats: [SavedChat] = []
@@ -372,6 +379,8 @@ final class AppModel: ObservableObject, TerminalEvents {
             windowFrame = s.windowFrame
             sidebarWidth = s.sidebarWidth
             panelWidth = s.panelWidth
+            readerWidth = s.readerWidth
+            terminalWidth = s.terminalWidth
             // Earlier chats come back as ended, with their transcript, ready to resume.
             for sc in s.chats where projects.contains(where: { $0.id == sc.projectID }) {
                 let c = Chat(id: sc.id, projectID: sc.projectID, agentID: sc.agentID, createdAt: sc.createdAt)
@@ -508,6 +517,8 @@ final class AppModel: ObservableObject, TerminalEvents {
         s.windowFrame = windowFrame
         s.sidebarWidth = sidebarWidth
         s.panelWidth = panelWidth
+        s.readerWidth = readerWidth
+        s.terminalWidth = terminalWidth
         Paths.ensure(Paths.dataDir)
         if let data = try? JSONEncoder.hantuu.encode(s) {
             try? data.write(to: Paths.stateFile, options: .atomic)

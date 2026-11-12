@@ -303,11 +303,12 @@ extension TerminalView {
 
     /// Paces the literal command token beyond Codex's paste-burst threshold. Cancellation
     /// is checked before every key, including when a chat ends during the sequence.
-    func typeCommandToken(_ text: String, while allowed: @escaping () -> Bool, completion: @escaping () -> Void) {
+    func typeCommandToken(_ text: String, while allowed: @escaping () -> Bool, pausingWhile paused: @escaping () -> Bool = { false }, completion: @escaping (Bool) -> Void) {
         let keys = text.unicodeScalars.map(String.init)
         func send(_ index: Int) {
-            guard allowed() else { completion(); return }
-            guard index < keys.count else { completion(); return }
+            guard allowed() else { completion(false); return }
+            guard index < keys.count else { completion(true); return }
+            if paused() { DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { send(index) }; return }
             self.typeCommandText(keys[index])
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.03) { send(index + 1) }
         }
