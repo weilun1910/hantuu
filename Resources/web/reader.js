@@ -104,6 +104,7 @@
     const el = document.createElement('section');
     el.className = 'entry ' + e.kind;
     el.dataset.id = e.id;
+    if (e.contentUnavailable) el.dataset.contentUnavailable = e.contentUnavailable;
     if (e.pending) el.classList.add('pending');
     const shown = new Set();
     switch (e.kind) {

@@ -195,9 +195,14 @@ extension SelfTest {
         check("subagent Codex: final answer renders once without the completion echo",
               child.parse(line: output).map(\.text) == ["Final child answer"] &&
               child.parse(line: codex("event_msg", ["type": "task_complete", "last_agent_message": "Final child answer"])).isEmpty)
-        check("subagent Codex: encrypted-only and malformed messages stay hidden",
-              child.parse(line: codex("response_item", ["type": "agent_message", "author": "/root", "recipient": "/root/child",
-                                                        "content": [["type": "encrypted_content", "encrypted_content": "opaque-fixture"]]])).isEmpty &&
+        let opaque = child.parse(line: codex("response_item", ["type": "agent_message", "author": "/root", "recipient": "/root/child",
+            "content": [["type": "encrypted_content", "encrypted_content": "opaque-fixture"]]]))
+        check("subagent Codex: encrypted payload has an explicit unavailable notice", opaque.first?.kind == .notice &&
+              opaque.first?.contentUnavailable == "encrypted-agent-message" && opaque.first?.text.contains("opaque-fixture") == false)
+        let headerOnly = child.parse(line: inbound("Message Type: NEW_TASK\nTask name: /root/child\nSender: /root\nPayload:\n"))
+        check("subagent Codex: encrypted task never renders an empty internal envelope", headerOnly.count == 1 &&
+              headerOnly.first?.contentUnavailable == "encrypted-agent-message" && headerOnly.first?.text.contains("Payload:") == false)
+        check("subagent Codex: malformed messages stay hidden",
               child.parse(line: codex("response_item", ["type": "agent_message", "content": [["type": "input_text", "text": "Missing sender"]]])).isEmpty)
         var bounded = CodexTranscriptParser(scope: .subagent)
         check("subagent Codex: a bounded tail can read followups without metadata", bounded.parse(line: inbound(prompt)).first?.text == "Check the child reader")
@@ -327,6 +332,12 @@ extension SelfTest {
         ])
         check("subagent reader: retired Codex selection follows the final message once", waitUntil(5) {
             (js(page, "document.body.textContent.includes('Check the last result too') && Array.from(document.querySelectorAll('section.entry.assistant')).filter(e => e.textContent.includes('Codex final result')).length === 1") as? Bool) == true
+        })
+        WorkFixture.append(codex, [
+            #"{"type":"response_item","payload":{"type":"agent_message","author":"/root","recipient":"/root/child","content":[{"type":"input_text","text":"Message Type: MESSAGE\nSender: /root\nPayload:\n"},{"type":"encrypted_content","encrypted_content":"opaque-fixture"}]}}"#,
+        ])
+        check("subagent reader: encrypted message explains unavailable text without exposing payload", waitUntil(5) {
+            (js(page, "document.querySelectorAll('.entry.notice[data-content-unavailable=\"encrypted-agent-message\"]').length === 1 && !document.body.textContent.includes('opaque-fixture') && !document.body.textContent.includes('Payload:')") as? Bool) == true
         })
         if let event = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: .command, timestamp: 0, windowNumber: window.windowNumber, context: nil, characters: "[", charactersIgnoringModifiers: "[", isARepeat: false, keyCode: 33) {
             check("subagent reader: Cmd-[ returns to the parent", controller.handle(event) == nil && model.subagentBrowser.selection == nil)

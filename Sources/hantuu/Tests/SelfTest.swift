@@ -310,7 +310,8 @@ enum SelfTest {
         FileManager.default.createFile(atPath: url.path, contents: Data((claudeFixture[1] + "\n" + claudeFixture[3] + "\n").utf8))
         let f = TranscriptFollower(url: url, kind: .claude, baseDir: dir.path)
         let first = f.poll()
-        check("follower: reads existing lines", first.count == 2)
+        // Published reasoning is now retained as its own collapsed entry.
+        check("follower: reads existing lines", first.count == 3 && first.filter { $0.kind == .reasoning }.count == 1)
         let h = try! FileHandle(forWritingTo: url)
         h.seekToEndOfFile()
         let line = claudeFixture[4]
@@ -320,7 +321,7 @@ enum SelfTest {
         h.write(Data((String(line[mid...]) + "\n").utf8))
         try? h.close()
         let more = f.poll()
-        check("follower: picks up the appended line only", more.count == 1 && more.first?.kind == .tool && f.entries.count == 3)
+        check("follower: picks up the appended line only", more.count == 1 && more.first?.kind == .tool && f.entries.count == 4)
         check("follower: nothing new means nothing emitted", f.poll().isEmpty)
     }
 

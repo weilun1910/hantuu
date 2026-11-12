@@ -26,9 +26,9 @@ struct ReaderOperation: Codable, Equatable {
 /// Both the follower and external readers replace evidence by identity in place.
 enum ReaderEntries {
     static func merging(_ old: [ReaderEntry], _ updates: [ReaderEntry]) -> [ReaderEntry] {
-        var result = old
-        var positions = Dictionary(old.enumerated().map { ($0.element.id, $0.offset) }, uniquingKeysWith: { _, last in last })
-        for entry in updates {
+        var result: [ReaderEntry] = []
+        var positions: [String: Int] = [:]
+        for entry in old + updates {
             if let index = positions[entry.id] { result[index] = entry }
             else { positions[entry.id] = result.count; result.append(entry) }
         }
@@ -42,6 +42,7 @@ struct ReaderEvidence {
     private var session = "transcript"
     private var calls: [String: ReaderEntry] = [:]
     private var processCalls: [String: String] = [:]
+    private var handbackCalls = Set<String>()
     private var claudeWork = ClaudeWorkParser()
     private var codexWork = CodexWorkParser()
     private var checklist: ReaderChecklistReducer
@@ -85,16 +86,27 @@ struct ReaderEvidence {
                     guard block["type"] as? String == "tool_use", let id = block["id"] as? String else { continue }
                     let name = block["name"] as? String ?? "Tool"
                     let args = block["input"] as? [String: Any] ?? [:]
-                    let candidates = result.indices.filter { result[$0].tool != nil && result[$0].operation == nil }
+                    // The child prose adapter already renders this report as its answer.
+                    if includeSidechain, name == "SubagentHandback",
+                       let report = args["message"] as? String,
+                       !report.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                       entries.contains(where: { $0.kind == .assistant && $0.text == report }) {
+                        handbackCalls.insert(id)
+                        continue
+                    }
+                    let candidates = result.indices.filter { result[$0].tool == name && result[$0].operation == nil }
                     let original = candidates.first.map { result[$0] }
                     let entry = requested(id: id, name: name, args: args, raw: Self.json(args), time: time, original: original)
                     if let i = candidates.first { result[i] = entry } else { result.append(entry) }
                 }
             } else if obj["type"] as? String == "user" {
                 let outcomes = blocks.filter { $0["type"] as? String == "tool_result" }
-                if !outcomes.isEmpty { result.removeAll { $0.kind != .user } }
+                if !outcomes.isEmpty { result.removeAll { $0.kind != .user && $0.tool != "SubagentHandback" } }
                 for block in outcomes {
                     guard let id = block["tool_use_id"] as? String else { continue }
+                    // Successful receipts are hidden by the prose adapter. Its delivery
+                    // errors stay visible, without turning the report back into a tool.
+                    if handbackCalls.contains(id) { continue }
                     let output = ClaudeTranscriptParser.textOf(block["content"]) ?? ""
                     let metadata = outcomes.count == 1 ? obj["toolUseResult"] as? [String: Any] : nil
                     let failed = block["is_error"] as? Bool == true
@@ -112,6 +124,23 @@ struct ReaderEvidence {
             let ptype = payload["type"] as? String
             if type == "session_meta", let id = payload["id"] as? String { session = id }
             codexWork.consume(obj)
+            if type == "event_msg", var entry = CodexOperationEvent.entry(payload, session: session, time: time) {
+                let item = payload["item"] as? [String: Any] ?? [:]
+                let processID = CodexWorkParser.string(item["process_id"])
+                let callID = processID.flatMap { processCalls[$0] }
+                // Only a known direct shell can share this identity. An exec wrapper may
+                // contain several operations with different outcomes and keeps its own card.
+                if let callID, let original = calls[callID], let prior = original.operation,
+                   ["exec_command", "shell", "shell_command", "local_shell"].contains(prior.name) {
+                    let startedAt = prior.startedAt ?? entry.operation?.startedAt
+                    entry.id = original.id
+                    entry.operation?.id = prior.id
+                    entry.operation?.arguments = prior.arguments
+                    entry.operation?.startedAt = startedAt
+                    calls[callID] = entry
+                }
+                result.append(entry)
+            }
             if type == "response_item" {
                 if ["function_call", "custom_tool_call", "local_shell_call"].contains(ptype ?? ""),
                    let id = (payload["call_id"] as? String) ?? (payload["id"] as? String) {
@@ -158,7 +187,7 @@ struct ReaderEvidence {
             result.append(parent)
         }
         result += workUpdates(time: time)
-        return result
+        return ReaderEntries.merging([], result)
     }
 
     private mutating func requested(id: String, name: String, args: [String: Any], raw: String, time: String?, original: ReaderEntry?) -> ReaderEntry {

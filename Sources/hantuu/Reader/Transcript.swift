@@ -36,6 +36,8 @@ struct ReaderEntry: Codable, Equatable {
     var sendNowLabel: String? = nil
     /// A delegated task or followup comes from another agent, not the person at the keyboard.
     var author: String? = nil
+    /// The provider recorded an opaque payload instead of readable message content.
+    var contentUnavailable: String? = nil
     var operation: ReaderOperation? = nil
     var checklist: ReaderChecklist? = nil
 }
@@ -450,6 +452,12 @@ struct CodexTranscriptParser: TranscriptParser {
                 guard item["type"] as? String == "input_text" else { return nil }
                 return item["text"] as? String
             }.joined(separator: "\n\n").trimmingCharacters(in: .whitespacesAndNewlines)
+            let encrypted = content.contains { $0["type"] as? String == "encrypted_content" }
+            if encrypted && (text.isEmpty || Self.agentMessagePayload(text, author: author) == "") {
+                return [ReaderEntry(id: id, kind: .notice,
+                                    text: "Codex saved this delegated message as encrypted content. Its text is unavailable in the transcript.",
+                                    time: time, author: author, contentUnavailable: "encrypted-agent-message")]
+            }
             guard !text.isEmpty else { return [] }
             lastCompactionRecord = nil
             return [ReaderEntry(id: id, kind: .user, text: Self.agentMessageText(text, author: author), time: time, author: author)]
@@ -523,13 +531,19 @@ struct CodexTranscriptParser: TranscriptParser {
 
     /// Strip only a recognized collaboration envelope. Unknown formats remain readable.
     static func agentMessageText(_ text: String, author: String) -> String {
-        guard let delimiter = text.range(of: "\nPayload:\n") else { return text }
-        let header = text[..<delimiter.lowerBound].split(separator: "\n").map(String.init)
+        guard let payload = agentMessagePayload(text, author: author), !payload.isEmpty else { return text }
+        return payload
+    }
+
+    private static func agentMessagePayload(_ text: String, author: String) -> String? {
+        // A header-only plaintext block can end at Payload: before encrypted content.
+        let terminated = text + "\n"
+        guard let delimiter = terminated.range(of: "\nPayload:\n") else { return nil }
+        let header = terminated[..<delimiter.lowerBound].split(separator: "\n").map(String.init)
         guard let first = header.first, ["Message Type: NEW_TASK", "Message Type: MESSAGE", "Message Type: FINAL_ANSWER"].contains(first),
               header.contains("Sender: " + author),
-              header.dropFirst().allSatisfy({ $0.hasPrefix("Task name: ") || $0.hasPrefix("Sender: ") }) else { return text }
-        let payload = String(text[delimiter.upperBound...]).trimmingCharacters(in: .whitespacesAndNewlines)
-        return payload.isEmpty ? text : payload
+              header.dropFirst().allSatisfy({ $0.hasPrefix("Task name: ") || $0.hasPrefix("Sender: ") }) else { return nil }
+        return String(terminated[delimiter.upperBound...]).trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     /// Codex puts tags meant for its own UI into an answer, and its TUI parses them out.

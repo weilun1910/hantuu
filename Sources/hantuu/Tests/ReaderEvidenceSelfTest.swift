@@ -53,6 +53,7 @@ extension SelfTest {
         let orphan = x.parse(line: cx(["type": "function_call_output", "call_id": "orphan", "output": "Retained result without earlier call"]))
         check("evidence: orphan result survives history tail", orphan.first?.operation?.output == "Retained result without earlier call")
         check("evidence: native exec output detects truncation", ReaderEvidence.outcome("Process exited with code 2\nWarning: 100 tokens truncated", metadata: nil).exitCode == 2 && ReaderEvidence.outcome("Output truncated", metadata: nil).truncated)
+        codexCompletedItems()
     }
 
     static func readerEvidenceLifetimes() {
@@ -72,6 +73,9 @@ extension SelfTest {
         let completion = parser.parse(line: cx(["type": "function_call_output", "call_id": "poll", "output": "Process exited with code 0\nfinal output"]))
         running = ReaderEntries.merging(running, completion)
         check("evidence: write_stdin completes original operation", running.first(where: { $0.operation?.id == "process" })?.operation?.state == "completed")
+        check("evidence: process completion replaces every stale update", running.filter { $0.operation?.id == "process" }.count == 1 &&
+              running.first(where: { $0.operation?.id == "process" })?.operation?.output?.contains("initial output") == true &&
+              running.first(where: { $0.operation?.id == "process" })?.operation?.output?.contains("final output") == true)
         var side = CodexTranscriptParser(scope: .side)
         check("evidence: side fork excludes copied tool history", side.parse(line: cx(["type": "function_call", "call_id": "parent", "name": "exec_command", "arguments": "{\"cmd\":\"private-parent-command\"}"])).isEmpty)
         check("evidence: side fork excludes copied reasoning", side.parse(line: cx(["type": "reasoning", "summary": [["text": "Parent summary"]]])).isEmpty)

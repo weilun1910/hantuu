@@ -96,6 +96,14 @@ enum LiveCheckRules {
     static func oneLine(_ text: String) -> String {
         text.split(whereSeparator: \.isWhitespace).joined(separator: " ")
     }
+
+    /// Following is about new transcript identity, even when a model repeats old prose.
+    static func replyAfter(_ prompt: String, entries: [ReaderEntry], previousIDs: Set<String>) -> ReaderEntry? {
+        guard let index = entries.lastIndex(where: { $0.kind == .user && $0.text == prompt && !previousIDs.contains($0.id) }) else { return nil }
+        return entries.dropFirst(index + 1).first {
+            $0.kind == .assistant && !previousIDs.contains($0.id) && !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }
+    }
 }
 
 extension SelfTest {
@@ -159,6 +167,16 @@ extension SelfTest {
               LiveCheckRules.inside(dir.appendingPathComponent("live/data"), dir) &&
               !LiveCheckRules.inside(URL(fileURLWithPath: dir.path + "-other/data"), dir))
         check("live checks: diagnostics stay on one line", LiveCheckRules.oneLine("a\nb\t c") == "a b c")
+        let oldReply = ReaderEntry(id: "old-answer", kind: .assistant, text: "Repeated answer")
+        let newPrompt = ReaderEntry(id: "new-prompt", kind: .user, text: "Second prompt")
+        let newReply = ReaderEntry(id: "new-answer", kind: .assistant, text: "Repeated answer")
+        let priorIDs: Set<String> = [oldReply.id]
+        check("live checks: relaunch requires a new prompt and a new reply identity",
+              LiveCheckRules.replyAfter(newPrompt.text, entries: [oldReply, newPrompt], previousIDs: priorIDs) == nil &&
+              LiveCheckRules.replyAfter(newPrompt.text, entries: [newReply, newPrompt], previousIDs: priorIDs) == nil &&
+              LiveCheckRules.replyAfter(newPrompt.text, entries: [oldReply, newPrompt, newReply], previousIDs: priorIDs)?.id == newReply.id)
+        check("live checks: repeated old identity cannot prove relaunch following",
+              LiveCheckRules.replyAfter(newPrompt.text, entries: [newPrompt, oldReply], previousIDs: priorIDs) == nil)
         check("live checks: side feature is selectable for both agents",
               LiveCheckRules.selection("side", allowed: LiveCheckRules.features) == ["side"])
         let fakeRoot = URL(fileURLWithPath: "/fixture/project")
@@ -858,11 +876,20 @@ private final class LiveCheckSession {
         }
         report("saved state reload reattaches same PID and replays history", reattached)
         guard reattached else { return }
+        let previousIDs = Set(chat?.allEntries.map(\.id) ?? [])
         let nextSent = send(second)
-        let replied = nextSent && wait(120) { self.reply(afterToken) }
+        var afterReply: ReaderEntry?
+        let replied = nextSent && wait(120) {
+            guard let page = self.reader?.reader?.page,
+                  let entry = LiveCheckRules.replyAfter(second, entries: self.chat?.allEntries ?? [], previousIDs: previousIDs) else { return false }
+            let literal = String(decoding: try! JSONEncoder().encode(entry.id), as: UTF8.self)
+            let visible = SelfTest.js(page, "Array.from(document.querySelectorAll('section.entry.assistant')).some(e => e.dataset.id === \(literal) && e.innerText.trim().length > 0)") as? Bool == true
+            if visible { afterReply = entry }
+            return visible
+        }
         report("reader follows message and reply after relaunch",
                replied && countUser(first) == 1 && countUser(second) == 1 && reply(beforeToken),
-               "first=\(countUser(first)), second=\(countUser(second)); \(String(screen.suffix(450)))")
+               "first=\(countUser(first)), second=\(countUser(second)), new reply=\(afterReply?.id ?? "missing"), requested token matched=\(afterReply?.text.contains(afterToken) == true); \(String(screen.suffix(450)))")
     }
 
     /// One inexpensive turn supplies real evidence. No tool gate or permission policy is changed.
@@ -1034,12 +1061,20 @@ private final class LiveCheckSession {
         self.childReader = childReader
         childReader.install(in: host, top: host.topAnchor)
         childReader.sync()
+        var encryptedTask = false
         let promptRendered = wait(120) {
             childReader.sync()
+            encryptedTask = self.agent == "codex" && (SelfTest.js(childReader.reader.page,
+                "!!document.querySelector('section.entry.notice[data-content-unavailable=\"encrypted-agent-message\"]')") as? Bool) == true
+            if encryptedTask { return true }
             return (SelfTest.js(childReader.reader.page,
                                 "Array.from(document.querySelectorAll('section.entry.user')).some(e => e.textContent.includes('\(taskToken)'))") as? Bool) == true
         }
-        report("child task renders in its own reader", promptRendered)
+        if encryptedTask {
+            report("encrypted child task has an explicit unavailable notice", promptRendered)
+            report("SKIP child task plaintext: Codex recorded encrypted content", true,
+                   "The child transcript and parent spawn record do not provide readable task text. This is not a plaintext rendering pass.")
+        } else { report("child task renders in its own reader", promptRendered) }
         let rendered = wait(120) {
             childReader.sync()
             guard let path = app.subagentBrowser.selection?.agent.transcript,

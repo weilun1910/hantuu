@@ -81,6 +81,8 @@
       const op = e.operation, state = op.state || 'unknown';
       el.dataset.operationState = state;
       if (['failed', 'interrupted', 'declined'].includes(state)) el.classList.add('parity-failure');
+      if (state === 'failed') el.classList.add('error');
+      if (state === 'declined' || state === 'interrupted') el.classList.add('attention');
       if (op.childID || op.report) el.classList.add('parity-delegated');
       const title = (op.name || e.tool || 'Operation') + ' | ' + (states[state] || states.unknown) + (op.exitCode != null ? ' | Exit ' + op.exitCode : '');
       const d = disclosure(e.id + ':operation', title, ['failed', 'declined'].includes(state));
