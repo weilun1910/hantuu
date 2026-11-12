@@ -7,18 +7,20 @@ import Foundation
 /// Codex's `notify` append one JSON object per line to it, and StatusCenter tails it.
 enum AgentHooks {
     static let envKey = "HANTUU_EVENTS"
+    static let permissionExecutableEnvKey = "HANTUU_READER_EXECUTABLE"
 
     static var eventsDir: URL { Paths.dataDir.appendingPathComponent("events", isDirectory: true) }
     static func eventsFile(for chatID: UUID) -> URL { eventsDir.appendingPathComponent("\(chatID.uuidString).jsonl") }
 
     /// The environment a chat's terminal starts with, on top of the inherited one.
-    static func environment(for chatID: UUID) -> [String: String] {
+    static func environment(for chatID: UUID, executable: String? = Bundle.main.executableURL?.path) -> [String: String] {
         Paths.ensure(eventsDir)
         Paths.ensure(ClaudeUsage.dir)
         // HANTUU_USAGE: where Claude's status line saves its usage limits (Usage/).
         return [envKey: eventsFile(for: chatID).path, ClaudeUsage.envKey: ClaudeUsage.file(for: chatID).path,
                 ReaderRequestBridge.envKey: ReaderRequestBridge.directory(for: chatID).path,
-                ReaderRequestBridge.chatEnvKey: chatID.uuidString]
+                ReaderRequestBridge.chatEnvKey: chatID.uuidString,
+                permissionExecutableEnvKey: executable ?? ""]
     }
 
     // MARK: Claude Code
@@ -52,6 +54,7 @@ enum AgentHooks {
     static var permissionCommand: String { permissionCommand(provider: .claude) }
 
     static func permissionCommand(provider: ReaderRequestProvider) -> String {
+        if provider == .codex { return codexPermissionCommand }
         guard let executable = Bundle.main.executableURL?.path else { return appendCommand }
         let quoted = "'" + executable.replacingOccurrences(of: "'", with: "'\\''") + "'"
         return #"p=$(cat); if [ -n "$HANTUU_EVENTS" ]; then { lockf -s -t 5 1; printf '%s\n' "$p"; } >> "$HANTUU_EVENTS"; fi 2>/dev/null; printf '%s' "$p" | "#
@@ -198,8 +201,16 @@ enum AgentHooks {
 
     static func tomlArray(_ items: [String]) -> String { "[" + items.map(tomlString).joined(separator: ",") + "]" }
 
-    /// Pinned Codex 0.167.1 synchronous permission hook. This per-launch override
-    /// leaves provider files untouched and never forwards suggested grants.
+    /// Codex trusts the literal hook declaration, not the executable's contents. Keep it
+    /// identical across chats, resumes and app locations; invocation ownership and the
+    /// current helper path come only from the launch environment. Never evaluate that path
+    /// as shell code. A missing helper leaves Codex's native approval flow in control.
+    static let codexPermissionCommand =
+        #"if [ -z "$HANTUU_READER_EXECUTABLE" ]; then cat >/dev/null; exit 0; fi; p=$(cat); if [ -n "$HANTUU_EVENTS" ]; then { lockf -s -t 5 1; printf '%s\n' "$p"; } >> "$HANTUU_EVENTS"; fi 2>/dev/null; printf '%s' "$p" | HANTUU_READER_PROVIDER=codex "$HANTUU_READER_EXECUTABLE" "#
+            + ReaderRequestBridge.flag + " 2>/dev/null; exit 0"
+
+    /// Pinned Codex 0.167.1 synchronous permission hook. Codex persists the user's trust
+    /// of this stable SessionFlags declaration in its own user config. hantuu never writes it.
     static var codexPermissionOverride: String {
         "hooks.PermissionRequest=[{matcher=\"Bash|apply_patch\",hooks=[{type=\"command\",command="
             + tomlString(permissionCommand(provider: .codex)) + ",timeout=95,async=false}]}]"

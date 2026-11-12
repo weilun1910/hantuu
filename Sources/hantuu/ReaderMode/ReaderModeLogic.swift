@@ -72,7 +72,7 @@ struct ScreenMenu: Equatable {
 
     func title(agent: String) -> String {
         switch kind {
-        case .trust: return "\(agent) asks whether to trust this folder"
+        case .trust: return line.lowercased().contains("hook") ? "\(agent) asks whether to trust hooks" : "\(agent) asks whether to trust this folder"
         case .update: return "\(agent) is offering an update"
         case .menu: return "\(agent) is showing a menu"
         }
@@ -86,7 +86,7 @@ enum TerminalScreen {
     static let readyMarks = ["for shortcuts", "context left", "shift+tab to cycle", "esc to interrupt"]
 
     static let trustMarks = ["do you trust", "trust the files", "trust this folder", "trust the contents",
-                             "allow codex to work in this folder", "one you trust"]
+                             "allow codex to work in this folder", "one you trust", "hooks need review", "trust all and continue", "continue without trusting"]
     static let updateMarks = ["update available", "update now", "skip until"]
     static let menuMarks = ["enter to confirm", "enter to select", "press enter to continue", "to navigate", "(y/n)",
                             "esc to cancel", "esc to close", "esc to go back", "escape to close", "press any key to continue", "enter to submit answer", "enter to submit all", "tab or esc to clear notes", "space to toggle", "to submit answer", "to submit all", "switch questions", "enter confirm", "enter select", "enter default", "esc back", "esc cancel", "enter/space to change", "type to filter"]

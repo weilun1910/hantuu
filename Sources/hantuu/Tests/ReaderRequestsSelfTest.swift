@@ -95,12 +95,31 @@ extension SelfTest {
         } else { check("requests: old request payload remains Claude", false) }
         let arguments = AgentHooks.codexArguments(existingNotify: .none)
         check("requests: Codex respects hook trust and disabled feature", !arguments.contains("--dangerously-bypass-hook-trust")
-            && !arguments.contains { $0.hasPrefix("features.hooks=") || $0.hasPrefix("hooks.states") })
+            && !arguments.contains { $0.hasPrefix("features.hooks=") || $0.hasPrefix("hooks.state") })
         check("requests: Codex launch adds only its permission event", arguments.filter { $0.hasPrefix("hooks.") } == [AgentHooks.codexPermissionOverride])
         check("requests: Codex launch adds synchronous permission hook", arguments.contains(AgentHooks.codexPermissionOverride)
             && AgentHooks.codexPermissionOverride.contains("timeout=95,async=false")
             && AgentHooks.codexPermissionOverride.contains("Bash|apply_patch")
             && AgentHooks.codexPermissionOverride.contains("HANTUU_READER_PROVIDER=codex"))
+        let firstID = UUID(), secondID = UUID()
+        let firstEnvironment = AgentHooks.environment(for: firstID, executable: "/Applications/hantuu.app/Contents/MacOS/hantuu")
+        let secondEnvironment = AgentHooks.environment(for: secondID, executable: "/fixture/test copy.app/Contents/MacOS/hantuu")
+        check("requests: Codex helper location and ownership travel only in the environment",
+              firstEnvironment[AgentHooks.permissionExecutableEnvKey] == "/Applications/hantuu.app/Contents/MacOS/hantuu" &&
+              secondEnvironment[AgentHooks.permissionExecutableEnvKey] == "/fixture/test copy.app/Contents/MacOS/hantuu" &&
+              firstEnvironment[ReaderRequestBridge.chatEnvKey] == firstID.uuidString &&
+              secondEnvironment[ReaderRequestBridge.chatEnvKey] == secondID.uuidString &&
+              firstEnvironment[ReaderRequestBridge.envKey] != secondEnvironment[ReaderRequestBridge.envKey])
+        check("requests: Codex trust declaration stays identical across launches and app locations",
+              arguments == AgentHooks.codexArguments(existingNotify: .none) &&
+              !AgentHooks.codexPermissionOverride.contains(firstID.uuidString) &&
+              !AgentHooks.codexPermissionOverride.contains(secondID.uuidString) &&
+              !AgentHooks.codexPermissionOverride.contains("/Applications/") &&
+              !AgentHooks.codexPermissionOverride.contains("/fixture/") &&
+              AgentHooks.codexPermissionCommand.contains(#""$HANTUU_READER_EXECUTABLE""#) &&
+              AgentHooks.codexPermissionCommand.contains(ReaderRequestBridge.flag))
+        check("requests: unavailable Codex helper clears any inherited executable",
+              AgentHooks.environment(for: firstID, executable: nil)[AgentHooks.permissionExecutableEnvKey] == "")
         check("requests: Claude launch keeps its provider", AgentHooks.permissionCommand.contains("HANTUU_READER_PROVIDER=claude"))
         let plan = String(decoding: permission, as: UTF8.self).replacingOccurrences(of: "Bash", with: "ExitPlanMode")
         check("requests: plan mode stays in provider UI", ReaderRequest.fromHook(Data(plan.utf8), chatID: chat, now: now, pid: 123) == nil)

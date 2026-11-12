@@ -31,6 +31,7 @@ struct ReaderMenu: Equatable {
     var refusal: String? = nil
 
     var actionable: Bool { refusal == nil && (input != nil || selected != nil && !options.isEmpty) }
+    var isCodexHookTrust: Bool { agent == "codex" && kind == .trust && title == "Hooks need review" }
     var allowsSessionConfirm: Bool {
         [.model, .effort].contains(kind) && (footer.lowercased().contains("s session") || footer.lowercased().contains("s for this session only"))
     }
@@ -51,6 +52,7 @@ enum ReaderMenuParser {
         guard ["claude", "codex"].contains(agent), screen.utf8.count < 131_072 else { return nil }
         let lines = screen.components(separatedBy: .newlines).map(trim).filter { !$0.isEmpty }
         guard !lines.isEmpty else { return nil }
+        if let trust = codexHookTrust(lines, agent: agent) { return trust }
         if let input = codexInput(lines, agent: agent) { return input }
         if let effort = claudeEffort(lines, agent: agent) { return effort }
         let tail = lines.suffix(4).joined(separator: " ").lowercased()
@@ -140,6 +142,40 @@ enum ReaderMenuParser {
         result.allowsText = kind == .search && lines.contains { $0.hasPrefix("Search:") || $0.hasPrefix("Filter:") }
         if kind == .multiSelect && agent == "codex" { result.refusal = "This checkbox layout has not been verified for Codex. Use Show Terminal." }
         return result
+    }
+
+    /// rust-v0.167.1 startup_hooks_review uses "esc skip", and wraps the last choice
+    /// at narrow widths. Require every complete source label before sending any key.
+    /// Trust all is deliberately not relabelled as trusting only hantuu's hook.
+    private static func codexHookTrust(_ lines: [String], agent: String) -> ReaderMenu? {
+        guard agent == "codex", let heading = lines.lastIndex(of: "Hooks need review"),
+              let footer = lines.last, footer.lowercased().contains("enter confirm"),
+              footer.lowercased().contains("esc skip"), heading < lines.count - 1,
+              !TerminalScreen.readyMarks.contains(where: footer.lowercased().contains) else { return nil }
+        let body = Array(lines[(heading + 1)..<(lines.count - 1)])
+        let explanation = "hantuu's hook forwards Bash and apply_patch approval requests to the reader. Codex saves trust for this hook across launches. Trust all also trusts the other hooks listed by Codex. Choose Review hooks to inspect them."
+        let expected = ["Review hooks", "Trust all and continue", "Continue without trusting (hooks won't run)"]
+        let regex = try! NSRegularExpression(pattern: #"^(?:(›)\s*)?([1-3])\.\s+(.+)$"#)
+        var options: [ReaderMenu.Option] = []
+        var focus: [Int] = []
+        var header: [String] = []
+        for line in body {
+            let ns = line as NSString
+            if let match = regex.firstMatch(in: line, range: NSRange(location: 0, length: ns.length)) {
+                let number = Int(ns.substring(with: match.range(at: 2)))!
+                if match.range(at: 1).location != NSNotFound { focus.append(options.count) }
+                options.append(.init(label: ns.substring(with: match.range(at: 3)), number: number))
+            } else if options.isEmpty { header.append(line) }
+            else { options[options.count - 1].label += " " + line }
+        }
+        let complete = options.map(\.label) == expected && options.map(\.number) == [1, 2, 3]
+        let selected = complete && focus.count == 1 ? options[focus[0]].label : nil
+        // If indexes or any label are hidden/truncated, retain the actual screen as
+        // context, with Show Terminal available and every approval control disabled.
+        let context = (complete ? header : body).joined(separator: "\n") + "\n\n" + explanation
+        return ReaderMenu(agent: agent, kind: .trust, title: "Hooks need review", context: context,
+            options: complete ? options : [], selected: selected, footer: footer,
+            refusal: selected == nil ? "The complete hook choices and highlight are not visible. Use Show Terminal." : nil)
     }
 
     /// Claude 2.1.322 draws a fixed-width effort track. Accept its exact geometry,

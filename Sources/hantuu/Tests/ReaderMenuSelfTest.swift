@@ -26,6 +26,30 @@ extension SelfTest {
           3. No, and tell Codex what to do differently (esc)
         Press enter to confirm or esc to cancel
         """
+        // Pinned startup_hooks_review snapshots at width 40 and 62. Not live captures.
+        let hookTrust = """
+        Hooks need review
+        2 hooks are new or changed.
+        Hooks can run outside the sandbox
+        after you trust them.
+        › 1. Review hooks
+          2. Trust all and continue
+          3. Continue without trusting (hooks
+             won't run)
+        enter confirm · esc skip
+        """
+        let hookTrustError = """
+        Hooks need review
+        2 hooks are new or changed.
+        Hooks can run outside the sandbox after you trust them.
+        Failed to trust hooks: config/batchWrite failed in TUI:
+        Invalid configuration: features.fast_mode=true is not
+        supported; allowed set [fast_mode=false]
+        › 1. Review hooks
+          2. Trust all and continue
+          3. Continue without trusting (hooks won't run)
+        enter confirm · esc skip
+        """
         let question = """
         Question 1/2 (2 unanswered)
         Choose an option.
@@ -84,6 +108,9 @@ extension SelfTest {
         }
         let cases: [(String, String, String, ReaderMenu.Kind)] = [
             ("permission", "codex", exec, .permission),
+            ("codex-hook-trust", "codex", hookTrust, .trust),
+            ("codex-hook-trust-error", "codex", hookTrustError, .trust),
+            ("codex-hook-trust-fallback", "codex", hookTrust.replacingOccurrences(of: "1. ", with: ""), .trust),
             ("question", "codex", question, .question),
             ("freeform", "codex", freeform, .freeText),
             ("notes-input", "codex", notes, .freeText),
@@ -106,6 +133,43 @@ extension SelfTest {
             let menu = ReaderMenuParser.parse(screen, agent: agent)
             check("menus parser: \(name) source-derived or synthetic fixture", menu?.kind == kind)
             if let menu { parsed.append((name, menu)) }
+        }
+        let trustMenu = ReaderMenuParser.parse(hookTrust, agent: "codex")
+        check("menus hook trust: wrapped choice reconstructed exactly with explicit focus",
+              trustMenu?.isCodexHookTrust == true && trustMenu?.actionable == true &&
+              trustMenu?.selected == "Review hooks" && trustMenu?.options.map(\.label) ==
+              ["Review hooks", "Trust all and continue", "Continue without trusting (hooks won't run)"])
+        check("menus hook trust: scope, other hooks and original warning stay visible",
+              trustMenu?.context.contains("Bash and apply_patch") == true &&
+              trustMenu?.context.contains("other hooks") == true &&
+              trustMenu?.context.contains("outside the sandbox") == true &&
+              ReaderMenuParser.parse(hookTrustError, agent: "codex")?.context.contains("Failed to trust hooks") == true)
+        check("menus hook trust: hidden numbering and truncated labels require terminal",
+              ReaderMenuParser.parse(hookTrust.replacingOccurrences(of: "1. ", with: ""), agent: "codex")?.actionable == false &&
+              ReaderMenuParser.parse(hookTrust.replacingOccurrences(of: "won't run)", with: "won't…"), agent: "codex")?.actionable == false)
+        check("menus hook trust: missing and multiple highlights refuse actions",
+              ReaderMenuParser.parse(hookTrust.replacingOccurrences(of: "›", with: " "), agent: "codex")?.actionable == false &&
+              ReaderMenuParser.parse(hookTrust.replacingOccurrences(of: "  2.", with: "› 2."), agent: "codex")?.actionable == false)
+        check("menus hook trust: remapped submit and closed prompt do not accept Enter",
+              ReaderMenuParser.parse(hookTrust.replacingOccurrences(of: "enter confirm", with: "ctrl+j confirm"), agent: "codex") == nil &&
+              ReaderMenuParser.parse(hookTrust + "\n› Ask Codex to do anything\n? for shortcuts", agent: "codex") == nil)
+        check("menus hook trust: live probes refuse even inside an expected picker",
+              LiveCheckRules.blocker(hookTrust, allowingMenu: true) != nil &&
+              LiveCheckRules.blocker(hookTrustError, allowingMenu: true) != nil &&
+              ReaderSubmissionGuard.refusal(screen: hookTrust, waiting: false, command: "/model") != nil)
+        if let trustMenu {
+            var trustSelection = ReaderMenuSelection(menu: trustMenu, label: "Trust all and continue")
+            check("menus hook trust: trust is never sent on arrival", trustSelection.observe(trustMenu, closed: false) == .key(.down))
+            var selected = trustMenu
+            selected.selected = "Trust all and continue"
+            check("menus hook trust: explicit trust requires two observations before Return",
+                  trustSelection.observe(selected, closed: false) == .wait && trustSelection.observe(selected, closed: false) == .key(.enter))
+            check("menus hook trust: confirmation is single use", trustSelection.observe(selected, closed: false) == .wait)
+            var changed = selected
+            changed.context += "\nA new hook appeared."
+            var stale = ReaderMenuSelection(menu: trustMenu, label: "Trust all and continue")
+            if case .refuse = stale.observe(changed, closed: false) { check("menus hook trust: changed inventory refuses approval", true) }
+            else { check("menus hook trust: changed inventory refuses approval", false) }
         }
         check("menus parser: two-pointer notes focus input without guessing option focus",
               ReaderMenuParser.parse(notes, agent: "codex")?.input == ReaderMenu.Input(value: "", placeholder: "Add notes") &&
@@ -229,23 +293,47 @@ extension SelfTest {
         let output = dir.appendingPathComponent("reader-menus", isDirectory: true)
         Paths.ensure(output)
         for (name, menu) in parsed {
-            for dark in [false, true] {
-                let view = ReaderMenuCard(frame: NSRect(x: 0, y: 0, width: 760, height: 600))
-                view.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
-                view.update(menu: menu)
-                view.frame.size.height = max(1, view.preferredHeight)
-                view.layoutSubtreeIfNeeded()
-                check("menus card: \(name) retains displayed menu", view.displayedMenu == menu && view.preferredHeight > 0)
-                let filename = "\(name)-\(dark ? "dark" : "light").png"
-                guard let bitmap = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { check("menus snapshot: \(filename)", false); continue }
-                view.cacheDisplay(in: view.bounds, to: bitmap)
-                do {
-                    guard let png = bitmap.representation(using: .png, properties: [:]) else { check("menus snapshot encoding", false); continue }
-                    try png.write(to: output.appendingPathComponent(filename))
-                    check("menus snapshot: \(filename)", true)
-                } catch { check("menus snapshot: \(filename)", false, String(describing: error)) }
-                view.update(menu: nil)
-                check("menus card: clears stale menu", view.displayedMenu == nil)
+            func cardWidth(_ viewport: CGFloat) -> CGFloat {
+                let inset: CGFloat = viewport < 480 ? 16 : 32
+                return min(ReaderModeController.columnWidth, max(0, viewport - 2 * inset))
+            }
+            var sizes: [(String, CGFloat)] = [("", menu.isCodexHookTrust ? ReaderModeController.columnWidth : 760)]
+            // The card is reader-only. Render its actual available widths under each
+            // supported window/sidebar/panel combination, including the reader minimum.
+            if menu.isCodexHookTrust, ProcessInfo.processInfo.environment["HANTUU_LAYOUT_SNAPSHOTS"] == "1" {
+                sizes.append(("-minimum", cardWidth(WindowLayout.readerMinimum)))
+                let windowWidths: [CGFloat] = [1280, 1470, 1512, 1728, 2560]
+                for width in windowWidths {
+                    for sidebar in [false, true] {
+                        for panel in [false, true] {
+                            var input = WindowLayout.Input(width: width, reader: true, terminalMinimum: 672)
+                            input.sidebarWanted = sidebar
+                            input.panelWanted = panel
+                            input.showPanelWhenSingle = false
+                            sizes.append(("-window-\(Int(width))-sidebar-\(sidebar)-panel-\(panel)", cardWidth(WindowLayout.resolve(input).chat)))
+                        }
+                    }
+                }
+            }
+            for (sizeName, width) in sizes {
+                for dark in [false, true] {
+                    let view = ReaderMenuCard(frame: NSRect(x: 0, y: 0, width: width, height: 600))
+                    view.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
+                    view.update(menu: menu)
+                    view.frame.size.height = max(1, view.preferredHeight)
+                    view.layoutSubtreeIfNeeded()
+                    check("menus card: \(name) retains displayed menu", view.displayedMenu == menu && view.preferredHeight > 0)
+                    let filename = "\(name)\(sizeName)-\(dark ? "dark" : "light").png"
+                    guard let bitmap = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { check("menus snapshot: \(filename)", false); continue }
+                    view.cacheDisplay(in: view.bounds, to: bitmap)
+                    do {
+                        guard let png = bitmap.representation(using: .png, properties: [:]) else { check("menus snapshot encoding", false); continue }
+                        try png.write(to: output.appendingPathComponent(filename))
+                        check("menus snapshot: \(filename)", true)
+                    } catch { check("menus snapshot: \(filename)", false, String(describing: error)) }
+                    view.update(menu: nil)
+                    check("menus card: clears stale menu", view.displayedMenu == nil)
+                }
             }
         }
     }

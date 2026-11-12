@@ -582,11 +582,6 @@ final class ReaderModeController: NSObject {
         updateTimer()
         guard let chat = model.selectedChat, chat.id == shownChatID else { return }
         let live = isLive(chat)
-        if live, chat.codexIdentityWaiting {
-            clearMirroredMenu()
-            apply(.blocked(title: "Waiting for session identity", detail: "The Codex session is being verified. You can inspect it in the terminal."), chat: chat)
-            return
-        }
         var screen = TerminalScreen.State()
         var rawScreen = ""
         if let t = chat.terminal, let previous = settledScreens[chat.id],
@@ -614,6 +609,13 @@ final class ReaderModeController: NSObject {
         let parsed = menuEligible
             ? (screenIsStable ? ReaderMenuParser.parse(rawScreen, agent: chat.agent.id) : (sameScreenOwner ? mirroredMenu : nil))
             : nil
+        // Startup hook review can precede Codex's session title, including on resume.
+        // Let the user answer only that identified menu while conversation input waits.
+        if live, chat.codexIdentityWaiting, parsed?.isCodexHookTrust != true {
+            clearMirroredMenu()
+            apply(.blocked(title: "Waiting for session identity", detail: "The Codex session is being verified. You can inspect it in the terminal."), chat: chat)
+            return
+        }
         if parsed == nil { if menuOperation == nil || structured { clearMirroredMenu() } }
         else {
             let enteringInput = mirroredMenu?.input == nil && parsed?.input != nil
@@ -1454,7 +1456,7 @@ final class ReaderModeController: NSObject {
         model.selectedChatID == chat.id && shownChatID == chat.id && chat.sessionID == session &&
             chat.terminal === terminal && terminal.surface != nil && isLive(chat) &&
             mode.showsReader(chat) && root.window != nil && !root.isHiddenOrHasHiddenAncestor && model.subagentBrowser.selection == nil &&
-            !chat.codexIdentityWaiting && !isTyping && menuProbe == nil &&
+            (!chat.codexIdentityWaiting || mirroredMenu?.isCodexHookTrust == true) && !isTyping && menuProbe == nil &&
             reader?.interaction.hasPendingRequest != true
     }
 
