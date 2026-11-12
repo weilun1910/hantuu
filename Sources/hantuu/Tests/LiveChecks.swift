@@ -11,13 +11,16 @@ enum LiveCheckRules {
 
     /// Codex walks ancestors itself, so a Git ceiling environment variable is insufficient.
     static func gitAncestor(_ folder: URL, exists: (URL) -> Bool = { FileManager.default.fileExists(atPath: $0.path) }) -> URL? {
-        var current = folder.standardizedFileURL.resolvingSymlinksInPath()
-        while true {
+        var current = folder.standardizedFileURL.resolvingSymlinksInPath().standardizedFileURL
+        for _ in 0..<256 {
             if exists(current.appendingPathComponent(".git")) { return current }
-            let parent = current.deletingLastPathComponent()
-            if parent.path == current.path { return nil }
+            guard current.path != "/" else { return nil }
+            let parent = current.deletingLastPathComponent().standardizedFileURL
+            // URL can append ".." at the root instead of returning the same URL.
+            guard parent.path.count < current.path.count else { return nil }
             current = parent
         }
+        return nil
     }
 
     /// Missing, incomplete and wrong answers remain failures even after a process exits.
@@ -219,9 +222,28 @@ extension SelfTest {
         check("live checks: side feature is selectable for both agents",
               LiveCheckRules.selection("side", allowed: LiveCheckRules.features) == ["side"])
         let fakeRoot = URL(fileURLWithPath: "/fixture/project")
-        check("live checks: nested folders do not falsely qualify as non-git",
-              LiveCheckRules.gitAncestor(fakeRoot.appendingPathComponent("tmp/fresh"), exists: { $0.path == "/fixture/project/.git" })?.path == fakeRoot.path
-              && LiveCheckRules.gitAncestor(fakeRoot, exists: { _ in false }) == nil)
+        var nestedProbes = 0
+        let nestedAncestor = LiveCheckRules.gitAncestor(fakeRoot.appendingPathComponent("tmp/fresh"), exists: {
+            nestedProbes += 1
+            return $0.path == "/fixture/project/.git" || nestedProbes > 16
+        })
+        check("live checks: nested folders find their Git ancestor in three probes",
+              nestedAncestor?.path == fakeRoot.path && nestedProbes == 3)
+        var noGitProbes = 0
+        let noGitAncestor = LiveCheckRules.gitAncestor(URL(fileURLWithPath: "/private/var/folders/fixture/T/side-fresh"), exists: { _ in
+            noGitProbes += 1
+            // Force a failing result after the budget so a regression cannot hang the test.
+            return noGitProbes > 16
+        })
+        check("live checks: a temp-style path without Git stops promptly",
+              noGitAncestor == nil && noGitProbes > 0 && noGitProbes <= 16)
+        var rootProbes = 0
+        let rootAncestor = LiveCheckRules.gitAncestor(URL(fileURLWithPath: "/"), exists: { _ in
+            rootProbes += 1
+            return rootProbes > 1
+        })
+        check("live checks: the filesystem root without Git stops after one probe",
+              rootAncestor == nil && rootProbes == 1)
         let gitFixture = dir.appendingPathComponent("live-git-fixture", isDirectory: true)
         let nested = gitFixture.appendingPathComponent("tmp/fresh", isDirectory: true)
         try? FileManager.default.createDirectory(at: nested, withIntermediateDirectories: true)

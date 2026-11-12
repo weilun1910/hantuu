@@ -111,8 +111,10 @@ final class ChatHistoryIndex {
                 }
                 return gitDir.resolvingSymlinksInPath().path
             }
-            let parent = folder.deletingLastPathComponent()
-            if parent.path == folder.path { break }; folder = parent
+            guard folder.path != "/" else { break }
+            let parent = folder.deletingLastPathComponent().standardizedFileURL
+            guard parent.path.count < folder.path.count else { break }
+            folder = parent
         }
         return nil
     }
