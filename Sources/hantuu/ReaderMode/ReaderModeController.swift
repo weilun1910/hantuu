@@ -420,6 +420,21 @@ final class ReaderModeController: NSObject {
         let text = ComposerMessage.prepare(composer.textView.string)
         let attachments = composer.attachments
         guard text != nil || !attachments.isEmpty else { return false }
+        if let text, let question = SideQuestionCommand.question(text, agent: chat.agentID, reader: mode.showsReader(chat)) {
+            model.openSideQuestions(in: chat)
+            // Side questions use the saved conversation context and their own input. Leave
+            // attachments in this composer rather than silently sending them elsewhere.
+            guard attachments.isEmpty else { NSSound.beep(); return false }
+            if question.isEmpty {
+                composer.textView.text = ""
+                drafts[chat.id] = nil
+                return true
+            }
+            guard model.askSideQuestion(question, in: chat) else { return false }
+            composer.textView.text = ""
+            drafts[chat.id] = nil
+            return true
+        }
         guard composerMode.canSend else {
             NSSound.beep()
             return false

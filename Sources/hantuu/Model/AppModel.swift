@@ -14,7 +14,7 @@ enum ChatStatus: String, Codable {
 
 enum PanelTab: String, Codable, CaseIterable {
     case overview = "Overview", changes = "Changes", files = "Files"
-    case code = "Code", browser = "Browser", terminal = "Terminal"
+    case code = "Code", browser = "Browser", side = "Side", terminal = "Terminal"
 
     /// The panel used to have a Reader tab. A saved "Reader", or any tab that's gone, opens
     /// Overview, so the rest of the saved state still loads.
@@ -222,6 +222,7 @@ final class AppModel: ObservableObject, TerminalEvents {
     /// Tests that construct a model without load() never write application state.
     private var persistenceEnabled = false
     let keepAwake = KeepAwake()
+    lazy var sideChats = SideChatStore()
 
     var windowFrame: String?
     var sidebarWidth: Double?
@@ -817,6 +818,7 @@ final class AppModel: ObservableObject, TerminalEvents {
     }
 
     private func teardown(_ chat: Chat, then: (() -> Void)? = nil) {
+        sideChats.forget(chat.id)
         subagentBrowser.forget(chat.id)
         chat.discoveryTimer?.invalidate()
         chat.codexSessionRequest = nil

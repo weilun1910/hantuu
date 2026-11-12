@@ -13,6 +13,7 @@ final class PanelController: NSViewController {
     let review: ReviewCenter
     let browser: BrowserCoordinator
     private var browserView: NSView!
+    let side: SidePanelController
     private let shells = TerminalContainer(color: Theme.background)
     private var header: NSView!
     private var noShells: NSView!
@@ -28,6 +29,7 @@ final class PanelController: NSViewController {
         self.review = review
         browser = BrowserCoordinator(model: model, review: review)
         code = FileViewerController(model: model)
+        side = SidePanelController(model: model)
         super.init(nibName: nil, bundle: nil)
         review.configure(model: model)
     }
@@ -43,7 +45,7 @@ final class PanelController: NSViewController {
         changes = ChromeHostingView(rootView: ChangesView().environmentObject(model).environmentObject(review))
         files = ChromeHostingView(rootView: FilesView().environmentObject(model).environmentObject(review))
         browserView = ChromeHostingView(rootView: BrowserPanel(browser: browser))
-        let views: [NSView] = [shells, code.view, noShells, noFiles, overview, changes, files, browserView]
+        let views: [NSView] = [shells, code.view, noShells, noFiles, overview, changes, files, browserView, side.root]
         for v in [header!, content!] {
             v.translatesAutoresizingMaskIntoConstraints = false
             root.addSubview(v)
@@ -94,6 +96,8 @@ final class PanelController: NSViewController {
         files.isHidden = tab != .files
         browserView.isHidden = tab != .browser
         browser.sync(visible: model.panelVisible && tab == .browser)
+        side.root.isHidden = tab != .side
+        side.sync(active: model.panelVisible && tab == .side)
         review.setActiveTab(model.panelVisible ? tab : nil)
     }
 }
@@ -105,12 +109,13 @@ struct PanelHeader: View {
         VStack(spacing: 0) {
             ZStack {
                 WindowDragArea()
-                // Six labels fit at the minimum panel width with the tightest padding.
+                // Narrow panels use icons, so additional tabs never overflow the header.
                 ViewThatFits(in: .horizontal) {
                     tabs(padding: 8)
                     tabs(padding: 5)
                     tabs(padding: 3)
                     tabs(padding: 1)
+                    iconTabs
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.horizontal, 10)
@@ -125,6 +130,12 @@ struct PanelHeader: View {
                 case .terminal: ShellTabs()
                 case .code: CodeTabs()
                 case .browser: BrowserBar()
+                case .side:
+                    HStack {
+                        Text(model.selectedChat?.displayTitle ?? "Side questions")
+                            .font(.system(size: 12)).foregroundStyle(Color.hSecondary).lineLimit(1)
+                        Spacer()
+                    }
                 }
             }
             .frame(height: 31)
@@ -142,6 +153,39 @@ struct PanelHeader: View {
             }
         }
         .fixedSize()
+    }
+
+    private var iconTabs: some View {
+        HStack(spacing: 4) {
+            ForEach(Array(PanelTab.allCases.enumerated()), id: \.element) { i, tab in
+                Button { model.panelTab = tab } label: {
+                    VStack(spacing: 6) {
+                        Image(systemName: Self.symbol(tab.rawValue)).font(.system(size: 12))
+                            .frame(width: 28, height: 17)
+                        Rectangle().fill(model.panelTab == tab ? Color.hText.opacity(0.85) : .clear).frame(height: 1.5)
+                    }
+                    .foregroundStyle(model.panelTab == tab ? Color.hText : Color.hSecondary)
+                    .padding(.top, 6)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help("\(tab.rawValue)  ⌥⌘\(i + 1)")
+                .accessibilityLabel(tab.rawValue)
+            }
+        }
+        .fixedSize()
+    }
+
+    private static func symbol(_ title: String) -> String {
+        switch title {
+        case "Overview": return "square.grid.2x2"
+        case "Changes": return "plus.forwardslash.minus"
+        case "Files": return "folder"
+        case "Code": return "doc.text"
+        case "Browser": return "globe"
+        case "Side": return "bubble.left.and.bubble.right"
+        default: return "terminal"
+        }
     }
 }
 

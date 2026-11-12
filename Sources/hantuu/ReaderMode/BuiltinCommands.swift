@@ -73,7 +73,7 @@ extension ReaderCommandCatalog {
                 ("stop", "Stop background terminals"), ("clear", "Start fresh"),
                 ("subagents", "Switch subagent"),
             ]
-            panels = ["presets", "ide", "keymap", "experimental", "memories", "skills", "import", "hooks", "delete", "worktree", "config", "agents", "copy", "tui", "diff", "mention", "status", "daemon", "warnings", "pwd", "debug-config", "theme", "apps", "plugins", "feedback", "ps", "subagents"]
+            panels = ["presets", "ide", "keymap", "experimental", "memories", "skills", "import", "hooks", "delete", "worktree", "config", "agents", "side", "btw", "copy", "tui", "diff", "mention", "status", "daemon", "warnings", "pwd", "debug-config", "theme", "apps", "plugins", "feedback", "ps", "subagents"]
             noArguments = ["model", "permissions", "review", "resume", "new", "fork", "goal", "voice", "export", "usage", "title", "statusline", "pets", "mcp"]
         } else { return [] }
         var commands = rows.map { name, description in

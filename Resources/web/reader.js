@@ -15,6 +15,7 @@
   const scrollMemory = {};
   const seen = new Set();
   const pendingNodes = new Map();
+  let sideVersions = new Map();
 
   function atBottom() {
     return scroller.scrollHeight - scroller.scrollTop - window.innerHeight < 48;
@@ -190,6 +191,7 @@
       chatID = payload.chatID || null;
       seen.clear();
       pendingNodes.clear();
+      sideVersions.clear();
       R.disposeMedia();
       list.textContent = '';
       R.post({ type: 'mediaExpanded', count: 0 });
@@ -210,6 +212,44 @@
       syncPending(payload.pending || []);
       if (stick) scrollToBottom();
       else scroller.scrollTop = top;
+    },
+    // Side questions stream into stable entries without rebuilding older answers.
+    reconcile(payload) {
+      if (payload.chatID !== chatID) {
+        this.reset(payload);
+        sideVersions = new Map((payload.entries || []).map(e => [e.id, JSON.stringify(e)]));
+        return;
+      }
+      const stick = atBottom();
+      const top = scroller.scrollTop;
+      const entries = payload.entries || [];
+      let changed = false;
+      const wanted = new Set(entries.map(e => e.id));
+      const nodes = new Map(Array.from(list.children).map(el => [el.dataset.id, el]));
+      for (const [id, el] of nodes) {
+        if (!wanted.has(id)) { el.remove(); seen.delete(id); sideVersions.delete(id); changed = true; }
+      }
+      for (const e of entries) {
+        const version = JSON.stringify(e);
+        if (sideVersions.get(e.id) === version) continue;
+        changed = true;
+        const node = renderEntry(e);
+        const old = nodes.get(e.id);
+        if (old && old.isConnected) old.replaceWith(node);
+        else list.appendChild(node);
+        seen.add(e.id);
+        sideVersions.set(e.id, version);
+      }
+      // A first answer is inserted before its existing streaming status line.
+      const ordered = new Map(Array.from(list.children).map(el => [el.dataset.id, el]));
+      for (let i = 0; i < entries.length; i++) {
+        const node = ordered.get(entries[i].id);
+        if (list.children[i] !== node) list.insertBefore(node, list.children[i] || null);
+      }
+      empty.textContent = payload.emptyText || '';
+      empty.hidden = list.childElementCount > 0;
+      if (stick) scrollToBottom();
+      else { scroller.scrollTop = top; if (changed) pill.hidden = false; }
     },
     // Add new entries. Sticks to the bottom only if you were already there.
     append(payload) {

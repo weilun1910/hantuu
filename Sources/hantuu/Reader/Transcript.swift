@@ -31,7 +31,7 @@ struct ReaderEntry: Codable, Equatable {
 }
 
 /// Only a subagent's own file includes sidechain lines and successful tool results.
-enum TranscriptScope: Equatable { case chat, subagent }
+enum TranscriptScope: Equatable { case chat, subagent, side }
 
 protocol TranscriptParser {
     /// Parse one JSONL line. May return several entries or none (noise is hidden).
@@ -349,6 +349,7 @@ struct CodexTranscriptParser: TranscriptParser {
     private var lineNo = 0
     private var previousModel: String?
     private var lastCompactionRecord: String?
+    private var sideBoundarySeen = false
 
     mutating func parse(line: Data) -> [ReaderEntry] {
         lineNo += 1
@@ -358,6 +359,19 @@ struct CodexTranscriptParser: TranscriptParser {
         let time = obj["timestamp"] as? String
         let id = (p["id"] as? String).map { "x\(lineNo)-\($0)" } ?? "x\(lineNo)"
         let ptype = p["type"] as? String
+
+        // Attached side forks may physically copy the parent's history. The native
+        // boundary is injected after that copy, before the first actual side question.
+        if scope == .side {
+            if type == "response_item", ptype == "message", p["role"] as? String == "user",
+               let content = p["content"] as? [[String: Any]], content.contains(where: {
+                   $0["type"] as? String == "input_text" && ($0["text"] as? String)?.hasPrefix("Side conversation boundary.") == true
+               }) {
+                sideBoundarySeen = true
+                return []
+            }
+            if !sideBoundarySeen { return [] }
+        }
 
         if type == "compacted" || (type == "event_msg" && ptype == "context_compacted") {
             let record = type == "compacted" ? "compacted" : "event"
@@ -412,7 +426,7 @@ struct CodexTranscriptParser: TranscriptParser {
             return [Self.toolEntry(name: name, args: args, raw: rawInput, id: id, time: time)]
 
         case ("response_item", "function_call_output"), ("response_item", "custom_tool_call_output"):
-            guard scope == .subagent else { return [] }
+            guard scope == .subagent || scope == .side else { return [] }
             let output = CodexWorkParser.outputText(p["output"])
             guard !output.isEmpty else { return [] }
             return [ReaderEntry(id: id, kind: .tool, text: "Tool result", detail: String(output.prefix(12_000)), time: time)]
@@ -721,7 +735,7 @@ final class TranscriptFollower {
         defer { try? h.close() }
         do { try h.seek(toOffset: offset) } catch { return batch }
         let data: Data
-        if scope == .subagent { data = (try? h.read(upToCount: 4 << 20)) ?? Data() }
+        if scope == .subagent || scope == .side { data = (try? h.read(upToCount: 4 << 20)) ?? Data() }
         else { data = (try? h.readToEnd()) ?? Data() }
         offset += UInt64(data.count)
         var buf = partial.isEmpty ? data : partial + data

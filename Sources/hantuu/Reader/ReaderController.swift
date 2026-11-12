@@ -59,6 +59,13 @@ final class ReaderController {
         page.call("append", payload)
     }
 
+    /// Side answers grow in place. Keep the reader's scroll position and unchanged nodes.
+    func updateTranscript(id: String, entries: [ReaderEntry], base: String?, emptyText: String) {
+        let payload = ReaderPayload(chatID: id, entries: entries, emptyText: emptyText, base: base)
+        externalPayload = payload
+        page.call("reconcile", payload)
+    }
+
     func reload() {
         if let externalPayload { page.call("reset", externalPayload); return }
         let chat = model.selectedChat
