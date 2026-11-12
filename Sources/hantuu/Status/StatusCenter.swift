@@ -1,6 +1,7 @@
 import AppKit
 import Combine
 import CryptoKit
+import Darwin
 
 /// libghostty actions that matter for status (OSC 9;4 progress, command finished), posted by
 /// GhosttyApp on the main thread.
@@ -438,7 +439,60 @@ final class StatusCenter: ObservableObject {
     /// chat would read Working until its next turn.
     func stoppedFromReader(_ chat: Chat) {
         guard let t = trackers[chat.id], chat.activity == .working else { return }
+        // Drain already-written hooks before appending the observed interruption. Keeping
+        // it in the same app-owned stream lets replay preserve native event ordering.
+        ingest(t, notify: false)
+        guard t.state.activity == .working else { return }
+        if t.kind == .claude, let session = chat.sessionID, !session.isEmpty {
+            let file = AgentHooks.eventsFile(for: chat.id)
+            persistReaderStop(t, session: session, offset: LineTail.size(of: file), attempts: 20)
+        }
         apply(t, [OriginSignal(origin: .app, signal: .interrupted)], notify: false)
+    }
+
+    /// Use the hook writers' POSIX record lock and O_APPEND. A delayed write may only
+    /// target the exact event-stream position that was stopped, never a newer turn.
+    private func persistReaderStop(_ tracker: Tracker, session: String, offset: UInt64, attempts: Int) {
+        guard trackers[tracker.chat.id] === tracker, tracker.chat.sessionID == session,
+              !tracker.state.ended else { return }
+        let file = AgentHooks.eventsFile(for: tracker.chat.id)
+        let fd = Darwin.open(file.path, O_WRONLY | O_APPEND | O_CREAT | O_CLOEXEC, mode_t(0o600))
+        guard fd >= 0 else { Log.write("reader stop: could not open event stream chat=\(tracker.chat.id)"); return }
+        defer { Darwin.close(fd) }
+        // F_TLOCK does not block the UI while another hook is writing. Closing this
+        // descriptor releases the whole-file lock, including after the append moves it.
+        guard lockf(fd, F_TLOCK, 0) == 0 else {
+            guard attempts > 0 else { Log.write("reader stop: event stream remained locked chat=\(tracker.chat.id)"); return }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self, weak tracker] in
+                guard let self, let tracker else { return }
+                self.persistReaderStop(tracker, session: session, offset: offset, attempts: attempts - 1)
+            }
+            return
+        }
+        guard LineTail.size(of: file) == offset else {
+            Log.write("reader stop: newer event superseded checkpoint chat=\(tracker.chat.id)")
+            return
+        }
+        let record: [String: Any] = ["hantuu_event": "reader_interrupted", "session_id": session,
+                                     "timestamp": ISO8601DateFormatter().string(from: Date())]
+        guard var data = try? JSONSerialization.data(withJSONObject: record) else { return }
+        data.append(10)
+        let written = data.withUnsafeBytes { bytes -> Int in
+            var count = 0
+            while count < bytes.count {
+                let result = Darwin.write(fd, bytes.baseAddress!.advanced(by: count), bytes.count - count)
+                if result < 0 && errno == EINTR { continue }
+                guard result > 0 else { break }
+                count += result
+            }
+            return count
+        }
+        if written != data.count {
+            // Still under the hook lock: do not leave a partial JSON line in front of
+            // the provider's next record if disk space or another I/O error stopped us.
+            _ = ftruncate(fd, off_t(offset))
+            Log.write("reader stop: incomplete event write chat=\(tracker.chat.id)")
+        }
     }
 
     // MARK: Publishing

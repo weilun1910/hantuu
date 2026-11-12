@@ -35,9 +35,10 @@ extension SelfTest {
 
     @discardableResult
     static func writeSolidImage(to url: URL, color: NSColor, size: Int = 64, type: UTType) -> Bool {
-        guard let ctx = CGContext(data: nil, width: size, height: size, bitsPerComponent: 8, bytesPerRow: 0,
-                                  space: CGColorSpace(name: CGColorSpace.sRGB)!, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return false }
-        ctx.setFillColor((color.usingColorSpace(.sRGB) ?? color).cgColor)
+        guard let color = color.usingColorSpace(.sRGB), let space = CGColorSpace(name: CGColorSpace.sRGB),
+              let ctx = CGContext(data: nil, width: size, height: size, bitsPerComponent: 8, bytesPerRow: size * 4,
+                                  space: space, bitmapInfo: CGBitmapInfo.byteOrder32Big.rawValue | CGImageAlphaInfo.premultipliedLast.rawValue) else { return false }
+        ctx.setFillColor(red: color.redComponent, green: color.greenComponent, blue: color.blueComponent, alpha: color.alphaComponent)
         ctx.fill(CGRect(x: 0, y: 0, width: size, height: size))
         guard let img = ctx.makeImage(),
               let dest = CGImageDestinationCreateWithURL(url as CFURL, type.identifier as CFString, 1, nil) else { return false }
@@ -145,6 +146,7 @@ extension SelfTest {
         settings.showChatsAsReader = true
         let rm = ReaderModeController(model: model, mode: ReaderMode(settings: settings))
         rm.statusProvider = { center.state(of: $0.id) }
+        rm.onConfirmedStop = { [weak center] in center?.stoppedFromReader($0) }
         rm.install(in: host, top: host.topAnchor, above: tv)
         rm.sync(selected: chat)
         let kind: TranscriptKind = id == "codex" ? .codex : .claude

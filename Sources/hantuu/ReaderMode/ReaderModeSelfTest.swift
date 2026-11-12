@@ -1310,6 +1310,7 @@ extension SelfTest {
         host.addSubview(tv)
         let rm = ReaderModeController(model: model, mode: mode)
         rm.statusProvider = { center.state(of: $0.id) }
+        rm.onConfirmedStop = { [weak center] in center?.stoppedFromReader($0) }
         rm.install(in: host, top: host.topAnchor, above: tv)
         w.orderFrontRegardless()
         rm.sync(selected: chat)

@@ -51,7 +51,7 @@ enum HookLineParser {
     /// Main-agent hooks identify the conversation even if its startup hook was missed.
     static func session(_ line: Data) -> Session? {
         guard let obj = (try? JSONSerialization.jsonObject(with: line)) as? [String: Any],
-              obj["hook_event_name"] is String,
+              (obj["hook_event_name"] is String || obj["hantuu_event"] as? String == "reader_interrupted"),
               (obj["agent_id"] as? String).map({ $0.isEmpty }) ?? true else { return nil }
         let id = (obj["session_id"] as? String).flatMap { $0.isEmpty ? nil : $0 }
         let path = (obj["transcript_path"] as? String).flatMap { $0.isEmpty ? nil : ($0 as NSString).expandingTildeInPath }
@@ -61,6 +61,9 @@ enum HookLineParser {
 
     static func parse(_ line: Data, cwd: String?) -> [OriginSignal] {
         guard let obj = (try? JSONSerialization.jsonObject(with: line)) as? [String: Any] else { return [] }
+        if obj["hantuu_event"] as? String == "reader_interrupted", let session = obj["session_id"] as? String, !session.isEmpty {
+            return [OriginSignal(origin: .app, signal: .interrupted)]
+        }
         if let event = obj["hook_event_name"] as? String {
             return claude(event, obj, cwd: cwd).map { OriginSignal(origin: .hook, signal: $0) }
         }

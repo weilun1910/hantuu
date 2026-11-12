@@ -49,6 +49,15 @@ extension SelfTest {
         let codexEntries = codexLines.flatMap { codex.parse(line: Data($0.utf8)) }
         check("recall: Claude filters tool, meta and sidechain entries", ComposerPromptHistory.prompts(from: claudeEntries) == ["human question"])
         check("recall: Codex filters system and tool entries", ComposerPromptHistory.prompts(from: codexEntries) == ["human question"])
+        for (provider, text) in [("claude", "[Image #1] inspect the fixture"), ("codex", "inspect the fixture\n[Image 1]")] {
+            let entry = ReaderEntry(id: provider, kind: .user, text: text, images: ["/fixture.png"])
+            check("recall: \(provider) recalls human text without attachment chip markers",
+                  ComposerPromptHistory.prompts(from: [entry]) == ["inspect the fixture"])
+        }
+        check("recall: literal image marker without an attachment remains human text",
+              ComposerPromptHistory.prompts(from: [ReaderEntry(id: "literal", kind: .user, text: "Explain [Image #1]")]) == ["Explain [Image #1]"])
+        check("recall: image-only sends do not become empty history rows",
+              ComposerPromptHistory.prompts(from: [ReaderEntry(id: "image", kind: .user, text: "[Image #1]", images: ["/fixture.png"]) ]).isEmpty)
 
         check("mention: email addresses never open picker", ComposerMentionQuery.parse("x@y", selection: NSRange(location: 3, length: 0)) == nil)
         let query = ComposerMentionQuery.parse("look @Source rest", selection: NSRange(location: 9, length: 0))

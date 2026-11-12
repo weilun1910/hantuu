@@ -67,6 +67,10 @@ extension SelfTest {
         let notify = signals([#"{"type":"agent-turn-complete","thread-id":"th","turn-id":"t1","cwd":"/Users/test/proj","input-messages":["hi"],"last-assistant-message":"Done here."}"#])
         check("status: Codex notify parsed as a turn end", notify == [OriginSignal(origin: .notify, signal: .codexTurnComplete(id: "t1", lastMessage: "Done here."))])
         check("status: junk lines ignored", signals(["not json", "{}", #"{"hook_event_name":"FileChanged"}"#]).isEmpty)
+        let readerStop = Data(#"{"hantuu_event":"reader_interrupted","session_id":"s1"}"#.utf8)
+        check("status: app Stop checkpoint keeps its origin and native session",
+              HookLineParser.parse(readerStop, cwd: cwd) == [OriginSignal(origin: .app, signal: .interrupted)] &&
+              HookLineParser.session(readerStop)?.id == "s1")
 
         // Transcripts: only interrupts and declined prompts.
         let decline = #"{"type":"user","uuid":"r","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_A","content":"The user doesn't want to proceed with this tool use. The tool use was rejected.","is_error":true}]}}"#
@@ -447,6 +451,40 @@ extension SelfTest {
         center2.appIsActive = { false }
         center2.start(model: model2, live: false)
         check("engine: a running chat found at launch replays its state without notifying", c.activity == .needsPermission && rec2.posted.isEmpty)
+
+        let stopped = Chat(projectID: project.id, agentID: "claude")
+        stopped.sessionID = "stopped-session"
+        let stopModel = AppModel()
+        stopModel.projects = [project]
+        stopModel.chats = [stopped]
+        let stopCenter = StatusCenter()
+        stopCenter.notifier = NoticeRecorder()
+        stopCenter.start(model: stopModel, live: false)
+        let stopFile = AgentHooks.eventsFile(for: stopped.id)
+        let startRecord = #"{"hook_event_name":"UserPromptSubmit","session_id":"stopped-session"}"#
+        append(stopFile, [startRecord])
+        stopCenter.poll()
+        check("engine: interrupted relaunch fixture begins with an active turn", stopped.activity == .working)
+        stopCenter.stoppedFromReader(stopped)
+        check("engine: confirmed reader Stop becomes Idle immediately", stopped.activity == .idle && stopCenter.state(of: stopped.id)?.turnActive == false)
+        let savedStop = (try? Data(contentsOf: stopFile)) ?? Data()
+        check("engine: confirmed reader Stop is recorded in the owned event stream",
+              savedStop.split(separator: 10).contains { HookLineParser.parse(Data($0), cwd: cwd).contains(OriginSignal(origin: .app, signal: .interrupted)) })
+        let reattached = Chat(id: stopped.id, projectID: project.id, agentID: "claude")
+        reattached.sessionID = "stopped-session"
+        let reloaded = AppModel()
+        reloaded.projects = [project]
+        reloaded.chats = [reattached]
+        let replayCenter = StatusCenter()
+        let replayNotices = NoticeRecorder()
+        replayCenter.notifier = replayNotices
+        replayCenter.start(model: reloaded, live: false)
+        check("engine: relaunch preserves a stopped turn without a native Stop hook",
+              reattached.activity == .idle && replayCenter.state(of: reattached.id)?.turnActive == false && replayNotices.posted.isEmpty)
+        append(stopFile, [startRecord])
+        replayCenter.poll()
+        check("engine: a later native prompt supersedes the reader Stop checkpoint",
+              reattached.activity == .working && replayCenter.state(of: reattached.id)?.turnActive == true)
     }
 
     // MARK: Snapshots

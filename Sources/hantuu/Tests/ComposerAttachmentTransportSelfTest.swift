@@ -1,4 +1,5 @@
 import AppKit
+import ImageIO
 import UniformTypeIdentifiers
 
 extension SelfTest {
@@ -8,9 +9,24 @@ extension SelfTest {
         try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         let image = folder.appendingPathComponent("opaque-live-fixture.png")
         let wroteImage = writeSolidImage(to: image, color: .blue, size: 128, type: .png)
-        let pixel = (try? Data(contentsOf: image)).flatMap { NSBitmapImageRep(data: $0)?.colorAt(x: 0, y: 0)?.usingColorSpace(.sRGB) }
+        // NSBitmapImageRep can label this sRGB PNG as calibrated RGB.
+        // Converting colorAt to sRGB then changes pure blue to (0.017, 0.198, 1).
+        // Decode through ImageIO into an explicit RGBA sRGB buffer instead. At alpha 1
+        // premultiplied and straight RGB are identical; a transparent pixel still fails.
+        var pixel = [UInt8](repeating: 0, count: 4)
+        let decodedPixel = pixel.withUnsafeMutableBytes { bytes -> Bool in
+            guard let source = CGImageSourceCreateWithURL(image as CFURL, nil),
+                  let decoded = CGImageSourceCreateImageAtIndex(source, 0, nil),
+                  let space = CGColorSpace(name: CGColorSpace.sRGB),
+                  let context = CGContext(data: bytes.baseAddress, width: 1, height: 1, bitsPerComponent: 8, bytesPerRow: 4,
+                                          space: space, bitmapInfo: CGBitmapInfo.byteOrder32Big.rawValue | CGImageAlphaInfo.premultipliedLast.rawValue) else { return false }
+            context.setBlendMode(.copy)
+            context.draw(decoded, in: CGRect(x: 0, y: 0, width: 1, height: 1))
+            return true
+        }
         check("attachments: live image fixture is opaque blue rather than transparent black",
-              wroteImage && pixel.map { $0.alphaComponent > 0.99 && $0.blueComponent > 0.99 && $0.redComponent < 0.01 } == true)
+              wroteImage && decodedPixel && Double(pixel[3]) / 255 > 0.99 && Double(pixel[2]) / 255 > 0.99 && Double(pixel[0]) / 255 < 0.01,
+              "wrote=\(wroteImage), decoded=\(decodedPixel), sRGB premultiplied RGBA8=\(pixel)")
         let file = folder.appendingPathComponent("fixture.txt")
         try? Data("fixture".utf8).write(to: file)
         let attachment = ComposerAttachment(url: file, preparation: .failed("A fixture failure"))
@@ -57,6 +73,56 @@ extension SelfTest {
         let replayed = pending.reconcile(entries)
         check("attachments: Claude command image acknowledges its pending message once",
               acknowledged.first?.replacesPendingID == "pending-plan" && pending.isEmpty && replayed.first?.replacesPendingID == nil)
+        // Real 2.1.322 /plan line shapes: command XML as a string, local output, then
+        // a turnCompanion containing only an absolute source reference. No base64 block.
+        func encodeRecord(_ object: [String: Any]) -> Data { try! JSONSerialization.data(withJSONObject: object) }
+        let commandRecord: [String: Any] = ["type": "user", "uuid": "command", "promptId": "prompt", "sessionId": "session",
+            "message": ["role": "user", "content": "<command-name>/plan</command-name>\n<command-message>plan</command-message>\n<command-args>Inspect the fixture\nDo not change files. [Image #1]</command-args>"]]
+        let outputRecord: [String: Any] = ["type": "user", "uuid": "output", "parentUuid": "command", "promptId": "prompt", "sessionId": "session",
+            "message": ["role": "user", "content": "<local-command-stdout>Enabled plan mode</local-command-stdout>"]]
+        let companion: [String: Any] = ["type": "user", "uuid": "source", "parentUuid": "output", "promptId": "prompt", "sessionId": "session",
+            "isMeta": true, "turnCompanion": true,
+            "message": ["role": "user", "content": [["type": "text", "text": "[Image: source: \(image.path)]"]]]]
+        var sourceParser = ClaudeTranscriptParser()
+        let invocation = sourceParser.parse(line: encodeRecord(commandRecord))
+        let output = sourceParser.parse(line: encodeRecord(outputRecord))
+        let sourceEntry = sourceParser.parse(line: encodeRecord(companion))
+        let merged = ReaderEntries.merging(invocation + output, sourceEntry)
+        check("attachments: Claude source companion upgrades its original command without duplication",
+              sourceEntry.first?.id == "command" && sourceEntry.first?.kind == .user && sourceEntry.first?.images == [image.path] &&
+              merged.filter { $0.id == "command" }.count == 1 && merged.count == 2)
+        pending.enqueue(id: "source-plan", text: command, files: [.init(path: image.path, image: true)], agentID: "claude", existing: [])
+        pending.markSubmitted(id: "source-plan")
+        _ = pending.reconcile(invocation + output)
+        check("attachments: command marker alone never acknowledges a missing image", !pending.isEmpty)
+        check("attachments: owned Claude source reference acknowledges the image command once",
+              pending.reconcile(sourceEntry).first?.replacesPendingID == "source-plan" && pending.isEmpty &&
+              pending.reconcile(sourceEntry).first?.replacesPendingID == nil)
+        let receiptData = [commandRecord, outputRecord, companion].map { encodeRecord($0) + Data([10]) }.reduce(Data(), +)
+        let sourceReceipt = LiveCheckRules.imageReceipt(receiptData, agent: "claude", token: "Inspect the fixture")
+        check("attachments: diagnostic distinguishes source reference from native image block",
+              sourceReceipt.count == 0 && sourceReceipt.sourceReferences == [image.path])
+        for (field, value) in [("promptId", "another-prompt"), ("sessionId", "another-session"), ("parentUuid", "unrelated")] {
+            var parser = ClaudeTranscriptParser()
+            _ = parser.parse(line: encodeRecord(commandRecord))
+            _ = parser.parse(line: encodeRecord(outputRecord))
+            var wrong = companion
+            wrong[field] = value
+            check("attachments: source companion rejects wrong \(field)", parser.parse(line: encodeRecord(wrong)).isEmpty)
+        }
+        var missingFlag = companion
+        missingFlag.removeValue(forKey: "turnCompanion")
+        var flagParser = ClaudeTranscriptParser()
+        _ = flagParser.parse(line: encodeRecord(commandRecord))
+        _ = flagParser.parse(line: encodeRecord(outputRecord))
+        check("attachments: unrelated meta never supplies a command image", flagParser.parse(line: encodeRecord(missingFlag)).isEmpty)
+        var endedParser = ClaudeTranscriptParser()
+        _ = endedParser.parse(line: encodeRecord(commandRecord))
+        _ = endedParser.parse(line: encodeRecord(outputRecord))
+        _ = endedParser.parse(line: encodeRecord(["type": "assistant", "uuid": "answer", "message": ["content": [["type": "text", "text": "Done"]]]]))
+        check("attachments: a later source cannot attach after the assistant answered", endedParser.parse(line: encodeRecord(companion)).isEmpty)
+        check("attachments: command-image history recalls the command without native chips",
+              ComposerPromptHistory.prompts(from: merged) == [command])
         var codex = CodexTranscriptParser()
         let codexRecord: [String: Any] = ["type": "response_item", "payload": ["type": "message", "role": "user", "content": [
             ["type": "input_text", "text": "Inspect the fixture\nDo not change files. [Image #1]"],

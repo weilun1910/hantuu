@@ -66,6 +66,14 @@ struct ClaudeTranscriptParser: TranscriptParser {
     private var queuedSourceIDs = Set<String>()
     private var userMessageIDs = Set<String>()
     private var toolNames: [String: String] = [:]   // tool_use id -> name
+    private struct CommandImages {
+        var entry: ReaderEntry
+        var promptID: String
+        var sessionID: String
+        var parentID: String
+        var expectedCount: Int
+    }
+    private var commandImages: CommandImages?
 
     private static let noisePrefixes = [
         "<system-reminder>", "<task-notification>", "<local-command-stdout>", "<local-command-stderr>",
@@ -92,17 +100,21 @@ struct ClaudeTranscriptParser: TranscriptParser {
             if queuedSourceIDs.contains(uuid) { return [] }
             userMessageIDs.insert(uuid)
             if obj["isCompactSummary"] as? Bool == true {
+                commandImages = nil
                 if compactBoundarySeen { compactBoundarySeen = false; return [] }
                 return [ReaderEntry(id: uuid, kind: .notice, text: "Conversation compacted", time: time)]
             }
-            if obj["isMeta"] as? Bool == true { return [] }
+            if obj["isMeta"] as? Bool == true { return commandImageCompanion(obj, id: uuid) }
             guard let msg = obj["message"] as? [String: Any] else { return [] }
-            return parseUser(msg["content"], id: uuid, time: time)
+            let entries = parseUser(msg["content"], id: uuid, time: time)
+            rememberCommandImages(obj, entries: entries, id: uuid)
+            return entries
 
         case "attachment":
             return parseQueuedCommand(obj, id: uuid, time: time)
 
         case "assistant":
+            commandImages = nil
             guard let msg = obj["message"] as? [String: Any] else { return [] }
             if obj["isApiErrorMessage"] as? Bool == true {
                 let text = Self.textOf(msg["content"]) ?? "API error"
@@ -114,6 +126,7 @@ struct ClaudeTranscriptParser: TranscriptParser {
             let level = obj["level"] as? String
             let subtype = obj["subtype"] as? String
             if subtype == "compact_boundary" {
+                commandImages = nil
                 compactBoundarySeen = true
                 return [ReaderEntry(id: uuid, kind: .notice, text: "Conversation compacted", time: time)]
             }
@@ -126,6 +139,60 @@ struct ClaudeTranscriptParser: TranscriptParser {
         default:
             return []
         }
+    }
+
+    /// Claude 2.1.322 can omit /plan's actual image block and instead append a
+    /// turnCompanion source reference after local-command-stdout. Upgrade the original
+    /// command entry by identity, never create a second human prompt or infer a base64
+    /// image. Parent, prompt and session ownership must all match the observed chain.
+    private mutating func rememberCommandImages(_ object: [String: Any], entries: [ReaderEntry], id: String) {
+        let content = (object["message"] as? [String: Any])?["content"] as? String ?? ""
+        if var context = commandImages, content.hasPrefix("<local-command-stdout>"),
+           object["parentUuid"] as? String == context.parentID,
+           object["promptId"] as? String == context.promptID, object["sessionId"] as? String == context.sessionID {
+            context.parentID = id
+            commandImages = context
+            return
+        }
+        commandImages = nil
+        guard content.hasPrefix("<command-name>"), let entry = entries.first,
+              entry.kind == .notice, entry.text.hasPrefix("Ran /"),
+              let prompt = object["promptId"] as? String, !prompt.isEmpty,
+              let session = object["sessionId"] as? String, !session.isEmpty else { return }
+        let command = String(entry.text.dropFirst(4))
+        let pattern = #"\[Image #\d+\]"#
+        let count = (try? NSRegularExpression(pattern: pattern))?.numberOfMatches(
+            in: command, range: NSRange(location: 0, length: (command as NSString).length)
+        ) ?? 0
+        guard count > 0 else { return }
+        var user = entry
+        user.kind = .user
+        user.text = command
+        user.author = scope == .subagent ? "Parent" : nil
+        commandImages = CommandImages(entry: user, promptID: prompt, sessionID: session, parentID: id, expectedCount: count)
+    }
+
+    private mutating func commandImageCompanion(_ object: [String: Any], id: String) -> [ReaderEntry] {
+        guard var context = commandImages else { return [] }
+        commandImages = nil
+        guard object["turnCompanion"] as? Bool == true,
+              object["promptId"] as? String == context.promptID, object["sessionId"] as? String == context.sessionID,
+              object["parentUuid"] as? String == context.parentID,
+              let blocks = (object["message"] as? [String: Any])?["content"] as? [[String: Any]], !blocks.isEmpty else { return [] }
+        let prefix = "[Image: source: "
+        var paths: [String] = []
+        for block in blocks {
+            guard block["type"] as? String == "text", let text = block["text"] as? String,
+                  text.hasPrefix(prefix), text.hasSuffix("]") else { return [] }
+            let path = String(text.dropFirst(prefix.count).dropLast())
+            guard path.hasPrefix("/"), !path.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }) else { return [] }
+            paths.append(path)
+        }
+        context.entry.images += paths
+        guard context.entry.images.count <= context.expectedCount else { return [] }
+        context.parentID = id
+        commandImages = context
+        return context.entry.images.count == context.expectedCount ? [context.entry] : []
     }
 
     private mutating func parseQueuedCommand(_ obj: [String: Any], id: String, time: String?) -> [ReaderEntry] {

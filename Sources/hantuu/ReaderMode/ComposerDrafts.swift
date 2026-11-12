@@ -87,11 +87,16 @@ enum ComposerPromptHistory {
     static func prompts(from entries: [ReaderEntry]) -> [String] {
         entries.compactMap { entry in
             guard entry.kind == .user, entry.pending != true, !entry.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
-            let value = entry.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            // These are native attachment chips, not words the person typed. Recall text
+            // alone must not turn a chip into a literal [Image #1] in the next prompt.
+            let text = entry.images.isEmpty ? entry.text : entry.text.replacingOccurrences(
+                of: #"\[Image #\d+\]|</?image[^>]*>|\[/?Image \d+\]"#, with: "", options: .regularExpression
+            ).trimmingCharacters(in: .whitespacesAndNewlines)
+            let value = text.trimmingCharacters(in: .whitespacesAndNewlines)
             let excluded = ["<system-reminder>", "<task-notification>", "<environment_context>", "<INSTRUCTIONS>", "# AGENTS.md instructions", "<user_instructions>", "<turn_aborted>", "<subagent_notification>"]
-            guard !excluded.contains(where: value.hasPrefix) else { return nil }
+            guard !value.isEmpty, !excluded.contains(where: value.hasPrefix) else { return nil }
             // Keep repeated human prompts: equality is not message identity.
-            return entry.text
+            return text
         }
     }
 }

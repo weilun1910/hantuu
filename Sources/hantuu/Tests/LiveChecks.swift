@@ -183,13 +183,24 @@ enum LiveCheckRules {
         })
     }
 
-    /// Inspect canonical user records, not pending bubbles, path echoes or assistant claims.
+    /// Inspect canonical user records and owned command source companions, never pending
+    /// bubbles, free path echoes or assistant claims.
     /// Summaries deliberately omit image data and are safe to put in a failure log.
-    static func imageReceipt(_ data: Data, agent: String, token: String) -> (count: Int, summaries: [String]) {
+    static func imageReceipt(_ data: Data, agent: String, token: String) -> (count: Int, sourceReferences: [String], summaries: [String]) {
         var count = 0
+        var sourceReferences: [String] = []
         var summaries: [String] = []
+        var claude = ClaudeTranscriptParser()
         for record in data.split(separator: 10) {
-            guard let object = (try? JSONSerialization.jsonObject(with: Data(record))) as? [String: Any] else { continue }
+            let line = Data(record)
+            if agent == "claude" {
+                for entry in claude.parse(line: line) where entry.kind == .user && entry.text.contains(token) {
+                    let sources = entry.images.filter { $0.hasPrefix("/") }
+                    sourceReferences += sources
+                    if !sources.isEmpty { summaries.append("command image source references=\(sources)") }
+                }
+            }
+            guard let object = (try? JSONSerialization.jsonObject(with: line)) as? [String: Any] else { continue }
             let message: [String: Any]?
             if agent == "claude", object["type"] as? String == "user", object["isMeta"] as? Bool != true,
                object["isSidechain"] as? Bool != true {
@@ -215,7 +226,7 @@ enum LiveCheckRules {
             count += images.count
             summaries.append("user text=\(String(text.prefix(600)).debugDescription), image blocks=\(images)")
         }
-        return (count, summaries)
+        return (count, sourceReferences, summaries)
     }
 
     /// Following is about new transcript identity, even when a model repeats old prose.
@@ -652,6 +663,7 @@ private final class LiveCheckSession {
         let rm = ReaderModeController(model: app, mode: mode)
         rm.commandDiscoveryEnabled = false
         rm.statusProvider = { [weak center] in center?.state(of: $0.id) }
+        rm.onConfirmedStop = { [weak center] in center?.stoppedFromReader($0) }
         rm.permitsSubmit = { [weak self] _ in
             guard let self else { return false }
             // The command's own completion list is expected before submitting /model.
@@ -1782,7 +1794,7 @@ private final class LiveCheckSession {
             report("image fixture written in test output", false); return
         }
         let imageToken = "image" + UUID().uuidString.prefix(8).lowercased()
-        let imagePrompt = "Without tools, inspect the attached test image and reply only \(imageToken)."
+        let imagePrompt = "Without tools, look at the attached test image. The reply token \(imageToken) is provided in this text. Reply only with that token."
         let beforeImageIDs = Set(chat.allEntries.map(\.id))
         var nativeImageSeen = false
         var imageTransport: [String] = []
@@ -1809,8 +1821,11 @@ private final class LiveCheckSession {
         let imageDiagnosis = "fixture=128x128 opaque blue; transport=\(imageTransport); transcript=\(receipt.summaries); reader user image=\(userImage); pending=\(chat.pendingMessages.entries.map { $0.pendingDetail ?? $0.pendingState ?? "unknown" }); assistant=\(chat.allEntries.last(where: { !beforeImageIDs.contains($0.id) && $0.kind == .assistant })?.text.prefix(700) ?? "missing"); TUI=\(String(screen.suffix(1600)))"
         report("image receives native acknowledgement before submission", nativeImageSeen, imageDiagnosis)
         report("image is a native user transcript block and reader image", imageSent && receipt.count > 0 && userImage, imageDiagnosis)
-        report("image prompt receives requested reply", imageFinished && reply(imageToken), imageDiagnosis)
-        guard imageFinished, nativeImageSeen, receipt.count > 0, userImage, reply(imageToken) else { return }
+        let exactImageReply = chat.allEntries.contains {
+            !beforeImageIDs.contains($0.id) && $0.kind == .assistant && $0.text.trimmingCharacters(in: .whitespacesAndNewlines) == imageToken
+        }
+        report("image prompt receives requested reply", imageFinished && exactImageReply, imageDiagnosis)
+        guard imageFinished, nativeImageSeen, receipt.count > 0, userImage, exactImageReply else { return }
 
         reader.refresh()
         reader.composer.textView.text = draft
@@ -1826,7 +1841,8 @@ private final class LiveCheckSession {
             return true
         }
         let recalled = recallKey(126, String(UnicodeScalar(NSUpArrowFunctionKey)!))
-        report("Up recalls actual latest user prompt", recalled && reader.composer.textView.string == imagePrompt)
+        report("Up recalls actual latest user prompt", recalled && reader.composer.textView.string == imagePrompt,
+               "key dispatched=\(recalled), expected=\(imagePrompt.debugDescription), box=\(reader.composer.textView.string.debugDescription), history=\(reader.composer.textView.promptHistory.map { String($0.prefix(600)).debugDescription }), selection=\(reader.composer.textView.selectedRange()), editable=\(reader.composer.textView.isEditable), transcript=\(chat.transcriptPath ?? "missing")")
         reader.composer.textView.setSelectedRange(NSRange(location: (reader.composer.textView.string as NSString).length, length: 0))
         let returnedDraft = recallKey(125, String(UnicodeScalar(NSDownArrowFunctionKey)!))
         report("Down restores draft and caret without sending", returnedDraft && reader.composer.textView.string == draft &&
@@ -1883,10 +1899,15 @@ private final class LiveCheckSession {
                restoredChat.pendingMessages.stage(id: queuedID) == .waiting && countUser(queuedPrompt) == 0)
         guard stillQuiet, let activeReader = self.reader else { return }
         let planReady = wait(10) { activeReader.composerMode == .ready && !activeReader.isTyping }
-        guard planReady, safe(),
-              let newControls = descendants(activeReader.root).compactMap({ $0 as? ComposerAgentControlsView }).first,
-              let planButton = descendants(newControls).compactMap({ $0 as? NSButton }).first(where: { $0.tag == ComposerAgentControlAction.plan.rawValue }),
-              planButton.isEnabled else { report("Plan control available after relaunch", false); return }
+        let newControls = descendants(activeReader.root).compactMap({ $0 as? ComposerAgentControlsView }).first
+        let planButton = newControls.flatMap { controls in
+            descendants(controls).compactMap({ $0 as? NSButton }).first(where: { $0.tag == ComposerAgentControlAction.plan.rawValue })
+        }
+        let planAvailable = planReady && safe() && planButton?.isEnabled == true
+        let state = center?.state(of: restoredChat.id)
+        report("Plan control available after relaunch", planAvailable,
+               "ready=\(planReady), mode=\(String(describing: activeReader.composerMode)), typing=\(activeReader.isTyping), activity=\(restoredChat.activity.rawValue), detail=\(restoredChat.activityDetail.debugDescription), turn active=\(state?.turnActive == true), waits=\(state?.waits.count ?? 0), input review=\(restoredChat.pendingMessages.inputNeedsReview), controls found=\(newControls != nil), button found=\(planButton != nil), enabled=\(planButton?.isEnabled == true), session=\(restoredChat.sessionID ?? "missing"), TUI=\(String(screen.suffix(1800)).debugDescription)")
+        guard planAvailable, let newControls, let planButton else { return }
         planButton.performClick(nil)
         let enteredPlan = wait(15, allowingMenu: true) {
             guard !activeReader.isTyping else { return false }
@@ -2009,12 +2030,21 @@ private final class LiveCheckSession {
                    "Requires native mode plus reply, or a new provider compaction event. Assistant agreement alone cannot pass. \(diagnosis)")
             if attachImage {
                 report("native image chip acknowledged before command submission", nativeImageSeen, diagnosis)
-                report("command image is a native user transcript block", receipt.count > 0, diagnosis)
+                if agent == "claude" {
+                    // 2.1.322 /plan records a turnCompanion source reference, not a
+                    // canonical user image block. Neither path proves model perception.
+                    report("command image has a native block or owned source reference",
+                           receipt.count > 0 || receipt.sourceReferences.contains(imageURL.path), diagnosis)
+                } else {
+                    report("command image is a native user transcript block", receipt.count > 0, diagnosis)
+                }
                 let literal = String(decoding: try! JSONEncoder().encode(token), as: UTF8.self)
-                let renderedImage = reader.reader.map {
-                    SelfTest.js($0.page, "Array.from(document.querySelectorAll('section.entry.user:not(.pending)')).some(e => e.innerText.includes(\(literal)) && e.querySelector('img'))") as? Bool == true
-                } == true
-                report("command image remains visible in its reader message", renderedImage, diagnosis)
+                let visibleImage = wait(10) {
+                    reader.reader.map {
+                        SelfTest.js($0.page, "Array.from(document.querySelectorAll('section.entry.user:not(.pending)')).some(e => e.innerText.includes(\(literal)) && Array.from(e.querySelectorAll('img')).some(i => i.complete && i.naturalWidth > 0))") as? Bool == true
+                    } == true
+                }
+                report("command image remains visible in its reader message", visibleImage, diagnosis)
             }
             guard dispatched else {
                 report("no automatic command retry or confirmation", true,

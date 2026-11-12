@@ -123,6 +123,8 @@ final class ReaderModeController: NSObject {
     /// stay Working. Once the screen shows the turn has stopped, reader mode believes the
     /// screen.
     private var stoppedAt: [UUID: Date] = [:]
+    /// Tests with an isolated StatusCenter must confirm Stop on that same owner.
+    var onConfirmedStop: (Chat) -> Void = { StatusCenter.shared.stoppedFromReader($0) }
     /// What reader mode typed into each chat during its current turn. A stopped Claude Code
     /// turn puts these back in its own input box, where the next message would join them.
     private var sentThisTurn: [UUID: [String]] = [:]
@@ -636,7 +638,7 @@ final class ReaderModeController: NSObject {
             } else if !screen.busy && screen.ready {
                 activity = .idle
                 // So the sidebar and the header stop reading Working too.
-                StatusCenter.shared.stoppedFromReader(chat)
+                onConfirmedStop(chat)
                 clearRestoredInput(chat)
             }
         }
