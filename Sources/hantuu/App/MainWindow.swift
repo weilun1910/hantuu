@@ -64,6 +64,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
     private var frameRestored = false
     private var paneFloors: [NSLayoutConstraint] = []
     private var windowMinimumWidth: NSLayoutConstraint!
+    private var windowWidthDuringLayout: NSLayoutConstraint!
 
     init(model: AppModel, readerMode: ReaderMode = .shared, review: ReviewCenter = .shared, window suppliedWindow: NSWindow? = nil) {
         self.model = model
@@ -120,9 +121,10 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
             paneFloors.append(constraint)
         }
         windowMinimumWidth = split.view.widthAnchor.constraint(greaterThanOrEqualToConstant: WindowLayout.readerMinimum)
+        windowWidthDuringLayout = split.view.widthAnchor.constraint(equalToConstant: w.frame.width)
         NSLayoutConstraint.activate([windowMinimumWidth!, split.view.heightAnchor.constraint(greaterThanOrEqualToConstant: 460)])
         split.onResize = { [weak self] in self?.splitDidResize() }
-        mainItem.collapseBehavior = .preferResizingSiblingsWithFixedSplitView
+        mainItem.collapseBehavior = .useConstraints
         (split.splitView as? ThinSplitView)?.onDividerDrag = { [weak self] active in
             guard let self else { return }
             if active {
@@ -147,9 +149,10 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         }
         mainArea.onFaceLayoutChange = { [weak self] in self?.applyLayout() }
 
-        // Collapsing a pane resizes its neighbours, never the window.
-        sidebarItem.collapseBehavior = .preferResizingSiblingsWithFixedSplitView
-        panelItem.collapseBehavior = .preferResizingSiblingsWithFixedSplitView
+        // The policy supplies the pane widths. Native cached uncollapsed widths must not
+        // enlarge the window when a single-surface layout changes which pane is visible.
+        sidebarItem.collapseBehavior = .useConstraints
+        panelItem.collapseBehavior = .useConstraints
         sidebarItem.isCollapsed = !model.sidebarVisible
         panelItem.isCollapsed = !model.panelVisible
         restoreFrame()
@@ -231,7 +234,10 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
     func applyLayout(availableWidth: CGFloat? = nil) {
         guard frameRestored, !syncingCollapse, !dragging else { return }
         syncingCollapse = true
-        defer { syncingCollapse = false }
+        defer {
+            windowWidthDuringLayout.isActive = false
+            syncingCollapse = false
+        }
         if model.panelVisible && (!lastPanelVisible || model.selectedCodeTabID != lastDocumentID) {
             showPanelWhenSingle = true
         }
@@ -252,19 +258,25 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         let result = WindowLayout.resolve(input)
         effectiveLayout = result
         autoHidden = result.sidebarAutoHidden && !focusPanel
-        // Collapse before raising the visible face's floor, avoiding an intermediate
-        // impossible three-column layout when switching from Reader to Terminal.
+        // Collapse and expansion are one fixed-width transaction. In particular, keep
+        // one pane visible while switching between Chat-only and Panel-only layouts.
+        // Collapsing the last pane first would restore native cached widths into an
+        // empty split, potentially growing the window on every subsequent switch.
+        let minimum = minimumWindowSize
+        windowMinimumWidth.constant = minimum.width
+        windowWidthDuringLayout.constant = max(minimum.width, window?.contentView?.bounds.width ?? sv.bounds.width)
+        windowWidthDuringLayout.isActive = true
         NSLayoutConstraint.deactivate(paneFloors)
-        sidebarItem.isCollapsed = result.sidebar == 0
-        panelItem.isCollapsed = result.panel == 0
-        mainItem.isCollapsed = result.chat == 0
+        let items = [sidebarItem!, mainItem!, panelItem!]
+        let visible = [result.sidebar > 0, result.chat > 0, result.panel > 0]
+        let keeper = result.chat > 0 ? mainItem! : panelItem!
+        if keeper.isCollapsed { keeper.isCollapsed = false }
+        for (item, shown) in zip(items, visible) where !shown && !item.isCollapsed { item.isCollapsed = true }
+        for (item, shown) in zip(items, visible) where shown && item.isCollapsed { item.isCollapsed = false }
         paneFloors[1].constant = floor
         paneFloors[2].constant = input.panelMinimum
-        for (constraint, visible) in zip(paneFloors, [result.sidebar > 0, result.chat > 0, result.panel > 0]) {
-            constraint.isActive = visible
-        }
-        windowMinimumWidth.constant = minimumWindowSize.width
-        window?.minSize = minimumWindowSize
+        for (constraint, shown) in zip(paneFloors, visible) { constraint.isActive = shown }
+        window?.minSize = minimum
         sv.adjustSubviews()
         sv.layoutSubtreeIfNeeded()
         if result.sidebar > 0 { sv.setPosition(result.sidebar, ofDividerAt: 0) }
@@ -330,6 +342,8 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
             model.panelWidth = Double(Self.defaultPanelWidth)
             model.sidebarWidth = 248
             focusPanel = false
+            autoHidden = false
+            showPanelWhenSingle = true
             model.scheduleSave()
         }
         applyLayout()

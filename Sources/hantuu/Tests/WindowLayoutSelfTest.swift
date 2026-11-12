@@ -16,9 +16,13 @@ extension SelfTest {
         Paths.dataDir = root.appendingPathComponent("data", isDirectory: true)
         Paths.ensure(Paths.dataDir)
         defer { Paths.dataDir = previousData }
-        for provider in ["claude", "codex"] { compactReaderChecks(root, provider: provider) }
+        let documents = layoutDocuments(root)
+        for provider in ["claude", "codex"] {
+            compactReaderChecks(root, provider: provider)
+            singlePaneTransitionChecks(root, provider: provider, documents: documents)
+        }
         if ProcessInfo.processInfo.environment["HANTUU_LAYOUT_SNAPSHOTS"] == "1" {
-            layoutWindowSnapshots(root)
+            layoutWindowSnapshots(root, documents: documents)
         } else {
             print("SKIP  whole-window layout matrix: set HANTUU_LAYOUT_SNAPSHOTS=1 before layout acceptance")
         }
@@ -222,7 +226,12 @@ extension SelfTest {
         check("layout \(provider): terminal face takes its real viewport", abs(terminal.frame.width - main.view.bounds.width) < 1)
     }
 
-    private static func layoutWindowSnapshots(_ root: URL) {
+    private static func layoutSnapshotFrame(_ size: NSSize) -> NSRect {
+        let screen = NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
+        return NSRect(x: screen.minX + 20, y: screen.minY + 20, width: size.width, height: size.height)
+    }
+
+    private static func layoutDocuments(_ root: URL) -> (pdf: URL, code: URL) {
         let pdf = root.appendingPathComponent("layout-document.pdf")
         let code = root.appendingPathComponent("layout-code.swift")
         try? (0..<90).map { "let section\($0) = \"A long code line remains horizontally scrollable in the viewer.\"" }.joined(separator: "\n").write(to: code, atomically: true, encoding: .utf8)
@@ -242,6 +251,74 @@ extension SelfTest {
             }
             context.closePDF()
         }
+        return (pdf, code)
+    }
+
+    private static func singlePaneTransitionChecks(_ root: URL, provider: String, documents: (pdf: URL, code: URL)) {
+        guard let (model, chat, mode, terminal) = layoutFixture(root, provider: provider) else { return }
+        let window = NSWindow(contentRect: layoutSnapshotFrame(NSSize(width: 1280, height: 832)),
+            styleMask: [.titled, .closable, .resizable, .fullSizeContentView], backing: .buffered, defer: false)
+        let controller = MainWindowController(model: model, readerMode: mode, review: ReviewCenter(loadSavedState: false), window: window)
+        window.isReleasedWhenClosed = false
+        window.orderFrontRegardless()
+        defer { chat.follower?.stop(); terminal.destroy(); window.orderOut(nil); window.close() }
+        controller.applyInitialWidths()
+        let reader = controller.mainArea.readerMode
+        reader.commandDiscoveryEnabled = false
+        reader.statusProvider = { _ in nil }
+        reader.composer.textView.text = "Keep this draft across single-pane transitions."
+        for face in [ChatFace.reader, .terminal] {
+            if mode.face(of: chat) != face { mode.toggle(chat) }
+            for document in [documents.pdf, documents.code] {
+                controller.handleLayoutRequest(.reset)
+                model.sidebarVisible = true
+                model.panelVisible = true
+                model.readerWidth = 560
+                model.panelWidth = 742
+                model.openFile(document.path, line: nil)
+                controller.mainArea.sync()
+                controller.applyLayout()
+                let loaded = waitUntil(5) {
+                    controller.panel.code.render()
+                    return controller.panel.code.selectedDoc?.path == document.path
+                }
+                let label = "layout single \(provider) \(face.rawValue) \(document.pathExtension)"
+                check(label + ": document selected", loaded)
+                guard loaded else { return }
+                let originalDocument = controller.panel.code.selectedDoc
+                let preferences = [model.sidebarWidth, model.panelWidth, model.readerWidth, model.terminalWidth]
+                window.setFrame(layoutSnapshotFrame(NSSize(width: 1280, height: 832)), display: true)
+                controller.applyLayout()
+                let minimum = controller.minimumWindowSize
+                window.setFrame(layoutSnapshotFrame(minimum), display: true)
+                controller.applyLayout()
+                // Do not reset preferences, recreate the controller, or set another frame
+                // during these switches. Native restored-width accumulation must be visible.
+                for iteration in 1...12 {
+                    for showChat in [true, false] {
+                        controller.handleLayoutRequest(showChat ? .chat : .panel)
+                        RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+                        let stable = waitUntil(3) {
+                            window.contentView?.layoutSubtreeIfNeeded()
+                            return abs(window.frame.width - minimum.width) < 1 && abs(window.frame.height - minimum.height) < 1 &&
+                                controller.sidebarItem.isCollapsed && controller.mainItem.isCollapsed == !showChat &&
+                                controller.panelItem.isCollapsed == showChat && layoutCoversWindow(controller)
+                        }
+                        check(label + ": switch \(iteration) to \(showChat ? "Chat" : "Panel") keeps the exact minimum",
+                              stable && preferences == [model.sidebarWidth, model.panelWidth, model.readerWidth, model.terminalWidth] &&
+                              reader.composer.textView.string == "Keep this draft across single-pane transitions." &&
+                              controller.panel.code.selectedDoc === originalDocument,
+                              "requested=\(minimum) actual=\(window.frame.size) effective=\(controller.effectiveLayout) chatCollapsed=\(controller.mainItem.isCollapsed) panelCollapsed=\(controller.panelItem.isCollapsed)")
+                        if !stable { return }
+                    }
+                }
+            }
+        }
+    }
+
+    private static func layoutWindowSnapshots(_ root: URL, documents: (pdf: URL, code: URL)) {
+        let pdf = documents.pdf
+        let code = documents.code
         let sizes = [NSSize(width: 1280, height: 832), NSSize(width: 1470, height: 956),
                      NSSize(width: 1512, height: 982), NSSize(width: 1728, height: 1117),
                      NSSize(width: 2560, height: 1440), NSSize(width: 0, height: 460)]
@@ -249,7 +326,7 @@ extension SelfTest {
         var renderedCount = 0
         for provider in ["claude", "codex"] {
             guard let (model, chat, mode, terminal) = layoutFixture(root, provider: provider) else { continue }
-            let snapshotWindow = LayoutSnapshotWindow(contentRect: NSRect(x: -6000, y: -3000, width: 1320, height: 820),
+            let snapshotWindow = LayoutSnapshotWindow(contentRect: layoutSnapshotFrame(NSSize(width: 1320, height: 820)),
                 styleMask: [.titled, .closable, .resizable, .fullSizeContentView], backing: .buffered, defer: false)
             let controller = MainWindowController(model: model, readerMode: mode, review: ReviewCenter(loadSavedState: false), window: snapshotWindow)
             guard let window = controller.window else { terminal.destroy(); continue }
@@ -277,12 +354,17 @@ extension SelfTest {
                             _ = waitUntil(5) { controller.panel.code.render(); return controller.panel.code.selectedDoc != nil }
                             for sidebar in [true, false] {
                                 for focus in [false, true] {
+                                    // Every cell starts from the same preferences. The transition
+                                    // checks separately exercise repeated changes without resets.
+                                    controller.handleLayoutRequest(.reset)
+                                    model.panelVisible = true
                                     model.sidebarVisible = sidebar
-                                    if model.layoutState.focused != focus { controller.togglePanelFocus() }
+                                    controller.handleLayoutRequest(.panel)
+                                    if focus { controller.togglePanelFocus() }
                                     controller.mainArea.sync()
                                     controller.applyLayout()
                                     let requested = size.width == 0 ? controller.minimumWindowSize : size
-                                    window.setFrame(NSRect(x: -6000, y: -3000, width: requested.width, height: requested.height), display: true)
+                                    window.setFrame(layoutSnapshotFrame(requested), display: true)
                                     controller.applyLayout()
                                     if controller.effectiveLayout.single && !focus { controller.handleLayoutRequest(.chat) }
                                     window.contentView?.layoutSubtreeIfNeeded()
@@ -327,7 +409,7 @@ extension SelfTest {
                 controller.mainArea.sync()
                 controller.applyLayout()
                 let minimum = controller.minimumWindowSize
-                window.setFrame(NSRect(x: -6000, y: -3000, width: minimum.width, height: minimum.height), display: true)
+                window.setFrame(layoutSnapshotFrame(minimum), display: true)
                 controller.applyLayout()
                 let name = "layout-\(Int(minimum.width))-\(face.rawValue)-none-\(provider)-sidebar-open-focus-off-light.png"
                 window.appearance = NSAppearance(named: .aqua)
@@ -354,7 +436,7 @@ extension SelfTest {
             model.readerWidth = 560
             model.panelVisible = true
             model.openFile(pdf.path, line: nil)
-            window.setFrame(NSRect(x: -6000, y: -3000, width: 1728, height: 1117), display: true)
+            window.setFrame(layoutSnapshotFrame(NSSize(width: 1728, height: 1117)), display: true)
             controller.mainArea.sync()
             controller.applyLayout()
             let original = controller.effectiveLayout
@@ -363,9 +445,9 @@ extension SelfTest {
             controller.togglePanelFocus()
             check("layout \(provider): focus restores the exact split and viewer instance",
                   controller.effectiveLayout == original && originalPane != nil && controller.panel.code.selectedDoc?.pane === originalPane)
-            window.setFrame(NSRect(x: -6000, y: -3000, width: 760, height: 460), display: true)
+            window.setFrame(layoutSnapshotFrame(NSSize(width: 760, height: 460)), display: true)
             controller.applyLayout()
-            window.setFrame(NSRect(x: -6000, y: -3000, width: 1728, height: 1117), display: true)
+            window.setFrame(layoutSnapshotFrame(NSSize(width: 1728, height: 1117)), display: true)
             controller.applyLayout()
             check("layout \(provider): temporary compression preserves preferred widths and draft",
                   controller.effectiveLayout == original && model.readerWidth == 560 && reader.composer.textView.string.contains("Keep this draft"))
@@ -512,18 +594,38 @@ extension SelfTest {
     private static func captureLayoutWindow(_ window: NSWindow, to url: URL, pdfInk: NSRect? = nil, textInk: [(String, NSRect)] = []) -> Bool {
         var complete = false
         var success = false
+        var stage = "enumerating current process"
+        var captureState = "listed=unknown isOnScreen=unknown isActive=unknown"
+        let windowState = "windowID=\(window.windowNumber) frame=\(window.frame) visible=\(window.isVisible) miniaturized=\(window.isMiniaturized) occlusion=\(window.occlusionState.rawValue)"
+        func diagnose(_ reason: String, error: Error? = nil) {
+            var message = "Layout capture failed: \(url.lastPathComponent) stage=\(stage) \(windowState) \(captureState) reason=\(reason)"
+            if let error {
+                let native = error as NSError
+                message += " errorDomain=\(native.domain) errorCode=\(native.code) description=\(native.localizedDescription) failureReason=\(native.localizedFailureReason ?? "none")"
+                if let underlying = native.userInfo[NSUnderlyingErrorKey] as? NSError {
+                    message += " underlyingDomain=\(underlying.domain) underlyingCode=\(underlying.code) underlyingDescription=\(underlying.localizedDescription)"
+                }
+            }
+            print(message)
+        }
         let task = Task { @MainActor in
             do {
                 let content = try await SCShareableContent.currentProcess
                 guard !Task.isCancelled else { complete = true; return }
+                stage = "looking up window"
                 guard let target = content.windows.first(where: { $0.windowID == CGWindowID(window.windowNumber) }) else {
+                    captureState = "listed=false isOnScreen=unavailable isActive=unavailable enumeratedWindowIDs=\(content.windows.map(\.windowID))"
+                    diagnose("Requested window is absent from current-process shareable content.")
                     complete = true
                     return
                 }
+                captureState = "listed=true isOnScreen=\(target.isOnScreen) isActive=\(target.isActive) targetFrame=\(target.frame)"
                 let filter = SCContentFilter(desktopIndependentWindow: target)
+                captureState += " filterRect=\(filter.contentRect) pointPixelScale=\(filter.pointPixelScale)"
+                stage = "checking filter geometry"
                 guard abs(filter.contentRect.width - window.frame.width) < 1,
                       abs(filter.contentRect.height - window.frame.height) < 1 else {
-                    print("Layout capture dimensions differ: window=\(window.frame.size) capture=\(filter.contentRect.size)")
+                    diagnose("Filter dimensions differ from the requested window.")
                     complete = true
                     return
                 }
@@ -532,12 +634,27 @@ extension SelfTest {
                 configuration.height = Int((filter.contentRect.height * CGFloat(filter.pointPixelScale)).rounded())
                 configuration.showsCursor = false
                 configuration.ignoreShadowsSingleWindow = true
+                // Independent-window capture uses the full window bounds. Leave sourceRect
+                // unset so an oversized window is not cropped to its visible screen portion.
+                captureState += " requestedPixels=\(configuration.width)x\(configuration.height)"
                 var missingInk: [String] = []
                 let deadline = Date().addingTimeInterval(8)
                 for _ in 0..<30 {
-                    guard !Task.isCancelled, Date() < deadline else { complete = true; return }
+                    guard !Task.isCancelled else { complete = true; return }
+                    guard Date() < deadline else {
+                        diagnose("Capture deadline expired; missing " + missingInk.joined(separator: ", "))
+                        complete = true
+                        return
+                    }
+                    stage = "capturing independent window"
                     let image = try await SCScreenshotManager.captureImage(contentFilter: filter, configuration: configuration)
                     guard !Task.isCancelled else { complete = true; return }
+                    stage = "checking returned pixels"
+                    guard image.width == configuration.width, image.height == configuration.height else {
+                        diagnose("Returned pixels \(image.width)x\(image.height) differ from configured dimensions.")
+                        complete = true
+                        return
+                    }
                     let bitmap = NSBitmapImageRep(cgImage: image)
                     let dark = window.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
                     let pdfDrawn = pdfInk.map { layoutHasInk(bitmap, rect: $0, window: window) } ?? true
@@ -546,22 +663,28 @@ extension SelfTest {
                         missingInk.append(name + " text")
                     }
                     if missingInk.isEmpty {
-                        if let png = bitmap.representation(using: .png, properties: [:]) {
-                            try png.write(to: url)
-                            success = true
+                        stage = "encoding PNG"
+                        guard let png = bitmap.representation(using: .png, properties: [:]) else {
+                            diagnose("PNG encoder returned no data.")
+                            complete = true
+                            return
                         }
+                        stage = "writing PNG"
+                        try png.write(to: url)
+                        success = true
                         break
                     }
+                    stage = "waiting for drawn text"
                     try await Task.sleep(nanoseconds: 100_000_000)
                 }
-                if !success { print("Layout capture missing \(missingInk.joined(separator: ", ")): \(url.lastPathComponent)") }
+                if !success { diagnose("Missing " + missingInk.joined(separator: ", ")) }
             } catch {
-                if !Task.isCancelled { print("Layout capture failed: \(error.localizedDescription)") }
+                if !Task.isCancelled { diagnose("ScreenCaptureKit or PNG operation threw.", error: error) }
             }
             complete = true
         }
         let finished = waitUntil(10) { complete }
-        if !finished { task.cancel() }
+        if !finished { diagnose("Outer capture timeout."); task.cancel() }
         return finished && success
     }
 }
