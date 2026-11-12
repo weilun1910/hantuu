@@ -33,6 +33,8 @@ final class StatusCenter: ObservableObject {
     private var timer: Timer?
     private var bag = Set<AnyCancellable>()
 
+    deinit { timer?.invalidate(); background.stop() }
+
     final class Tracker {
         let chat: Chat
         let kind: AgentKind

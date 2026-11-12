@@ -72,6 +72,12 @@ enum FileBanner: Equatable {
     case error(String)
 }
 
+/// The bar observes its content without retaining the controller that owns its host view.
+final class FileViewerBarState: ObservableObject {
+    @Published var banner: FileBanner?
+    weak var viewer: FileViewerController?
+}
+
 /// The Code tab: any file in a tab. Text and code open in an editor you can save (a
 /// CodeMirror 6 page), Markdown, SVG and CSV can switch to a rendered preview, and everything
 /// else gets the native view that suits it (FileKinds). It watches every open file, so an
@@ -85,7 +91,8 @@ final class FileViewerController: NSObject, ObservableObject {
     private var barHeight: NSLayoutConstraint!
     private let model: AppModel
     private(set) var docs: [UUID: FileDoc] = [:]
-    @Published private(set) var banner: FileBanner?
+    @Published private(set) var banner: FileBanner? { didSet { barState.banner = banner } }
+    private let barState = FileViewerBarState()
     private var shownKey = ""
     private var bag = Set<AnyCancellable>()
 
@@ -98,7 +105,8 @@ final class FileViewerController: NSObject, ObservableObject {
         self.model = model
         super.init()
         root.identifier = NSUserInterfaceItemIdentifier("hantuu.code")
-        barHost = ChromeHostingView(rootView: FileViewerBar(viewer: self))
+        barState.viewer = self
+        barHost = ChromeHostingView(rootView: FileViewerBar(state: barState))
         for v in [barHost!, content] {
             v.translatesAutoresizingMaskIntoConstraints = false
             root.addSubview(v)
@@ -632,11 +640,11 @@ final class FileViewerController: NSObject, ObservableObject {
 
 /// The bar above a tab: changed on disk, deleted, read-only, or a save that failed.
 struct FileViewerBar: View {
-    @ObservedObject var viewer: FileViewerController
+    @ObservedObject var state: FileViewerBarState
 
     var body: some View {
         VStack(spacing: 0) {
-            if let b = viewer.banner {
+            if let b = state.banner {
                 HStack(spacing: 8) {
                     Image(systemName: symbol(b))
                         .font(.system(size: 11, weight: .regular))
@@ -690,13 +698,13 @@ struct FileViewerBar: View {
         switch b {
         case .changedOnDisk:
             HStack(spacing: 6) {
-                Button("Keep Mine") { viewer.keepMine() }.buttonStyle(SmallBarButtonStyle(prominent: false))
+                Button("Keep Mine") { state.viewer?.keepMine() }.buttonStyle(SmallBarButtonStyle(prominent: false))
                     .help("Keep your changes. Saving writes them over the file on disk.")
-                Button("Reload") { viewer.reloadFromDisk() }.buttonStyle(SmallBarButtonStyle(prominent: true))
+                Button("Reload") { state.viewer?.reloadFromDisk() }.buttonStyle(SmallBarButtonStyle(prominent: true))
                     .help("Show the file as it is on disk now. Your unsaved changes are dropped.")
             }
         case .error:
-            Button("Dismiss") { viewer.dismissError() }.buttonStyle(SmallBarButtonStyle(prominent: false))
+            Button("Dismiss") { state.viewer?.dismissError() }.buttonStyle(SmallBarButtonStyle(prominent: false))
         default:
             EmptyView()
         }

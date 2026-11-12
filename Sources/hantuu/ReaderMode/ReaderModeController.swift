@@ -118,6 +118,8 @@ final class ReaderModeController: NSObject {
             .store(in: &bag)
     }
 
+    deinit { timer?.invalidate() }
+
     private func buildBottom() {
         root.translatesAutoresizingMaskIntoConstraints = false
         for v in [bottom, statusHost!, composer] as [NSView] { v.translatesAutoresizingMaskIntoConstraints = false }

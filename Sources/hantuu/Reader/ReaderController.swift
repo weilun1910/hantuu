@@ -36,12 +36,15 @@ final class ReaderController {
             .sink { [weak self] _ in self?.reload() }
             .store(in: &bag)
         model.readerReload
-            .sink { [weak self] id in if id == model.selectedChatID { self?.reload() } }
+            .sink { [weak self] id in
+                guard let self, id == self.model.selectedChatID else { return }
+                self.reload()
+            }
             .store(in: &bag)
         model.readerAppend
             .sink { [weak self] id, entries in
                 guard let self, id == self.shownChatID else { return }
-                self.page.call("append", ReaderPayload(chatID: id.uuidString, entries: entries, pending: model.selectedChat?.pendingMessages.entries ?? [], emptyText: ""))
+                self.page.call("append", ReaderPayload(chatID: id.uuidString, entries: entries, pending: self.model.selectedChat?.pendingMessages.entries ?? [], emptyText: ""))
             }
             .store(in: &bag)
     }

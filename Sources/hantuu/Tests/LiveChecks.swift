@@ -26,6 +26,33 @@ enum LiveCheckRules {
             .map { ns.substring(with: $0.range(at: 1)) })
     }
 
+    /// Selection styling is absent from Ghostty's text capture. Keep moving through a
+    /// whole viewport before treating unchanged text as the end of a short list.
+    struct PopupScan {
+        private var first: Set<String>?
+        private var previous: Set<String> = []
+        private var leftFirst = false
+        private var unchanged = 0
+        private(set) var commands: Set<String> = []
+
+        mutating func observe(_ visible: Set<String>) -> Bool {
+            guard !visible.isEmpty else { return false }
+            commands.formUnion(visible)
+            if first == nil { first = visible }
+            if visible != first { leftFirst = true }
+            if leftFirst && visible == first { return true }
+            unchanged = visible == previous ? unchanged + 1 : 0
+            previous = visible
+            return unchanged >= max(16, visible.count * 2)
+        }
+    }
+
+    static func canQueue(screenBusy: Bool, turnActive: Bool, startedAt: Date?, sentAt: Date,
+                         typing: Bool, composerWorking: Bool) -> Bool {
+        let freshTurn = turnActive && startedAt.map { $0 >= sentAt } == true
+        return (screenBusy || freshTurn) && !typing && composerWorking
+    }
+
     static func featureEnabled(_ name: String, output: String) -> Bool? {
         for line in output.split(whereSeparator: \.isNewline) {
             let words = line.split(whereSeparator: \.isWhitespace).map(String.init)
@@ -79,6 +106,37 @@ extension SelfTest {
               LiveCheckRules.featureEnabled("multi_agent", output: "multi_agent stable true\nmulti_agent_v2 stable false") == true &&
               LiveCheckRules.featureEnabled("multi_agent", output: "multi_agent stable false") == false &&
               LiveCheckRules.featureEnabled("multi_agent", output: "unexpected output") == nil)
+        check("live checks: an available but disabled v2 flag can be enabled for one process",
+              LiveCheckRules.featureEnabled("multi_agent_v2", output: "multi_agent stable true\nmulti_agent_v2 experimental false") == false)
+        var scan = LiveCheckRules.PopupScan()
+        let firstPage = Set((1...8).map { "command\($0)" })
+        let nextPage = Set((2...9).map { "command\($0)" })
+        var stoppedEarly = scan.observe(firstPage)
+        for _ in 0..<8 { stoppedEarly = scan.observe(firstPage) || stoppedEarly }
+        check("live checks: highlight-only moves do not end a popup scan", !stoppedEarly)
+        check("live checks: scrolling collects commands beyond the first viewport", !scan.observe(nextPage) && scan.commands.count == 9)
+        check("live checks: a full wrap ends popup traversal", scan.observe(firstPage))
+        var short = LiveCheckRules.PopupScan()
+        var finishedShort = false
+        for _ in 0..<20 { finishedShort = short.observe(["model", "status"]) || finishedShort }
+        check("live checks: a short unscrollable popup terminates after full traversals", finishedShort)
+        var empty = LiveCheckRules.PopupScan()
+        check("live checks: an empty capture cannot prove popup completion", !empty.observe([]))
+        let sentAt = Date(timeIntervalSince1970: 100)
+        check("live checks: a fresh turn can prove busy without an interrupt hint",
+              LiveCheckRules.canQueue(screenBusy: false, turnActive: true, startedAt: sentAt, sentAt: sentAt,
+                                      typing: false, composerWorking: true))
+        check("live checks: stale turn state cannot prove a new turn is busy",
+              !LiveCheckRules.canQueue(screenBusy: false, turnActive: true, startedAt: sentAt.addingTimeInterval(-1),
+                                       sentAt: sentAt, typing: false, composerWorking: true))
+        check("live checks: busy evidence waits until the first paste finishes",
+              !LiveCheckRules.canQueue(screenBusy: true, turnActive: true, startedAt: sentAt, sentAt: sentAt,
+                                       typing: true, composerWorking: true))
+        check("live checks: idle and unready composers never qualify for queueing",
+              !LiveCheckRules.canQueue(screenBusy: false, turnActive: false, startedAt: sentAt, sentAt: sentAt,
+                                       typing: false, composerWorking: true) &&
+              !LiveCheckRules.canQueue(screenBusy: true, turnActive: true, startedAt: sentAt, sentAt: sentAt,
+                                       typing: false, composerWorking: false))
         check("live checks: trust, update and approval remain blocked inside expected pickers",
               ["Do you trust this folder?", "Update available. Update now", "Would you like to run this command?"].allSatisfy {
                   LiveCheckRules.blocker($0, allowingMenu: true) != nil
@@ -126,17 +184,14 @@ extension SelfTest {
             }
             let version = LiveCheckRules.oneLine(LoginShell.run(agent + " --version", timeout: 15))
             check("live \(agent) setup: installed version \(version.isEmpty ? "unavailable" : version)", !version.isEmpty)
-            // This informational CLI command starts no model session. Do not enable flags:
-            // the suite tests the configuration the user actually runs.
+            // Pin the delegation API only for the subagent probe, without changing the
+            // user's config. A model's metadata can override the older multi_agent flag.
             let multiAgent = agent == "codex" && features.contains("subagents")
-                ? LiveCheckRules.featureEnabled("multi_agent", output: LoginShell.run("codex features list", timeout: 15)) : true
+                ? LiveCheckRules.featureEnabled("multi_agent_v2", output: LoginShell.run("codex features list", timeout: 15)) : true
             for feature in features {
-                if agent == "codex", feature == "subagents", multiAgent != true {
-                    if multiAgent == false {
-                        check("live codex subagents: SKIP multi_agent is disabled; enable it manually with --enable multi_agent to test; no prompt sent", true)
-                    } else {
-                        check("live codex subagents: feature availability", false, "Could not parse codex features list; no prompt sent.")
-                    }
+                if agent == "codex", feature == "subagents", multiAgent == nil {
+                    check("live codex subagents: v2 feature gate", false,
+                          "codex features list did not expose multi_agent_v2. No prompt sent; this probe requires the v2 spawn_agent API.")
                     continue
                 }
                 let probe = LiveCheckSession(agent: agent, feature: feature, folder: folder, dir: dir,
@@ -227,6 +282,10 @@ private final class LiveCheckSession {
     }
 
     func start() -> Bool {
+        autoreleasepool { startSession() }
+    }
+
+    private func startSession() -> Bool {
         guard SessionHelper.prepare() else { report("private helper directory", false); return false }
         let app = AppModel()
         model = app
@@ -240,8 +299,14 @@ private final class LiveCheckSession {
         var argv = chat.agent.launchArguments(sessionID: chat.sessionID)
         argv += agent == "claude" ? ["--model", "haiku"]
             : ["--model", codexModel, "-c", "model_reasoning_effort=\"low\""]
+        if agent == "codex", feature == "subagents" {
+            argv += ["-c", "features.multi_agent_v2=true"]
+        }
         app.launch(chat, argv: argv, in: project)
         mount()
+        if agent == "codex", feature == "subagents" {
+            report("v2 delegation enabled for this process", true, "features.multi_agent_v2=true; no saved configuration changed.")
+        }
         let ready = wait(90) {
             let state = TerminalScreen.analyze(self.screen)
             return state.ready && !state.busy && self.reader?.composerMode == .ready
@@ -254,6 +319,10 @@ private final class LiveCheckSession {
     }
 
     private func mount() {
+        autoreleasepool { mountViews() }
+    }
+
+    private func mountViews() {
         guard let app = model, let chat = app.selectedChat, let terminal = chat.terminal else { return }
         let w = NSWindow(contentRect: NSRect(x: -8000, y: -4000, width: 1100, height: 780),
                          styleMask: [.titled], backing: .buffered, defer: false)
@@ -412,13 +481,18 @@ private final class LiveCheckSession {
             guard safe(), let terminal else { report("suggestion scan", false); return }
             terminal.typeCommandText(prefix)
             guard pause(0.6, allowingMenu: true) else { report("suggestion scan", false); return }
-            var seen = Set<String>()
+            guard !LiveCheckRules.commands(on: screen).isEmpty else {
+                report("suggestion scan", false, "No command rows for \(prefix); \(String(screen.suffix(450)))")
+                return
+            }
+            var scan = LiveCheckRules.PopupScan()
             var ended = false
-            for _ in 0..<160 {
+            for _ in 0..<1024 {
                 guard safe(allowingMenu: true) else { report("suggestion scan", false); return }
                 let current = screen
-                observed.formUnion(LiveCheckRules.commands(on: current))
-                if !seen.insert(current).inserted { ended = true; break }
+                let visible = LiveCheckRules.commands(on: current)
+                observed.formUnion(visible)
+                if scan.observe(visible) { ended = true; break }
                 arrowDown()
                 guard pause(0.2, allowingMenu: true) else { report("suggestion scan", false); return }
             }
@@ -477,23 +551,36 @@ private final class LiveCheckSession {
     }
 
     func queued() {
-        let first = "Without tools, count from 1 to 60, one number per line, then say done."
+        let first = "Without tools or file access, write every integer from 1 to 400, one per line. After each integer write: this is the next number in the sequence. Do not abbreviate, summarize, or skip any lines. Finish with done."
         let token = "queue" + UUID().uuidString.prefix(8).lowercased()
         let second = "Without tools, reply only \(token)."
+        let sentAt = Date()
         let sent = send(first)
-        let busy = sent && wait(45) {
-            TerminalScreen.analyze(self.screen).busy && self.reader?.isTyping == false &&
-                self.reader?.composerMode.isWorking == true
+        var queued = false
+        var busyScreen = ""
+        var evidence = ""
+        let busy = sent && wait(60) {
+            guard let chat = self.chat else { return false }
+            let state = self.center?.state(of: chat.id)
+            let screenBusy = TerminalScreen.analyze(self.screen).busy
+            guard LiveCheckRules.canQueue(screenBusy: screenBusy, turnActive: state?.turnActive == true,
+                                          startedAt: state?.turnStartedAt, sentAt: sentAt,
+                                          typing: self.reader?.isTyping != false,
+                                          composerWorking: self.reader?.composerMode.isWorking == true) else { return false }
+            busyScreen = String(self.screen.suffix(450))
+            evidence = "screen busy=\(screenBusy), turn active=\(state?.turnActive == true)"
+            // Send during this poll, before logging or asking WebKit for rendered text.
+            queued = self.send(second)
+            return true
         }
-        report("first turn is busy before second send", busy, String(screen.suffix(450)))
+        report("first turn is busy before second send", busy, evidence + "; " + (busy ? busyScreen : String(screen.suffix(450))))
         guard busy, let chat else { return }
-        let queued = send(second)
         let pending = chat.pendingMessages.entries.filter { $0.text == second && $0.pending == true }
         report("second send immediately enters pending queue", queued && pending.count == 1,
                "Matching pending entries=\(pending.count).")
         let shown = wait(3) { self.countUser(second, pending: true) == 1 && self.body().contains("Queued") }
         report("reader shows one Queued message", shown, String(body().suffix(450)))
-        let delivered = wait(120) {
+        let delivered = wait(240) {
             chat.allEntries.filter { $0.kind == .user && $0.text == second }.count == 1 &&
                 !chat.pendingMessages.entries.contains { $0.text == second } && self.reply(token)
         }
@@ -566,11 +653,20 @@ private final class LiveCheckSession {
         model?.save()
         weak var oldModel = model
         weak var oldReader = reader
-        unmount()
-        let detached = SelfTest.waitUntil(10) { SessionHelper.info(id)?.attached == false }
+        weak var oldTranscriptReader = reader?.reader
+        weak var oldPage = reader?.reader?.page
+        weak var oldPeek = reader?.peekBar
+        autoreleasepool { unmount() }
+        let released = SelfTest.waitUntil(10) {
+            autoreleasepool {
+                SessionHelper.info(id)?.attached == false && oldModel == nil && oldReader == nil &&
+                    oldTranscriptReader == nil && oldPage == nil && oldPeek == nil
+            }
+        }
+        let detached = SessionHelper.info(id)?.attached == false
         report("quit releases app objects while the same agent survives",
-               detached && oldModel == nil && oldReader == nil && SessionHelper.info(id)?.child == previous.child,
-               "detached=\(detached), model released=\(oldModel == nil), reader released=\(oldReader == nil).")
+               released && SessionHelper.info(id)?.child == previous.child,
+               "detached=\(detached), model released=\(oldModel == nil), reader released=\(oldReader == nil), transcript reader released=\(oldTranscriptReader == nil), page released=\(oldPage == nil), peek released=\(oldPeek == nil).")
         let restored = AppModel()
         model = restored
         restored.load()
@@ -592,13 +688,20 @@ private final class LiveCheckSession {
     func subagents() {
         guard let app = model, let chat, let host else { return }
         let token = "child" + UUID().uuidString.prefix(8).lowercased()
-        let tool = agent == "claude" ? "Agent tool with model haiku" : "spawn_agent tool with your current model"
-        let prompt = "Use the \(tool) to start exactly one subagent whose only task is to reply \(token) without tools or file access; wait for it, then reply done."
+        // Give the child enough output to stay visible across transcript flushes. The
+        // explicit delegation instruction overrides a project's default against spawning.
+        let task = "Without tools or file access, write every integer from 1 to 200, one per line, without abbreviating. End your answer with \(token)."
+        let prompt: String
+        if agent == "codex" {
+            prompt = "I explicitly authorize exactly one subagent for this live check. Call spawn_agent with task_name=live_probe, fork_turns=none, and message: \(task) Use your inherited model without a model override. Then use wait_agent or list_agents to observe its completion and reply done. Do not do the child's task yourself or substitute a shell command for spawn_agent."
+        } else {
+            prompt = "I explicitly authorize exactly one subagent for this live check. Use the Agent tool with model haiku and task: \(task) Wait for it, then reply done."
+        }
         let sent = send(prompt)
         let found = sent && wait(120) { app.subagentBrowser.count(for: chat.id) > 0 }
         report("sidebar observes an open subagent", found,
                found ? "open=\(app.subagentBrowser.count(for: chat.id))"
-               : "No active row observed. A missing tool is not established by an assistant refusal. \(String(screen.suffix(450)))")
+               : "No active row observed. For Codex, multi_agent_v2 was explicitly enabled for this process. Model refusal does not establish a missing tool; inspect this probe's rollout tool calls and turn metadata. \(String(screen.suffix(450)))")
         guard found, let child = app.subagentBrowser.open[chat.id]?.first else { return }
         app.selectSubagent(child.id, in: chat.id)
         let childReader = SubagentReaderController(model: app)

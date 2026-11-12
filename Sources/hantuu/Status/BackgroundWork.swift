@@ -194,6 +194,8 @@ final class BackgroundWatch {
     private var timer: Timer?
     private var busy = false
 
+    deinit { timer?.invalidate() }
+
     private struct Job {
         var id: UUID
         var url: URL

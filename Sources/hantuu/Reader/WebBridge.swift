@@ -80,6 +80,20 @@ class HantuuWebView: WKWebView {
     override var acceptsFirstResponder: Bool { true }
 }
 
+/// WebKit owns its message handlers, so the handler must not own the page in return.
+private final class WeakPageMessageHandler: NSObject, WKScriptMessageHandler {
+    weak var page: WebPage?
+
+    init(page: WebPage) {
+        self.page = page
+        super.init()
+    }
+
+    func userContentController(_ controller: WKUserContentController, didReceive message: WKScriptMessage) {
+        page?.userContentController(controller, didReceive: message)
+    }
+}
+
 final class WebPage: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
     let webView: HantuuWebView
     private(set) var ready = false
@@ -98,13 +112,17 @@ final class WebPage: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
         config.preferences.isElementFullscreenEnabled = false
         webView = focusless ? FocuslessWebView(frame: .zero, configuration: config) : HantuuWebView(frame: .zero, configuration: config)
         super.init()
-        ucc.add(self, name: "hantuu")
+        ucc.add(WeakPageMessageHandler(page: self), name: "hantuu")
         webView.identifier = NSUserInterfaceItemIdentifier(identifier)
         webView.navigationDelegate = self
         webView.setValue(false, forKey: "drawsBackground")
         webView.isInspectable = true
         webView.allowsMagnification = true
         if let url = URL(string: "hantuu://app/\(page)") { webView.load(URLRequest(url: url)) }
+    }
+
+    deinit {
+        webView.configuration.userContentController.removeScriptMessageHandler(forName: "hantuu")
     }
 
     /// Calls `hantuu.<fn>(<json>)` once the page is ready.

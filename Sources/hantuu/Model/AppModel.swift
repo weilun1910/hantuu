@@ -67,6 +67,11 @@ final class Chat: ObservableObject, Identifiable {
         self.createdAt = createdAt
     }
 
+    deinit {
+        discoveryTimer?.invalidate()
+        follower?.stop()
+    }
+
     var agent: AgentDefinition { AgentCatalog.definition(agentID) }
 
     /// The terminal title (Claude Code sets one), cleaned of spinner glyphs.
@@ -362,7 +367,7 @@ final class AppModel: ObservableObject, TerminalEvents {
     }
 
     func detectAgents() {
-        DispatchQueue.global(qos: .userInitiated).async {
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             var found = AgentCatalog.detect()
             if found.isEmpty {
                 // Fallback if the login shell printed nothing usable.
@@ -378,6 +383,7 @@ final class AppModel: ObservableObject, TerminalEvents {
                 }
             }
             DispatchQueue.main.async {
+                guard let self else { return }
                 self.agents = found
                 self.agentsLoaded = true
                 if !found.contains(where: { $0.id == self.defaultAgentID }), let first = found.first {

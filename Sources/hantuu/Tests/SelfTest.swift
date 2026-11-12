@@ -70,6 +70,7 @@ enum SelfTest {
         usage(workdir)    // usage limits and the footer rings (Usage/UsageSelfTest.swift)
         keepAwake(workdir)  // the lid-shut switch, its limits, the crash check (Tests/KeepAwakeSelfTest.swift)
         liveChecksLogic(workdir)
+        appLifetimes(workdir)
         liveChecks(workdir) // Real agents only when HANTUU_LIVE names a trusted probe folder.
 
         print("\n\(passes) passed, \(failures) failed")
