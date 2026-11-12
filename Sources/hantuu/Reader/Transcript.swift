@@ -180,7 +180,14 @@ struct ClaudeTranscriptParser: TranscriptParser {
         if s.hasPrefix("<command-name>") || s.hasPrefix("<command-message>") {
             let name = Self.between(s, "<command-name>", "</command-name>") ?? "command"
             let args = Self.between(s, "<command-args>", "</command-args>") ?? ""
-            return [ReaderEntry(id: id, kind: .notice, text: "Ran \(name) \(args)".trimmingCharacters(in: .whitespaces), time: time)]
+            let command = "\(name) \(args)".trimmingCharacters(in: .whitespaces)
+            // Native /plan can record command XML together with image blocks. Keep that
+            // multimodal input as a user message so its images render and acknowledge once.
+            if !images.isEmpty {
+                return [ReaderEntry(id: id, kind: .user, text: command, images: images, time: time,
+                                    author: scope == .subagent ? "Parent" : nil)]
+            }
+            return [ReaderEntry(id: id, kind: .notice, text: "Ran \(command)", time: time)]
         }
         for tag in ["local-command-stdout", "local-command-stderr"] where s.hasPrefix("<" + tag + ">") {
             let output = (Self.between(s, "<" + tag + ">", "</" + tag + ">") ?? "").trimmingCharacters(in: .whitespacesAndNewlines)

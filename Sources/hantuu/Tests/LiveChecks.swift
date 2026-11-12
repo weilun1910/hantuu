@@ -2,11 +2,15 @@ import AppKit
 import Combine
 import GhosttyKit
 import Darwin
+import UniformTypeIdentifiers
 
 /// Opt-in checks against installed CLIs. The ordinary self test only exercises the pure
 /// parsing and selection rules below. No fixture test launches an agent or reads its home.
 enum LiveCheckRules {
     static let agents = ["claude", "codex"]
+    /// Process-only overrides for disposable probes, including `exec` side questions.
+    /// Never change AgentDefinition or saved Codex configuration to suppress a test menu.
+    static let codexProcessConfiguration = ["-c", "check_for_update_on_startup=false"]
     static let features = ["slash", "queued", "send-now", "relaunch", "subagents", "reader", "review", "sidebar", "side", "composer", "command-arguments", "layout", "menus"]
 
     /// The only permission the menus probe can approve is its generated printf token.
@@ -179,6 +183,41 @@ enum LiveCheckRules {
         })
     }
 
+    /// Inspect canonical user records, not pending bubbles, path echoes or assistant claims.
+    /// Summaries deliberately omit image data and are safe to put in a failure log.
+    static func imageReceipt(_ data: Data, agent: String, token: String) -> (count: Int, summaries: [String]) {
+        var count = 0
+        var summaries: [String] = []
+        for record in data.split(separator: 10) {
+            guard let object = (try? JSONSerialization.jsonObject(with: Data(record))) as? [String: Any] else { continue }
+            let message: [String: Any]?
+            if agent == "claude", object["type"] as? String == "user", object["isMeta"] as? Bool != true,
+               object["isSidechain"] as? Bool != true {
+                message = object["message"] as? [String: Any]
+            } else if agent == "codex", object["type"] as? String == "response_item",
+                      let payload = object["payload"] as? [String: Any], payload["type"] as? String == "message" {
+                message = payload
+            } else { continue }
+            guard let message, message["role"] as? String == "user" else { continue }
+            let blocks = message["content"] as? [[String: Any]] ?? []
+            let text = message["content"] as? String ?? blocks.compactMap { $0["text"] as? String }.joined(separator: "\n")
+            guard text.contains(token) else { continue }
+            let images = blocks.compactMap { block -> String? in
+                if block["type"] as? String == "image", let source = block["source"] as? [String: Any],
+                   source["type"] as? String == "base64", let encoded = source["data"] as? String, !encoded.isEmpty {
+                    return "image \(source["media_type"] as? String ?? "unknown") base64 chars=\(encoded.count)"
+                }
+                if block["type"] as? String == "input_image", let url = block["image_url"] as? String, !url.isEmpty {
+                    return "input_image \(url.hasPrefix("data:image/") ? "data URL" : "URL")"
+                }
+                return nil
+            }
+            count += images.count
+            summaries.append("user text=\(String(text.prefix(600)).debugDescription), image blocks=\(images)")
+        }
+        return (count, summaries)
+    }
+
     /// Following is about new transcript identity, even when a model repeats old prose.
     static func replyAfter(_ prompt: String, entries: [ReaderEntry], previousIDs: Set<String>) -> ReaderEntry? {
         guard let index = entries.lastIndex(where: { $0.kind == .user && $0.text == prompt && !previousIDs.contains($0.id) }) else { return nil }
@@ -202,6 +241,20 @@ extension SelfTest {
             objects.reduce(into: Data()) { data, object in
                 data.append(try! JSONSerialization.data(withJSONObject: object)); data.append(10)
             }
+        }
+        for agent in LiveCheckRules.agents {
+            let content: [[String: Any]] = agent == "claude"
+                ? [["type": "text", "text": "imagefixture"], ["type": "image", "source": ["type": "base64", "media_type": "image/png", "data": "aW1hZ2U="]]]
+                : [["type": "input_text", "text": "imagefixture"], ["type": "input_image", "image_url": "data:image/png;base64,aW1hZ2U="]]
+            func user(_ content: Any) -> [String: Any] {
+                let message: [String: Any] = ["type": "message", "role": "user", "content": content]
+                return agent == "claude" ? ["type": "user", "message": message] : ["type": "response_item", "payload": message]
+            }
+            let receipt = LiveCheckRules.imageReceipt(records([user(content)]), agent: agent, token: "imagefixture")
+            check("live checks: \(agent) image evidence is a native user block without data in diagnostics",
+                  receipt.count == 1 && !receipt.summaries.joined().contains("aW1hZ2U="))
+            check("live checks: \(agent) path echo cannot prove image delivery",
+                  LiveCheckRules.imageReceipt(records([user([["type": agent == "claude" ? "text" : "input_text", "text": "imagefixture /tmp/fixture.png"]])]), agent: agent, token: "imagefixture").count == 0)
         }
         let review = "Please address this review comment on your changes:\n\n1. fixture.swift:1\nUse the supplied value."
         let claudeReview = records([["type": "user", "uuid": "review-user", "message": ["role": "user",
@@ -545,7 +598,7 @@ private final class LiveCheckSession {
         chatID = chat.id
         var argv = chat.agent.launchArguments(sessionID: chat.sessionID)
         argv += agent == "claude" ? ["--model", "haiku"]
-            : ["--model", codexModel, "-c", "model_reasoning_effort=\"low\""]
+            : ["--model", codexModel, "-c", "model_reasoning_effort=\"low\""] + LiveCheckRules.codexProcessConfiguration
         if agent == "codex", feature == "subagents" {
             argv += ["-c", "features.multi_agent_v2=true"]
         }
@@ -1195,7 +1248,7 @@ private final class LiveCheckSession {
         store.commandOverride = { provider, arguments in
             var args = arguments
             if provider == "claude" { args += ["--model", "haiku"] }
-            else { args.insert(contentsOf: ["--model", self.codexModel, "-c", "model_reasoning_effort=\"low\""], at: 1) }
+            else { args.insert(contentsOf: ["--model", self.codexModel, "-c", "model_reasoning_effort=\"low\""] + LiveCheckRules.codexProcessConfiguration, at: 1) }
             return (URL(fileURLWithPath: executable), args)
         }
         let panel = SidePanelController(model: app)
@@ -1723,26 +1776,41 @@ private final class LiveCheckSession {
 
         // A small deterministic bitmap is test input, not generated product art.
         let imageURL = dir.appendingPathComponent("composer-\(agent)-fixture.png")
-        guard let bitmap = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 16, pixelsHigh: 16,
-                                           bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true,
-                                           isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0) else {
-            report("image fixture allocated", false); return
-        }
-        for y in 0..<16 { for x in 0..<16 { bitmap.setColor(.systemBlue, atX: x, y: y) } }
-        guard let png = bitmap.representation(using: .png, properties: [:]), (try? png.write(to: imageURL)) != nil else {
+        // NSBitmapImageRep.setColor(systemBlue) left the old fixture fully transparent:
+        // a named dynamic color must first be converted into the bitmap's color space.
+        guard SelfTest.writeSolidImage(to: imageURL, color: .blue, size: 128, type: .png) else {
             report("image fixture written in test output", false); return
         }
         let imageToken = "image" + UUID().uuidString.prefix(8).lowercased()
         let imagePrompt = "Without tools, inspect the attached test image and reply only \(imageToken)."
+        let beforeImageIDs = Set(chat.allEntries.map(\.id))
+        var nativeImageSeen = false
+        var imageTransport: [String] = []
+        let priorObservation = reader.observeImageTransport
+        reader.observeImageTransport = { path, acknowledged, capture in
+            nativeImageSeen = nativeImageSeen || acknowledged
+            imageTransport.append("pasted=\(path.debugDescription), acknowledged=\(acknowledged), TUI=\(String(capture.suffix(1600)).debugDescription)")
+            priorObservation?(path, acknowledged, capture)
+        }
+        defer { reader.observeImageTransport = priorObservation }
         reader.composer.setAttachments([ComposerAttachment(url: imageURL)])
         let imageSent = send(imagePrompt)
-        let imageSeen = imageSent && wait(120) {
-            self.reply(imageToken) && reader.composerMode == .ready &&
-                chat.allEntries.contains { $0.kind == .user && $0.text.contains(imageToken) && !$0.images.isEmpty }
+        let imageFinished = imageSent && wait(120) {
+            if chat.pendingMessages.entries.contains(where: { $0.text == imagePrompt && chat.pendingMessages.stage(id: $0.id) == .failed }) { return true }
+            guard reader.composerMode == .ready, !reader.isTyping, !TerminalScreen.analyze(self.screen).busy,
+                  let page = reader.reader?.page,
+                  let response = chat.allEntries.last(where: { !beforeImageIDs.contains($0.id) && $0.kind == .assistant && !$0.text.isEmpty }) else { return false }
+            let literal = String(decoding: try! JSONEncoder().encode(response.id), as: UTF8.self)
+            return SelfTest.js(page, "Array.from(document.querySelectorAll('section.entry.assistant')).some(e => e.dataset.id === \(literal) && e.innerText.trim().length > 0)") as? Bool == true
         }
-        report("image receives native acknowledgement, transcript image and reply", imageSeen,
-               "Requires an actual user transcript image, not a path echo. \(String(screen.suffix(450)))")
-        guard imageSeen else { return }
+        let bytes = chat.transcriptPath.flatMap { try? Data(contentsOf: URL(fileURLWithPath: $0)) } ?? Data()
+        let receipt = LiveCheckRules.imageReceipt(bytes, agent: agent, token: imageToken)
+        let userImage = chat.allEntries.contains { $0.kind == .user && $0.text.contains(imageToken) && !$0.images.isEmpty }
+        let imageDiagnosis = "fixture=128x128 opaque blue; transport=\(imageTransport); transcript=\(receipt.summaries); reader user image=\(userImage); pending=\(chat.pendingMessages.entries.map { $0.pendingDetail ?? $0.pendingState ?? "unknown" }); assistant=\(chat.allEntries.last(where: { !beforeImageIDs.contains($0.id) && $0.kind == .assistant })?.text.prefix(700) ?? "missing"); TUI=\(String(screen.suffix(1600)))"
+        report("image receives native acknowledgement before submission", nativeImageSeen, imageDiagnosis)
+        report("image is a native user transcript block and reader image", imageSent && receipt.count > 0 && userImage, imageDiagnosis)
+        report("image prompt receives requested reply", imageFinished && reply(imageToken), imageDiagnosis)
+        guard imageFinished, nativeImageSeen, receipt.count > 0, userImage, reply(imageToken) else { return }
 
         reader.refresh()
         reader.composer.textView.text = draft
@@ -1865,13 +1933,7 @@ private final class LiveCheckSession {
         }
 
         let imageURL = dir.appendingPathComponent("command-arguments-\(agent).png")
-        guard let bitmap = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 16, pixelsHigh: 16,
-                                           bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true,
-                                           isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0) else {
-            report("command image fixture allocated", false); return
-        }
-        for y in 0..<16 { for x in 0..<16 { bitmap.setColor(.systemBlue, atX: x, y: y) } }
-        guard let png = bitmap.representation(using: .png, properties: [:]), (try? png.write(to: imageURL)) != nil else {
+        guard SelfTest.writeSolidImage(to: imageURL, color: .blue, size: 128, type: .png) else {
             report("command image fixture written", false); return
         }
         for attachImage in [false, true] {
@@ -1879,14 +1941,15 @@ private final class LiveCheckSession {
             let previousIDs = Set(chat.allEntries.map(\.id))
             let transcriptOffset = chat.transcriptPath.flatMap { try? Data(contentsOf: URL(fileURLWithPath: $0)).count } ?? 0
             let compactBefore = chat.transcriptPath.flatMap { try? Data(contentsOf: URL(fileURLWithPath: $0)) }.map(LiveCheckRules.claudeCompactionIDs) ?? []
-            let baselineMarks = ComposerMessage.imageMarks(screen)
             var nativeImageSeen = false
-            let previousPermit = reader.permitsSubmit
-            reader.permitsSubmit = { terminal in
-                if ComposerMessage.imageMarks(terminal.activeScreenText()) > baselineMarks { nativeImageSeen = true }
-                return previousPermit(terminal)
+            var imageTransport: [String] = []
+            let previousObservation = reader.observeImageTransport
+            reader.observeImageTransport = { path, acknowledged, capture in
+                nativeImageSeen = nativeImageSeen || acknowledged
+                imageTransport.append("pasted=\(path.debugDescription), acknowledged=\(acknowledged), TUI=\(String(capture.suffix(1600)).debugDescription)")
+                previousObservation?(path, acknowledged, capture)
             }
-            defer { reader.permitsSubmit = previousPermit }
+            defer { reader.observeImageTransport = previousObservation }
             reader.composer.setAttachments(attachImage ? [ComposerAttachment(url: imageURL)] : [])
             let usesPlan = agent == "codex" || attachImage
             let token = "planned" + UUID().uuidString.prefix(8).lowercased()
@@ -1931,18 +1994,28 @@ private final class LiveCheckSession {
             let newCompactions = LiveCheckRules.claudeCompactionIDs(currentBytes).subtracting(compactBefore)
             let added = chat.allEntries.filter { !previousIDs.contains($0.id) }
             let pending = chat.pendingMessages.entries.first { $0.id == pendingID }
+            let receipt = LiveCheckRules.imageReceipt(currentBytes, agent: agent, token: token)
             let diagnosis = [
                 "accepted=\(accepted), typing=\(reader.isTyping), pending=\(pendingID.flatMap { chat.pendingMessages.stage(id: $0) }?.rawValue ?? "removed"), detail=\(pending?.pendingDetail ?? "none")",
                 "input review=\(chat.pendingMessages.inputNeedsReview), input=\(String(reflecting: CommandMenuScreen.input(screen, agent: agent)))",
                 "stages=\(stages.joined(separator: ",")), submitted after=\(submittedAfter.map { String(format: "%.2f", $0) } ?? "none")s, elapsed=\(String(format: "%.2f", ProcessInfo.processInfo.systemUptime - began))s",
                 "new native compaction records=\(newCompactions.sorted())",
+                "image transport=\(imageTransport); native user transcript=\(receipt.summaries)",
                 "reader additions=\(added.filter { [.user, .notice, .error].contains($0.kind) }.map { String($0.text.prefix(500)) })",
                 "transcript=\(chat.transcriptPath ?? "missing"), follower=\(chat.follower?.health.state ?? "missing")",
                 String(screen.suffix(3000))
             ].joined(separator: "; ")
             report("multiline \(usesPlan ? "/plan" : "/compact") dispatches natively \(suffix)", dispatched,
                    "Requires native mode plus reply, or a new provider compaction event. Assistant agreement alone cannot pass. \(diagnosis)")
-            if attachImage { report("native image chip acknowledged before command submission", dispatched && nativeImageSeen) }
+            if attachImage {
+                report("native image chip acknowledged before command submission", nativeImageSeen, diagnosis)
+                report("command image is a native user transcript block", receipt.count > 0, diagnosis)
+                let literal = String(decoding: try! JSONEncoder().encode(token), as: UTF8.self)
+                let renderedImage = reader.reader.map {
+                    SelfTest.js($0.page, "Array.from(document.querySelectorAll('section.entry.user:not(.pending)')).some(e => e.innerText.includes(\(literal)) && e.querySelector('img'))") as? Bool == true
+                } == true
+                report("command image remains visible in its reader message", renderedImage, diagnosis)
+            }
             guard dispatched else {
                 report("no automatic command retry or confirmation", true,
                        "Unsupported syntax, a confirmation, or missing native state evidence leaves this check failed.")

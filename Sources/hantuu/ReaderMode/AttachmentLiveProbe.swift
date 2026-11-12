@@ -75,7 +75,8 @@ extension SelfTest {
         center.start(model: model, live: false)
         let chat = Chat(projectID: project.id, agentID: id)
         if id == "claude" { chat.sessionID = UUID().uuidString.lowercased() }
-        let argv = chat.agent.launchArguments(sessionID: chat.sessionID)
+        var argv = chat.agent.launchArguments(sessionID: chat.sessionID)
+        if id == "codex" { argv += LiveCheckRules.codexProcessConfiguration }
         let envv = ["HANTUU_CHAT_ID": chat.id.uuidString].merging(AgentHooks.environment(for: chat.id)) { a, _ in a }
         let tv = TerminalView(app: g.app, launch: .init(workingDirectory: folder, command: LoginShell.surfaceCommand(argv), environment: envv), handlesChildExit: true)
         let events = LiveEvents(chat: chat, center: center)
@@ -115,6 +116,7 @@ extension SelfTest {
             _ = waitUntil(1.5) { false }
         }
         func probe(_ label: String, _ pastes: [String], wait: TimeInterval = 3) -> String {
+            print("      live paste \(id) [\(label)] pasted: \(pastes.map(\.debugDescription))")
             for p in pastes {
                 tv.pasteText(p)
                 _ = waitUntil(wait) { false }
@@ -167,23 +169,29 @@ extension SelfTest {
         let ready = waitUntil(30) { rm.refresh(); return rm.composerMode == .ready }
         check("live paste \(id): the message box is ready", ready, "\(rm.composerMode)")
         guard ready else { return }
-        // Pasted the way Cmd-V would, from a private pasteboard holding only the picture's data.
-        let pb = NSPasteboard(name: NSPasteboard.Name("hantuu.selftest.\(UUID().uuidString)"))
-        pb.clearContents()
-        pb.setData((try? Data(contentsOf: red)) ?? Data(), forType: .png)
-        rm.composer.textView.paste(from: pb)
-        pb.releaseGlobally()
+        // Exercise the same image-data import as Cmd-V without any pasteboard access.
+        let content = ComposerPasteboard.Content.images([.init(data: (try? Data(contentsOf: red)) ?? Data(), type: .png)])
+        _ = rm.composer.textView.onAttach?(content)
         let pasted = rm.composer.attachments.first
         check("live paste \(id): the picture is a chip in the message box", rm.composer.attachments.count == 1 && pasted?.pasted == true)
+        var nativeImageSeen = false
+        rm.observeImageTransport = { path, acknowledged, screen in
+            nativeImageSeen = nativeImageSeen || acknowledged
+            print("      live paste \(id): pasted=\(path.debugDescription), acknowledged=\(acknowledged), TUI=\(String(screen.suffix(1600)).debugDescription)")
+        }
         rm.composer.textView.text = "What colour is this square? Answer with one word."
         let sent = rm.send()
         _ = waitUntil(4) { !rm.isTyping }
         print("      live paste \(id) [just after sending]:\n" + inputBox(tv, lines: 10).split(separator: "\n").map { "        | " + $0 }.joined(separator: "\n"))
         let gotImage = waitUntil(90) {
             rm.refresh()
-            guard let p = chat.transcriptPath, let s = try? String(contentsOfFile: p, encoding: .utf8) else { return false }
-            return s.contains("What colour is this square?") && (s.contains("\"type\":\"image\"") || s.contains("input_image"))
+            guard let p = chat.transcriptPath, let data = try? Data(contentsOf: URL(fileURLWithPath: p)) else { return false }
+            return LiveCheckRules.imageReceipt(data, agent: id, token: "What colour is this square?").count > 0
         }
+        let receipt = chat.transcriptPath.flatMap { try? Data(contentsOf: URL(fileURLWithPath: $0)) }
+            .map { LiveCheckRules.imageReceipt($0, agent: id, token: "What colour is this square?").summaries } ?? []
+        print("      live paste \(id): native user transcript=\(receipt)")
+        check("live paste \(id): the agent acknowledged a native image before submission", nativeImageSeen)
         check("live paste \(id): the agent got the picture as an image, not a path", sent && gotImage, String(tv.activeScreenText().suffix(600)))
         let replied = waitUntil(120) {
             rm.refresh()

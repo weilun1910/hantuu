@@ -7,8 +7,9 @@ import SwiftUI
 /// installs it over the terminals and asks it what to show.
 ///
 /// Sending types the message into the chat's real terminal as one bracketed paste and then
-/// presses Return, exactly what pasting into the agent's own box does. Attached images go
-/// first, each pasted as its own path, which Claude Code and Codex turn into "[Image #N]".
+/// presses Return, exactly what pasting into the agent's own box does. Each image is pasted
+/// as its own path, which Claude Code and Codex turn into "[Image #N]". A slash command
+/// precedes image chips so the provider can recognize it at the start of the input.
 /// Nothing is ever sent while a menu waits in the terminal, because Return would answer it.
 final class ReaderModeController: NSObject {
     let model: AppModel
@@ -19,6 +20,8 @@ final class ReaderModeController: NSObject {
     var onLayoutChange: (() -> Void)?
     /// Opt-in live probes veto Return if a safety menu appeared after the paste began.
     var permitsSubmit: (TerminalView) -> Bool = { _ in true }
+    /// Optional live-test observation. No clipboard access or image data is involved.
+    var observeImageTransport: ((String, Bool, String) -> Void)?
 
     let root = ReaderLayoutRoot(color: Theme.background)
     let bottom = NSView()
@@ -1287,6 +1290,7 @@ final class ReaderModeController: NSObject {
             guard outbox[0].files.allSatisfy({ FileManager.default.isReadableFile(atPath: $0.path) }) else { return failTyping(id, "An attachment is no longer readable.") }
             let before = ComposerMessage.imageMarks(terminal.activeScreenText())
             terminal.pasteText(path)
+            observeImageTransport?(path, false, terminal.activeScreenText())
             outbox[0].typedAny = true
             let deadline = Date().addingTimeInterval(imageWait)
             func check() {
@@ -1294,7 +1298,10 @@ final class ReaderModeController: NSObject {
                 guard self.currentTransport(id) else { return self.failTyping(id, "The terminal changed while attaching the image.") }
                 if !terminal.geometryIsStable { self.afterGeometrySettles(id) { check() }; return }
                 guard self.canType(id) else { return self.failTyping(id, "The terminal changed while attaching the image.") }
-                if ComposerMessage.imageMarks(terminal.activeScreenText()) > before { return next(0.1) }
+                if ComposerMessage.imageMarks(terminal.activeScreenText()) > before {
+                    self.observeImageTransport?(path, true, terminal.activeScreenText())
+                    return next(0.1)
+                }
                 if Date() >= deadline { return self.failTyping(id, "The agent did not confirm the image attachment. The message was not submitted.") }
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { check() }
             }

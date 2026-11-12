@@ -232,8 +232,8 @@ enum ComposerMessage {
     }
 
     /// What reader mode types into the agent for a message: each image's path as a paste of its
-    /// own (the agent shows it as "[Image #N]"), then the text with any other files' paths after
-    /// it, then Return.
+    /// own (the agent shows it as "[Image #N]"). Commands must start the input, before any
+    /// image chips. Other messages keep images first, followed by the text and file paths.
     static func steps(text: String?, files: [OutgoingFile], agentID: String) -> [SendStep] {
         let images = files.filter(\.image)
         let others = files.filter { !$0.image }.map { ShellEscape.escape($0.path) }
@@ -246,12 +246,15 @@ enum ComposerMessage {
         if !images.isEmpty && !body.isEmpty && agentID == "claude", ComposerCommandTransport.invocation(body) == nil { body = " " + body }
         // A message that starts with a path isn't a slash command.
         if text == nil && body.hasPrefix("/") { body = " " + body }
-        var out = images.map { SendStep.image(ShellEscape.escape($0.path)) }
-        if !body.isEmpty {
-            if text != nil, ComposerCommandTransport.invocation(body) != nil,
-               ["claude", "codex"].contains(agentID) { out.append(.command(body)) }
-            else { out.append(.paste(body)) }
+        let command = text != nil && ComposerCommandTransport.invocation(body) != nil && imageAgents.contains(agentID)
+        var out: [SendStep] = []
+        if command {
+            out.append(.command(body))
+            // Keep /plan and its last argument separated from the first image chip.
+            if !images.isEmpty { out.append(.paste(" ")) }
         }
+        out += images.map { SendStep.image(ShellEscape.escape($0.path)) }
+        if !command && !body.isEmpty { out.append(.paste(body)) }
         if !out.isEmpty { out.append(.pressReturn) }
         return out
     }
