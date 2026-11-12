@@ -84,6 +84,13 @@ struct ClaudeTranscriptParser: TranscriptParser {
 
     mutating func parse(line: Data) -> [ReaderEntry] {
         let entries = parseContent(line: line)
+        // A rejected companion is not a conversation boundary. Passing it to the
+        // evidence reducer would adopt its foreign session and emit a notice even
+        // though commandImageCompanion rejected its prompt/session/parent ownership.
+        if entries.isEmpty,
+           let object = (try? JSONSerialization.jsonObject(with: line)) as? [String: Any],
+           object["type"] as? String == "user", object["isMeta"] as? Bool == true,
+           object["turnCompanion"] as? Bool == true { return [] }
         return evidence.consume(line, entries: entries, includeSidechain: scope != .chat)
     }
 

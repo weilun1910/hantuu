@@ -109,6 +109,18 @@ extension SelfTest {
             var wrong = companion
             wrong[field] = value
             check("attachments: source companion rejects wrong \(field)", parser.parse(line: encodeRecord(wrong)).isEmpty)
+            if field == "sessionId" {
+                let following: [String: Any] = ["type": "assistant", "uuid": "following", "sessionId": "session",
+                    "message": ["content": [["type": "text", "text": "Original session answer"]]]]
+                let followingEntries = parser.parse(line: encodeRecord(following))
+                check("attachments: rejected source companion cannot change evidence session",
+                      followingEntries.count == 1 && followingEntries.first?.kind == .assistant &&
+                      followingEntries.first?.text == "Original session answer")
+                var nextSession = following
+                nextSession["sessionId"] = "real-next-session"
+                check("attachments: a genuine subsequent session still emits its boundary",
+                      parser.parse(line: encodeRecord(nextSession)).contains { $0.kind == .notice && $0.text == "Conversation changed" })
+            }
         }
         var missingFlag = companion
         missingFlag.removeValue(forKey: "turnCompanion")
