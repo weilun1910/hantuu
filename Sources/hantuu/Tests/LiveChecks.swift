@@ -6,7 +6,7 @@ import GhosttyKit
 /// parsing and selection rules below. No fixture test launches an agent or reads its home.
 enum LiveCheckRules {
     static let agents = ["claude", "codex"]
-    static let features = ["slash", "queued", "relaunch", "subagents"]
+    static let features = ["slash", "queued", "send-now", "relaunch", "subagents"]
 
     static func selection(_ value: String?, allowed: [String]) -> [String]? {
         guard let value else { return allowed }
@@ -62,7 +62,7 @@ enum LiveCheckRules {
 
 extension SelfTest {
     static func liveChecksLogic(_ dir: URL) {
-        check("live checks: defaults cover both agents and all four features",
+        check("live checks: defaults cover both agents and all features",
               LiveCheckRules.selection(nil, allowed: LiveCheckRules.agents) == ["claude", "codex"] &&
               LiveCheckRules.selection(nil, allowed: LiveCheckRules.features) == LiveCheckRules.features)
         check("live checks: invalid selectors fail instead of silently running everything",
@@ -97,7 +97,7 @@ extension SelfTest {
         guard let raw = env["HANTUU_LIVE"], !raw.isEmpty else { return }
         guard let agents = LiveCheckRules.selection(env["HANTUU_LIVE_AGENTS"], allowed: LiveCheckRules.agents),
               let features = LiveCheckRules.selection(env["HANTUU_LIVE_FEATURES"], allowed: LiveCheckRules.features) else {
-            check("live configuration: selectors", false, "Use claude,codex and slash,queued,relaunch,subagents.")
+            check("live configuration: selectors", false, "Use claude,codex and slash,queued,send-now,relaunch,subagents.")
             return
         }
         let folder = URL(fileURLWithPath: raw).standardizedFileURL.resolvingSymlinksInPath()
@@ -146,6 +146,7 @@ extension SelfTest {
                 switch feature {
                 case "slash": probe.slash()
                 case "queued": probe.queued()
+                case "send-now": probe.sendNow()
                 case "relaunch": probe.relaunch()
                 case "subagents": probe.subagents()
                 default: break
@@ -501,6 +502,56 @@ private final class LiveCheckSession {
         report("reader has no duplicate after queue delivery",
                delivered && countUser(first) == 1 && countUser(second) == 1 && countUser(second, pending: true) == 0,
                "first=\(countUser(first)) second=\(countUser(second)) pending=\(countUser(second, pending: true)).")
+    }
+
+    func sendNow() {
+        let token = "received" + UUID().uuidString.prefix(8).lowercased()
+        let finished = "finished" + UUID().uuidString.prefix(8).lowercased()
+        let first = "Without tools, count slowly from 1 to 300, one number per line. Spell out each number and its square on that line. Finish with \(finished)."
+        let second = "Stop counting now. Without tools, reply only \(token)."
+        guard let chat else { return }
+        func completedCount() -> Bool {
+            chat.allEntries.contains { $0.kind == .assistant && $0.text.contains(finished) }
+        }
+        let sent = send(first)
+        let busy = sent && wait(45) {
+            TerminalScreen.analyze(self.screen).busy && self.reader?.isTyping == false &&
+                self.reader?.composerMode.isWorking == true && !completedCount()
+        }
+        report("count is running before queueing", busy, String(screen.suffix(450)))
+        guard busy, let reader, let page = reader.reader?.page else { return }
+        let queued = send(second)
+        let id = chat.pendingMessages.entries.first(where: { $0.text == second })?.id
+        let actionable = queued && wait(8) {
+            reader.isTyping == false && !completedCount() &&
+                chat.pendingMessages.entries.contains { $0.id == id && $0.sendNowLabel != nil } &&
+                (SelfTest.js(page, "document.querySelectorAll('.send-now').length") as? Int ?? 0) > 0
+        }
+        report("native pending queue and reader Send now action observed", actionable,
+               "If the steer was accepted or the count finished before the action, this attempt cannot prove Send now. \(String(screen.suffix(450)))")
+        guard actionable, !completedCount(), safe(), let id else { return }
+        // Click the real DOM control. Its bridge validates the selected chat and invokes the
+        // same controller action used by the keyboard shortcut.
+        var accepted = false
+        reader.reader?.onSendNow = { [weak reader] chatID, messageID in
+            accepted = reader?.sendNow(chatID: chatID, id: messageID) == true
+        }
+        _ = SelfTest.js(page, "document.querySelector('.send-now').click(); 0")
+        let requested = wait(3) { accepted }
+        report("Send now requests delivery", requested)
+        guard requested else { return }
+        var receivedBeforeFinish = false
+        let received = wait(120) {
+            if completedCount() { return true }
+            receivedBeforeFinish = chat.allEntries.contains { $0.kind == .user && $0.text == second }
+            return receivedBeforeFinish
+        }
+        report("agent receives queued instruction before count finishes", received && receivedBeforeFinish)
+        guard receivedBeforeFinish else { return }
+        let answered = wait(120) { self.reply(token) && !chat.pendingMessages.entries.contains { $0.id == id } }
+        report("Send now reconciles its bubble and receives the requested answer", answered &&
+               countUser(second) == 1 && countUser(second, pending: true) == 0,
+               "delivered=\(countUser(second)), pending=\(countUser(second, pending: true)).")
     }
 
     func relaunch() {

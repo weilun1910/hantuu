@@ -660,6 +660,9 @@ extension SelfTest {
         rm.composer.textView.text = "queued reader thought"
         let queuedSend = rm.send()
         check("queue send: a busy send immediately creates a pending bubble", queuedSend && chat.pendingMessages.entries.first?.text == "queued reader thought")
+        if let id = chat.pendingMessages.entries.first?.id {
+            check("send now: cannot interrupt a message that is still being pasted", !rm.sendNow(chatID: chat.id, id: id))
+        }
         _ = waitUntil(5) { !rm.isTyping }
         model.chats = [chat, other]
         model.selectedChatID = other.id

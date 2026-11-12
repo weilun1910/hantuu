@@ -10,12 +10,23 @@ struct PendingReaderMessages {
         var imagePaths: [String]
         var agentID: String
         var commandName: String?
+        var submitted = false
+        var deliveryBatch: String? = nil
     }
 
     private var messages: [Message] = []
     private var acknowledgedCommands: [String: Int] = [:]
     private var seenResultIDs = Set<String>()
-    var entries: [ReaderEntry] { messages.map(\.entry) }
+    var sendNowEnabled = false
+    var entries: [ReaderEntry] {
+        messages.map { message in
+            var entry = message.entry
+            if sendNowEnabled && message.submitted && entry.deliveryRequested != true && message.commandName == nil {
+                entry.sendNowLabel = QueuedSendNow.action(agentID: message.agentID)?.label
+            }
+            return entry
+        }
+    }
     var isEmpty: Bool { messages.isEmpty }
 
     mutating func enqueue(id: String, text: String?, files: [ComposerMessage.OutgoingFile],
@@ -39,12 +50,51 @@ struct PendingReaderMessages {
                                 agentID: agentID, commandName: commandName))
     }
 
+    mutating func markSubmitted(id: String) {
+        guard let index = messages.firstIndex(where: { $0.entry.id == id }) else { return }
+        messages[index].submitted = true
+    }
+
+    /// The terminal action can affect more than the clicked bubble. Keep those bubbles until
+    /// their real transcript entries arrive, including across the resulting interruption.
+    @discardableResult
+    mutating func requestDelivery(id: String) -> Bool {
+        guard sendNowEnabled, let target = messages.first(where: { $0.entry.id == id }), target.submitted,
+              target.entry.deliveryRequested != true, target.commandName == nil,
+              let action = QueuedSendNow.action(agentID: target.agentID) else { return false }
+        let batch = UUID().uuidString
+        for index in messages.indices where messages[index].entry.deliveryRequested != true && messages[index].submitted && messages[index].agentID == target.agentID {
+            if action.scope == .all || messages[index].entry.id == id {
+                messages[index].entry.deliveryRequested = true
+                messages[index].deliveryBatch = batch
+            }
+        }
+        return true
+    }
+
     /// Each delivered entry consumes at most one pending send. Old identical prompts and
     /// repeated reloads cannot acknowledge a newer send with the same words.
     mutating func reconcile(_ entries: [ReaderEntry]) -> [ReaderEntry] {
         entries.map { entry in
             if entry.kind == .notice && (entry.text == "Interrupted" || entry.text == "Turn interrupted") {
-                messages.removeAll { !$0.existingIDs.contains(entry.id) }
+                messages.removeAll { !$0.existingIDs.contains(entry.id) && $0.entry.deliveryRequested != true }
+            }
+            // Codex can combine a promoted batch into one canonical user message. Match
+            // the whole ordered batch before attempting an individual acknowledgement.
+            let batches = Set(messages.compactMap(\.deliveryBatch))
+            for batch in batches {
+                let group = messages.filter { $0.deliveryBatch == batch }
+                guard group.count > 1, group.allSatisfy({ $0.agentID == "codex" && !$0.existingIDs.contains(entry.id) }) else { continue }
+                var combined = group[0]
+                combined.expectedText = group.map(\.expectedText).joined(separator: "\n")
+                combined.imagePaths = group.flatMap(\.imagePaths)
+                guard Self.matches(entry, combined) else { continue }
+                let ids = group.map { $0.entry.id }
+                messages.removeAll { $0.deliveryBatch == batch }
+                for index in messages.indices { messages[index].existingIDs.insert(entry.id) }
+                var delivered = entry
+                delivered.replacesPendingIDs = ids
+                return delivered
             }
             let resultCommand = Self.resultCommand(entry)
             if let command = resultCommand {
@@ -71,6 +121,9 @@ struct PendingReaderMessages {
 
     /// A stopped agent can put a message back in its input box without a transcript line.
     func isRestored(in screen: String) -> Bool {
+        // Native promotion can briefly restore input while interrupting and resubmitting.
+        // That intermediate frame is not evidence that the promoted queue was cancelled.
+        guard !messages.contains(where: { $0.entry.deliveryRequested == true }) else { return false }
         let sent = messages.flatMap { message -> [String] in
             var parts = message.entry.text.isEmpty ? [] : [message.entry.text]
             if !message.imagePaths.isEmpty { parts.append("[Image #") }

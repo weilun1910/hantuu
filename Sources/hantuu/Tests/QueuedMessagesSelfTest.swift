@@ -85,6 +85,7 @@ extension SelfTest {
         pending.enqueue(id: "codex-image", text: "Use this", files: [picture], agentID: "codex", existing: [])
         let wrapped = ReaderEntry(id: "wrapped", kind: .user, text: "<image name=[Image #1] path=\"/tmp/picture.png\">\n\n</image>\n\n[Image #1] Use this", images: ["data:image/png;base64,cGljdHVyZQ=="])
         check("queue: Codex image wrappers do not prevent matching", pending.reconcile([wrapped]).first?.replacesPendingID == "codex-image")
+        queuedSendNow(dir)
         queuedCommands()
         queuedMessageRendering()
     }

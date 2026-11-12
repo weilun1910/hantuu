@@ -77,6 +77,32 @@ enum GhosttyInput {
     }
 }
 
+/// A physical key passed through Ghostty, which chooses the negotiated terminal encoding.
+struct TerminalKeyStroke: Equatable {
+    var keyCode: UInt32
+    var codepoint: UInt32
+    var modifiers: NSEvent.ModifierFlags = []
+}
+
+extension TerminalView {
+    func pressKeys(_ keys: [TerminalKeyStroke]) {
+        guard let surface else { return }
+        for key in keys {
+            var event = ghostty_input_key_s()
+            event.keycode = key.keyCode
+            event.unshifted_codepoint = key.codepoint
+            event.mods = GhosttyInput.mods(key.modifiers)
+            event.consumed_mods = GHOSTTY_MODS_NONE
+            event.text = nil
+            event.composing = false
+            event.action = GHOSTTY_ACTION_PRESS
+            _ = ghostty_surface_key(surface, event)
+            event.action = GHOSTTY_ACTION_RELEASE
+            _ = ghostty_surface_key(surface, event)
+        }
+    }
+}
+
 extension NSEvent {
     /// A Ghostty key event for this NSEvent, without text (the caller owns the C string).
     func ghosttyKeyEvent(_ action: ghostty_input_action_e, translationMods: NSEvent.ModifierFlags? = nil) -> ghostty_input_key_s {

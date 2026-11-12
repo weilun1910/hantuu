@@ -83,7 +83,16 @@ final class ReaderModeController: NSObject {
         buildBottom()
         let tv = composer.textView
         tv.onSend = { [weak self] in self?.send() }
-        tv.onEscape = { [weak self] in self?.stop() ?? false }
+        tv.onSendNow = { [weak self] in
+            guard let self, self.model.selectedChat?.agent.id == "claude" else { return false }
+            return self.sendFirstQueuedNow()
+        }
+        tv.onFocusQueue = { [weak self] in self?.focusQueue() ?? false }
+        tv.onEscape = { [weak self] in
+            guard let self else { return false }
+            if self.model.selectedChat?.agent.id == "codex", self.sendFirstQueuedNow() { return true }
+            return self.stop()
+        }
         tv.onCopyWithoutSelection = { [weak self] in self?.copyReaderSelection() }
         tv.onPage = { [weak self] down in self?.page(down: down) }
         tv.onCommandQuery = { [weak self] in self?.loadCommands() }
@@ -176,6 +185,8 @@ final class ReaderModeController: NSObject {
     private func ensureReader() {
         guard reader == nil else { return }
         let r = ReaderController(model: model, page: "reader.html?layout=main", identifier: "hantuu.reader.main", focusless: true)
+        r.onSendNow = { [weak self] chatID, id in _ = self?.sendNow(chatID: chatID, id: id) }
+        r.onFocusComposer = { [weak self] in self?.focusComposer() }
         (r.page.webView as? FocuslessWebView)?.onMouseDown = { [weak self] in self?.focusComposer() }
         // Files and pictures dropped anywhere on the reader go into the message box.
         (r.page.webView as? FocuslessWebView)?.onDropAttachments = { [weak self] content in
@@ -240,6 +251,7 @@ final class ReaderModeController: NSObject {
     }
 
     private func switchChat(to chat: Chat) {
+        if (reader?.page.webView as? FocuslessWebView)?.allowsQueueFocus == true { focusComposer() }
         if let old = shownChatID {
             drafts[old] = composer.textView.string.isEmpty ? nil : composer.textView.string
             draftFiles[old] = composer.attachments.isEmpty ? nil : composer.attachments
@@ -321,6 +333,12 @@ final class ReaderModeController: NSObject {
             waiting: st.map { !$0.waits.isEmpty } ?? chat.activity.isNeeds,
             ready: ready, screenMenu: screen.menu)
         apply(ComposerMode.resolve(input), chat: chat)
+        let sendNowAvailable = composerMode.isWorking && mode.showsReader(chat) &&
+            !outbox.contains(where: { $0.chatID == chat.id }) &&
+            QueuedSendNow.available(agentID: chat.agent.id, screen: chat.terminal?.activeScreenText() ?? "")
+        if chat.pendingMessages.sendNowEnabled != sendNowAvailable {
+            chat.pendingMessages.sendNowEnabled = sendNowAvailable
+        }
 
         if ReaderCommandLogic.autoPeek(sentAt: commandSentAt[chat.id], now: Date(), menu: screen.menu),
            mode.showsReader(chat) {
@@ -555,6 +573,7 @@ final class ReaderModeController: NSObject {
                 guard let self, self.outbox.first?.id == id else { return }
                 if self.canType(id) && self.permitsSubmit(t) {
                     t.pressReturn()
+                    self.model.chats.first { $0.id == self.outbox[0].chatID }?.pendingMessages.markSubmitted(id: id)
                     if let command { self.didSendCommand(command, terminal: t) }
                 }
                 self.typeNext()
@@ -575,6 +594,41 @@ final class ReaderModeController: NSObject {
             commandPeekAt[chat.id] = Date()
             showTerminal()
         }
+    }
+
+    /// The page carries both identities so a delayed click cannot target another chat.
+    @discardableResult
+    func sendNow(chatID: UUID, id: String) -> Bool {
+        guard let chat = model.selectedChat, chat.id == chatID, chat.id == shownChatID,
+              mode.showsReader(chat), let terminal = chat.terminal, terminal.surface != nil,
+              !terminal.processExited, !outbox.contains(where: { $0.chatID == chatID }),
+              let action = QueuedSendNow.action(agentID: chat.agent.id) else { return false }
+        refresh()
+        guard composerMode.isWorking, permitsSubmit(terminal),
+              chat.pendingMessages.entries.contains(where: { $0.id == id && $0.sendNowLabel != nil }) else { return false }
+        guard chat.pendingMessages.requestDelivery(id: id) else { return false }
+        terminal.pressKeys(action.keys)
+        return true
+    }
+
+    private func sendFirstQueuedNow() -> Bool {
+        guard let chat = model.selectedChat,
+              let entry = chat.pendingMessages.entries.first(where: { $0.sendNowLabel != nil }) else { return false }
+        return sendNow(chatID: chat.id, id: entry.id)
+    }
+
+    /// Shift-Tab from the composer reaches the queue actions without making ordinary clicks
+    /// on the transcript steal the keyboard from the message box.
+    private func focusQueue() -> Bool {
+        guard let chat = model.selectedChat, mode.showsReader(chat),
+              chat.pendingMessages.entries.contains(where: { $0.sendNowLabel != nil }),
+              let web = reader?.page.webView as? FocuslessWebView, let window = web.window else { return false }
+        web.allowsQueueFocus = true
+        window.makeFirstResponder(web)
+        web.evaluateJavaScript("window.hantuu.focusQueue()") { [weak self] result, _ in
+            if result as? Bool != true { self?.focusComposer() }
+        }
+        return true
     }
 
     /// Esc in the agent's terminal, which stops the running turn. Only while it's working, so
@@ -644,6 +698,7 @@ final class ReaderModeController: NSObject {
     }
 
     func focusComposer() {
+        (reader?.page.webView as? FocuslessWebView)?.allowsQueueFocus = false
         guard !root.isHidden, !composer.isHidden, let w = root.window else { return }
         if w.firstResponder !== composer.textView { w.makeFirstResponder(composer.textView) }
     }
@@ -742,16 +797,17 @@ final class FadeEdge: NSView {
     override func hitTest(_ point: NSPoint) -> NSView? { nil }
 }
 
-/// Reader mode's page. It never becomes the first responder, so the keyboard stays in the
-/// message box, and a click on it hands the keyboard back to the box. Text can still be
+/// Reader mode's page only takes keyboard focus when traversing queued message actions.
+/// An ordinary click hands the keyboard back to the message box. Text can still be
 /// selected; Copy with nothing selected in the box copies it. The shared HantuuWebView stays
 /// as it was, so the panel's pages behave exactly as before.
 final class FocuslessWebView: HantuuWebView {
     var onMouseDown: (() -> Void)?
     /// Files and pictures dropped on the page. Returns false to leave the drop to the page.
     var onDropAttachments: ((ComposerPasteboard.Content) -> Bool)?
-    override var acceptsFirstResponder: Bool { false }
-    override func becomeFirstResponder() -> Bool { false }
+    var allowsQueueFocus = false
+    override var acceptsFirstResponder: Bool { allowsQueueFocus }
+    override func becomeFirstResponder() -> Bool { allowsQueueFocus && super.becomeFirstResponder() }
     override func mouseDown(with event: NSEvent) {
         super.mouseDown(with: event)
         onMouseDown?()

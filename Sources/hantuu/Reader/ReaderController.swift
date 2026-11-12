@@ -20,6 +20,8 @@ final class ReaderController {
     private var pendingSubscription: AnyCancellable?
     /// Esc shrinks an opened-out image or PDF (FileViewer/ReaderMedia.swift).
     let mediaKeys: ReaderMediaKeys
+    var onSendNow: ((UUID, String) -> Void)?
+    var onFocusComposer: (() -> Void)?
 
     /// Reader mode makes a second one for the main area, with `layout=main` in the page URL.
     init(model: AppModel, page: String = "reader.html", identifier: String = "hantuu.reader", focusless: Bool = false, observesSelection: Bool = true) {
@@ -99,6 +101,13 @@ final class ReaderController {
     private func handle(_ msg: [String: Any]) {
         let base = model.selectedChat.flatMap { model.project($0.projectID)?.path }
         switch msg["type"] as? String {
+        case "sendNow":
+            guard let raw = msg["chatID"] as? String, let chatID = UUID(uuidString: raw),
+                  chatID == shownChatID, chatID == model.selectedChatID,
+                  let id = msg["id"] as? String else { return }
+            onSendNow?(chatID, id)
+        case "focusComposer":
+            onFocusComposer?()
         case "open":
             guard let path = msg["path"] as? String else { return }
             let line = msg["line"] as? Int

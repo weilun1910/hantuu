@@ -6,6 +6,8 @@ import AppKit
 final class ComposerTextView: NSTextView {
     var placeholder = "" { didSet { needsDisplay = true } }
     var onSend: (() -> Void)?
+    var onSendNow: (() -> Bool)?
+    var onFocusQueue: (() -> Bool)?
     /// Esc. Returns true if it did something (stopped the agent).
     var onEscape: (() -> Bool)?
     /// Copy with nothing selected here: copy the reader's selection instead.
@@ -142,13 +144,17 @@ final class ComposerTextView: NSTextView {
         if mods.isDisjoint(with: [.command, .control, .option, .shift]), commandKey(event.keyCode) { return }
         switch event.keyCode {
         case 36, 76:   // Return, keypad Enter
-            if mods.contains(.shift) || mods.contains(.option) {
+            if mods == .control, onSendNow?() == true {
+                return
+            } else if mods.contains(.shift) || mods.contains(.option) {
                 insertNewlineIgnoringFieldEditor(nil)
             } else if mods.isDisjoint(with: [.command, .control]) {
                 onSend?()
             } else {
                 super.keyDown(with: event)
             }
+        case 48 where mods == .shift:
+            if onFocusQueue?() != true { super.keyDown(with: event) }
         case 53:       // Esc
             if onEscape?() != true { super.keyDown(with: event) }
         case 116, 121: // Page Up, Page Down

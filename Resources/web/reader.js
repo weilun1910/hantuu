@@ -59,6 +59,43 @@
     return box;
   }
 
+  function updatePending(el, e) {
+    let state = el.querySelector('.queued-label');
+    if (!state) {
+      state = label('', 'queued-label');
+      state.setAttribute('aria-live', 'polite');
+      el.appendChild(state);
+    }
+    state.textContent = e.deliveryRequested ? 'Delivering' : 'Queued';
+    let button = el.querySelector('.send-now');
+    if (!e.pending || !e.sendNowLabel || e.deliveryRequested) {
+      if (button) {
+        if (document.activeElement === button) R.post({ type: 'focusComposer' });
+        button.remove();
+      }
+      return;
+    }
+    if (!button) {
+      button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'send-now';
+      const owner = chatID;
+      button.addEventListener('click', () => R.post({ type: 'sendNow', chatID: owner, id: e.id }));
+      button.addEventListener('keydown', (event) => {
+        const buttons = Array.from(list.querySelectorAll('.send-now'));
+        const boundary = event.shiftKey ? buttons[0] : buttons[buttons.length - 1];
+        if (event.key === 'Escape' || (event.key === 'Tab' && boundary === button)) {
+          event.preventDefault();
+          R.post({ type: 'focusComposer' });
+        }
+      });
+      el.appendChild(button);
+    }
+    button.textContent = e.sendNowLabel;
+    button.title = e.sendNowLabel + ' (may interrupt the current work)';
+    button.setAttribute('aria-label', e.sendNowLabel);
+  }
+
   function renderEntry(e) {
     const el = document.createElement('section');
     el.className = 'entry ' + e.kind;
@@ -68,7 +105,7 @@
     switch (e.kind) {
       case 'user':
         el.appendChild(label('You'));
-        if (e.pending) el.appendChild(label('Queued', 'queued-label'));
+        if (e.pending) updatePending(el, e);
         if (e.text) el.appendChild(body(e.text, e.links, true));
         break;
       case 'assistant':
@@ -141,6 +178,14 @@
     for (const e of entries) {
       if (seen.has(e.id)) continue;
       seen.add(e.id);
+      for (const id of (e.replacesPendingIDs || [])) {
+        const grouped = pendingNodes.get(id);
+        if (grouped) {
+          if (grouped.contains(document.activeElement)) R.post({ type: 'focusComposer' });
+          grouped.remove();
+          pendingNodes.delete(id);
+        }
+      }
       const old = pendingNodes.get(e.replacesPendingID);
       let el;
       if (old && e.kind === 'user') {
@@ -152,10 +197,15 @@
         el.classList.remove('pending', 'fresh');
         const queued = el.querySelector('.queued-label');
         if (queued) queued.remove();
+        const action = el.querySelector('.send-now');
+        if (action) {
+          if (document.activeElement === action) R.post({ type: 'focusComposer' });
+          action.remove();
+        }
       } else {
         if (old) { old.remove(); pendingNodes.delete(e.replacesPendingID); }
         el = renderEntry(e);
-        if (main) main.decorate(el, e, fresh && !e.replacesPendingID);
+        if (main) main.decorate(el, e, fresh && !e.replacesPendingID && !e.replacesPendingIDs);
       }
       frag.appendChild(el);
     }
@@ -170,10 +220,17 @@
   function syncPending(entries) {
     const keep = new Set(entries.map((e) => e.id));
     for (const [id, el] of pendingNodes) {
-      if (!keep.has(id)) { el.remove(); pendingNodes.delete(id); }
+      if (!keep.has(id)) {
+        if (el.contains(document.activeElement)) R.post({ type: 'focusComposer' });
+        el.remove();
+        pendingNodes.delete(id);
+      }
     }
     for (const e of entries) {
-      if (pendingNodes.has(e.id)) continue;
+      if (pendingNodes.has(e.id)) {
+        updatePending(pendingNodes.get(e.id), e);
+        continue;
+      }
       const el = renderEntry(e);
       if (main) main.decorate(el, e, false);
       pendingNodes.set(e.id, el);
@@ -183,6 +240,12 @@
   }
 
   window.hantuu = {
+    focusQueue() {
+      const buttons = list.querySelectorAll('.send-now');
+      if (!buttons.length) return false;
+      buttons[buttons.length - 1].focus();
+      return true;
+    },
     // Esc while the message box has the keyboard: shrink an opened-out preview first.
     collapseMedia() { return R.collapseMedia(); },
     pdfInfo(payload) { R.pdfInfo(payload); },

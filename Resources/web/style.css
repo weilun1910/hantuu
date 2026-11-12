@@ -668,3 +668,17 @@ body.reader.main .fresh { animation: hantuu-rise 0.28s ease-out; }
 .entry.user .queued-label { color: var(--secondary); font-size: 11px; }
 body.reader.main .entry.user > .queued-label { display: block; text-align: right; margin-bottom: 5px; }
 .entry.user.pending { animation: none; }
+
+.entry.user .send-now {
+  border: 0;
+  background: transparent;
+  color: var(--secondary);
+  font: inherit;
+  font-size: 11px;
+  padding: 3px 0;
+  cursor: pointer;
+  opacity: 0;
+}
+.entry.user:hover .send-now, .entry.user:focus-within .send-now { opacity: 1; }
+.entry.user .send-now:hover { text-decoration: underline; }
+.entry.user .send-now:focus-visible { outline: 1px solid currentColor; outline-offset: 3px; }
