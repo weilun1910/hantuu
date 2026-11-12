@@ -71,6 +71,7 @@ enum SelfTest {
         autoreleasepool { misc() }
         autoreleasepool { agentDetection() }
         autoreleasepool { surface(workdir) }
+        autoreleasepool { terminalFonts(workdir) }
         autoreleasepool { reader(workdir) }
         autoreleasepool { sessions(workdir) } // Sessions/SessionSelfTest.swift
         autoreleasepool { review(workdir) }

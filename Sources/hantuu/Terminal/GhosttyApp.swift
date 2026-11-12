@@ -27,6 +27,7 @@ final class GhosttyApp {
     @discardableResult
     static func start() -> GhosttyApp? {
         if let shared { return shared }
+        _ = TerminalFonts.registration
 
         // libghostty reads its environment at init. Point it at the resources we bundle so
         // shell integration and the xterm-ghostty terminfo work inside our surfaces.
@@ -53,7 +54,8 @@ final class GhosttyApp {
         return instance
     }
 
-    static func loadConfig(useGhosttyConfig: Bool = TerminalSettings.shared.useGhosttyConfig) -> ghostty_config_t? {
+    static func loadConfig(settings: TerminalSettings = .shared, sfMonoAvailable: Bool = TerminalFonts.registration.available,
+                           userConfigFiles: [URL]? = nil) -> ghostty_config_t? {
         guard let cfg = ghostty_config_new() else {
             Log.write("ghostty_config_new failed")
             return nil
@@ -63,9 +65,22 @@ final class GhosttyApp {
         } else {
             Log.write("terminal.ghostty not found, using Ghostty's defaults")
         }
-        if useGhosttyConfig {
-            ghostty_config_load_default_files(cfg)
-            ghostty_config_load_recursive_files(cfg)
+        do {
+            Paths.ensure(settings.fontConfigFile.deletingLastPathComponent())
+            try settings.fontConfig(sfMonoAvailable: sfMonoAvailable, useGhosttyConfig: settings.useGhosttyConfig)
+                .write(to: settings.fontConfigFile, atomically: true, encoding: .utf8)
+            settings.fontConfigFile.path.withCString { ghostty_config_load_file(cfg, $0) }
+        } catch {
+            Log.write("Could not apply terminal font settings: \(error.localizedDescription)")
+        }
+        if settings.useGhosttyConfig {
+            if let userConfigFiles {
+                // Self tests supply only fixture paths, including an empty list.
+                for file in userConfigFiles { file.path.withCString { ghostty_config_load_file(cfg, $0) } }
+            } else {
+                ghostty_config_load_default_files(cfg)
+                ghostty_config_load_recursive_files(cfg)
+            }
         }
         ghostty_config_finalize(cfg)
         return cfg
@@ -122,11 +137,17 @@ final class GhosttyApp {
     }
 
     /// Re-read the Ghostty config files (Ghostty's reload_config binding lands here).
-    func reloadConfig() {
-        guard let cfg = Self.loadConfig() else { return }
+    func reloadConfig(settings: TerminalSettings = .shared, resetFontSize: Bool = false,
+                      sfMonoAvailable: Bool = TerminalFonts.registration.available, userConfigFiles: [URL]? = nil) {
+        guard let cfg = Self.loadConfig(settings: settings, sfMonoAvailable: sfMonoAvailable, userConfigFiles: userConfigFiles) else { return }
         let old = config
         config = cfg
         ghostty_app_update_config(app, cfg)
+        // Ghostty preserves per-surface zoom during reload. An explicit size choice in
+        // Settings replaces that zoom too, including hidden chats and panel shells.
+        if resetFontSize {
+            for view in surfaces.allObjects { view.perform(binding: "reset_font_size") }
+        }
         ghostty_config_free(old)
         captureThemeColors()
     }

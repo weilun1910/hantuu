@@ -1,7 +1,9 @@
 # hantuu's terminal look, used for every chat and shell unless Settings > Terminal is set
 # to use your own Ghostty config instead. Same format as a Ghostty config file.
 
-# Type. JetBrains Mono is built into Ghostty, so this works without installing it.
+# Type. hantuu registers SF Mono from Terminal.app for this process at launch.
+# JetBrains Mono is built into Ghostty and remains available if SF Mono is missing.
+font-family = "SF Mono"
 font-family = "JetBrains Mono"
 font-size = 13
 font-thicken = true
