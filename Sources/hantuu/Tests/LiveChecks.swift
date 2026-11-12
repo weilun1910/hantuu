@@ -1,0 +1,573 @@
+import AppKit
+import Combine
+import GhosttyKit
+
+/// Opt-in checks against installed CLIs. The ordinary self test only exercises the pure
+/// parsing and selection rules below. No fixture test launches an agent or reads its home.
+enum LiveCheckRules {
+    static let agents = ["claude", "codex"]
+    static let features = ["slash", "queued", "relaunch", "subagents"]
+
+    static func selection(_ value: String?, allowed: [String]) -> [String]? {
+        guard let value else { return allowed }
+        let parts = value.split(separator: ",", omittingEmptySubsequences: false)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+        guard !parts.isEmpty, parts.allSatisfy({ allowed.contains($0) }) else { return nil }
+        return allowed.filter { parts.contains($0) }
+    }
+
+    /// Only rows with a description count, never the bare slash in the input box, a path,
+    /// or a command mentioned in prose. Capture each page before comparing the catalogue.
+    static func commands(on screen: String) -> Set<String> {
+        let pattern = #"^\s*[│┃║>›❯●○*\s]*\/([A-Za-z][A-Za-z0-9_:-]*)[ \t]{2,}\S"#
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: .anchorsMatchLines) else { return [] }
+        let ns = screen as NSString
+        return Set(regex.matches(in: screen, range: NSRange(location: 0, length: ns.length))
+            .map { ns.substring(with: $0.range(at: 1)) })
+    }
+
+    static func featureEnabled(_ name: String, output: String) -> Bool? {
+        for line in output.split(whereSeparator: \.isNewline) {
+            let words = line.split(whereSeparator: \.isWhitespace).map(String.init)
+            guard words.first == name, let last = words.last else { continue }
+            if last == "true" { return true }
+            if last == "false" { return false }
+        }
+        return nil
+    }
+
+    /// Trust, approval and update prompts are never answered, even when a picker was
+    /// expected. Generic menus are allowed only during suggestion or model inspection.
+    static func blocker(_ screen: String, allowingMenu: Bool = false) -> String? {
+        let state = TerminalScreen.analyze(screen)
+        if let menu = state.menu, menu.kind != .menu || !allowingMenu { return menu.title(agent: "Agent") }
+        let tail = screen.split(whereSeparator: \.isNewline).suffix(24).joined(separator: "\n").lowercased()
+        let approvals = ["do you want to proceed", "would you like to run", "allow this tool", "allow once",
+                         "yes, allow", "approve this", "requires approval", "permission required",
+                         "sign in to", "log in to", "select login method"]
+        if approvals.contains(where: tail.contains) { return "Permission or sign-in prompt" }
+        return nil
+    }
+
+    static func inside(_ child: URL, _ parent: URL) -> Bool {
+        let c = child.standardizedFileURL.resolvingSymlinksInPath().path
+        let p = parent.standardizedFileURL.resolvingSymlinksInPath().path
+        return c == p || c.hasPrefix(p + "/")
+    }
+
+    static func oneLine(_ text: String) -> String {
+        text.split(whereSeparator: \.isWhitespace).joined(separator: " ")
+    }
+}
+
+extension SelfTest {
+    static func liveChecksLogic(_ dir: URL) {
+        check("live checks: defaults cover both agents and all four features",
+              LiveCheckRules.selection(nil, allowed: LiveCheckRules.agents) == ["claude", "codex"] &&
+              LiveCheckRules.selection(nil, allowed: LiveCheckRules.features) == LiveCheckRules.features)
+        check("live checks: invalid selectors fail instead of silently running everything",
+              LiveCheckRules.selection("", allowed: LiveCheckRules.agents) == nil &&
+              LiveCheckRules.selection("claude,typo", allowed: LiveCheckRules.agents) == nil)
+        check("live checks: selectors trim, deduplicate and retain stable order",
+              LiveCheckRules.selection("codex, claude,codex", allowed: LiveCheckRules.agents) == ["claude", "codex"])
+        let claude = "❯ /cost    Show usage\n  /model   Choose model\n❯ /\nRead /tmp/file now"
+        let codex = "/status  Session information\n/model  Select model\n› /re\n/tmp/file  a path"
+        check("live checks: suggestion rows exclude prompts, prose and file paths",
+              LiveCheckRules.commands(on: claude) == ["cost", "model"] &&
+              LiveCheckRules.commands(on: codex) == ["status", "model"])
+        check("live checks: multi-agent gate distinguishes off from unknown",
+              LiveCheckRules.featureEnabled("multi_agent", output: "multi_agent stable true\nmulti_agent_v2 stable false") == true &&
+              LiveCheckRules.featureEnabled("multi_agent", output: "multi_agent stable false") == false &&
+              LiveCheckRules.featureEnabled("multi_agent", output: "unexpected output") == nil)
+        check("live checks: trust, update and approval remain blocked inside expected pickers",
+              ["Do you trust this folder?", "Update available. Update now", "Would you like to run this command?"].allSatisfy {
+                  LiveCheckRules.blocker($0, allowingMenu: true) != nil
+              })
+        check("live checks: only an explicitly expected ordinary menu permits navigation",
+              LiveCheckRules.blocker("Choose model\nEnter to select") != nil &&
+              LiveCheckRules.blocker("Choose model\nEnter to select", allowingMenu: true) == nil)
+        check("live checks: path containment respects folder boundaries",
+              LiveCheckRules.inside(dir.appendingPathComponent("live/data"), dir) &&
+              !LiveCheckRules.inside(URL(fileURLWithPath: dir.path + "-other/data"), dir))
+        check("live checks: diagnostics stay on one line", LiveCheckRules.oneLine("a\nb\t c") == "a b c")
+    }
+
+    static func liveChecks(_ dir: URL) {
+        let env = ProcessInfo.processInfo.environment
+        guard let raw = env["HANTUU_LIVE"], !raw.isEmpty else { return }
+        guard let agents = LiveCheckRules.selection(env["HANTUU_LIVE_AGENTS"], allowed: LiveCheckRules.agents),
+              let features = LiveCheckRules.selection(env["HANTUU_LIVE_FEATURES"], allowed: LiveCheckRules.features) else {
+            check("live configuration: selectors", false, "Use claude,codex and slash,queued,relaunch,subagents.")
+            return
+        }
+        let folder = URL(fileURLWithPath: raw).standardizedFileURL.resolvingSymlinksInPath()
+        var isDirectory: ObjCBool = false
+        guard raw.hasPrefix("/"), FileManager.default.fileExists(atPath: folder.path, isDirectory: &isDirectory), isDirectory.boolValue,
+              !LiveCheckRules.inside(folder, dir) else {
+            check("live configuration: probe folder", false, "HANTUU_LIVE must be an existing absolute trusted folder outside the self-test workdir, which is deleted at startup.")
+            return
+        }
+        guard LiveCheckRules.inside(Paths.dataDir, dir), SessionHelper.executable != nil,
+              ProcessInfo.processInfo.environment["HANTUU_NO_PMSET"] == "1" else {
+            check("live configuration: isolated app data and session helper", false,
+                  "Run scripts/selftest.sh without HANTUU_DATA_DIR; hantuu-session and HANTUU_NO_PMSET=1 are required.")
+            return
+        }
+        guard GhosttyApp.shared != nil || GhosttyApp.start() != nil else {
+            check("live configuration: libghostty", false)
+            return
+        }
+        setvbuf(stdout, nil, _IOLBF, 0)
+        let found = AgentCatalog.detect()
+        for agent in agents {
+            guard found.contains(where: { $0.id == agent }) else {
+                for feature in features { check("live \(agent) \(feature): installed CLI", false, "Executable not found in the login shell.") }
+                continue
+            }
+            let version = LiveCheckRules.oneLine(LoginShell.run(agent + " --version", timeout: 15))
+            check("live \(agent) setup: installed version \(version.isEmpty ? "unavailable" : version)", !version.isEmpty)
+            // This informational CLI command starts no model session. Do not enable flags:
+            // the suite tests the configuration the user actually runs.
+            let multiAgent = agent == "codex" && features.contains("subagents")
+                ? LiveCheckRules.featureEnabled("multi_agent", output: LoginShell.run("codex features list", timeout: 15)) : true
+            for feature in features {
+                if agent == "codex", feature == "subagents", multiAgent != true {
+                    if multiAgent == false {
+                        check("live codex subagents: SKIP multi_agent is disabled; enable it manually with --enable multi_agent to test; no prompt sent", true)
+                    } else {
+                        check("live codex subagents: feature availability", false, "Could not parse codex features list; no prompt sent.")
+                    }
+                    continue
+                }
+                let probe = LiveCheckSession(agent: agent, feature: feature, folder: folder, dir: dir,
+                                             codexModel: env["HANTUU_LIVE_CODEX_MODEL"] ?? "gpt-6-luna")
+                defer { probe.finish() }
+                guard probe.start() else { continue }
+                switch feature {
+                case "slash": probe.slash()
+                case "queued": probe.queued()
+                case "relaunch": probe.relaunch()
+                case "subagents": probe.subagents()
+                default: break
+                }
+            }
+        }
+    }
+}
+
+/// Each feature has its own chat and helper PID. Failure never carries a menu into the
+/// next feature. All app data stays in the self test; only CLIs write their own transcripts.
+private final class LiveCheckSession {
+    let agent: String
+    let feature: String
+    let folder: URL
+    let dir: URL
+    let codexModel: String
+    private var model: AppModel?
+    private var chatID: UUID?
+    private var info: SessionInfo?
+    private var center: StatusCenter?
+    private var watcher: BackgroundWatch?
+    private var reader: ReaderModeController?
+    private var childReader: SubagentReaderController?
+    private var mode: ReaderMode?
+    private var focus: AnyCancellable?
+    private var window: NSWindow?
+    private var host: FillView?
+    private var failure: String?
+    private var finished = false
+
+    var chat: Chat? { model?.selectedChat }
+    var terminal: TerminalView? { chat?.terminal }
+    var screen: String { terminal?.activeScreenText() ?? "" }
+
+    init(agent: String, feature: String, folder: URL, dir: URL, codexModel: String) {
+        self.agent = agent
+        self.feature = feature
+        self.folder = folder
+        self.dir = dir
+        self.codexModel = codexModel
+    }
+
+    private func report(_ name: String, _ ok: Bool, _ detail: String = "") {
+        let seen = LiveCheckRules.oneLine(detail)
+        SelfTest.check("live \(agent) \(feature): \(name)" + (ok && !seen.isEmpty ? " - " + seen : ""), ok,
+                       LiveCheckRules.oneLine(failure ?? detail))
+    }
+
+    private func safe(allowingMenu: Bool = false) -> Bool {
+        if failure != nil { return false }
+        if let reason = LiveCheckRules.blocker(screen, allowingMenu: allowingMenu) {
+            failure = "\(reason) left unanswered in \(folder.path). Trust that probe folder manually if needed. \(String(screen.suffix(450)))"
+        } else if chat?.status == .ended || terminal?.processExited != false {
+            failure = "Agent exited. \(String(screen.suffix(450)))"
+        } else if chat?.activity == .needsPermission {
+            failure = "Permission request left unanswered in \(folder.path)."
+        }
+        return failure == nil
+    }
+
+    private func tick() {
+        center?.poll()
+        reader?.refresh()
+    }
+
+    private func wait(_ seconds: TimeInterval, allowingMenu: Bool = false, until condition: () -> Bool) -> Bool {
+        let completed = SelfTest.waitUntil(seconds) {
+            self.tick()
+            return !self.safe(allowingMenu: allowingMenu) || condition()
+        }
+        return completed && failure == nil
+    }
+
+    private func pause(_ seconds: TimeInterval, allowingMenu: Bool = false) -> Bool {
+        let end = Date().addingTimeInterval(seconds)
+        return wait(seconds + 0.5, allowingMenu: allowingMenu) { Date() >= end }
+    }
+
+    func start() -> Bool {
+        guard SessionHelper.prepare() else { report("private helper directory", false); return false }
+        let app = AppModel()
+        model = app
+        let project = Project(path: folder.path)
+        let chat = Chat(projectID: project.id, agentID: agent)
+        if agent == "claude" { chat.sessionID = UUID().uuidString.lowercased() }
+        app.projects = [project]
+        app.chats = [chat]
+        app.selectedChatID = chat.id
+        chatID = chat.id
+        var argv = chat.agent.launchArguments(sessionID: chat.sessionID)
+        argv += agent == "claude" ? ["--model", "haiku"]
+            : ["--model", codexModel, "-c", "model_reasoning_effort=\"low\""]
+        app.launch(chat, argv: argv, in: project)
+        mount()
+        let ready = wait(90) {
+            let state = TerminalScreen.analyze(self.screen)
+            return state.ready && !state.busy && self.reader?.composerMode == .ready
+        }
+        info = SessionHelper.info(chat.id)
+        report("started in trusted folder with session helper", ready && info != nil,
+               ready && info != nil ? "model=\(agent == "claude" ? "haiku" : codexModel) helper=\(info!.pid) agent=\(info!.child)"
+               : "No ready prompt or helper after 90 seconds. \(String(screen.suffix(450)))")
+        return ready && info != nil
+    }
+
+    private func mount() {
+        guard let app = model, let chat = app.selectedChat, let terminal = chat.terminal else { return }
+        let w = NSWindow(contentRect: NSRect(x: -8000, y: -4000, width: 1100, height: 780),
+                         styleMask: [.titled], backing: .buffered, defer: false)
+        w.isReleasedWhenClosed = false
+        w.isRestorable = false
+        let host = FillView(color: Theme.background)
+        host.frame = NSRect(x: 0, y: 0, width: 1100, height: 780)
+        w.contentView = host
+        terminal.frame = host.bounds
+        host.addSubview(terminal)
+        window = w
+        self.host = host
+        let center = StatusCenter()
+        center.notifier = SelfTest.NoticeRecorder()
+        center.appIsActive = { true }
+        center.start(model: app, live: false)
+        self.center = center
+        let settings = ChatSettings(file: dir.appendingPathComponent("live-\(chat.id)-settings.json"))
+        settings.showChatsAsReader = true
+        let mode = ReaderMode(settings: settings)
+        self.mode = mode
+        let rm = ReaderModeController(model: app, mode: mode)
+        rm.statusProvider = { [weak center] in center?.state(of: $0.id) }
+        rm.permitsSubmit = { [weak self] _ in
+            guard let self else { return false }
+            // The command's own completion list is expected before submitting /model.
+            return self.safe(allowingMenu: !LiveCheckRules.commands(on: self.screen).isEmpty)
+        }
+        reader = rm
+        rm.install(in: host, top: host.topAnchor, above: terminal)
+        rm.onLayoutChange = { [weak self] in self?.layout() }
+        focus = app.focusRequest.sink { [weak self] view in
+            guard let self else { return }
+            self.layout()
+            if let target = self.reader?.focusTarget(for: view) { self.window?.makeFirstResponder(target) }
+        }
+        let watcher = BackgroundWatch()
+        // A short child can finish between the ordinary two-second polls.
+        watcher.interval = 0.1
+        watcher.deliver = { [weak center] id, summary in center?.backgroundChanged(id, summary) }
+        watcher.start(model: app)
+        self.watcher = watcher
+        w.orderFrontRegardless()
+        layout()
+    }
+
+    private func layout() {
+        guard let chat, let reader else { return }
+        let layout = reader.sync(selected: chat)
+        terminal?.setVisible(!layout.showsReader)
+        host?.layoutSubtreeIfNeeded()
+    }
+
+    private func unmount() {
+        watcher?.stop()
+        watcher = nil
+        childReader?.root.removeFromSuperview()
+        childReader = nil
+        _ = reader?.sync(selected: nil)
+        reader?.root.removeFromSuperview()
+        reader?.peekBar.removeFromSuperview()
+        reader = nil
+        mode = nil
+        focus = nil
+        center = nil
+        if let app = model {
+            for chat in app.chats {
+                chat.discoveryTimer?.invalidate()
+                chat.discoveryTimer = nil
+                chat.follower?.stop()
+                chat.follower = nil
+                chat.transcriptRecovery = nil
+                chat.terminal?.events = nil
+                chat.terminal?.destroy()
+                chat.terminal = nil
+            }
+        }
+        window?.orderOut(nil)
+        window?.close()
+        window = nil
+        host = nil
+        model = nil
+    }
+
+    func finish() {
+        guard !finished else { return }
+        finished = true
+        // Capture IDs before detaching. The helper owns and signals only this session's
+        // process group. Never kill a process by executable name.
+        let owned = chatID.flatMap(SessionHelper.info) ?? info
+        unmount()
+        if let id = chatID { _ = SessionHelper.killNow(id) }
+        func gone() -> Bool {
+            if let id = chatID, SessionHelper.info(id) != nil { return false }
+            guard let owned else { return true }
+            return kill(owned.child, 0) != 0 && kill(owned.pid, 0) != 0
+        }
+        var stopped = SelfTest.waitUntil(8, gone)
+        if !stopped, let id = chatID, let owned, let current = SessionHelper.info(id),
+           current.pid == owned.pid, current.child == owned.child {
+            // The socket request failed, but this session still proves ownership of the
+            // PID. SIGTERM makes the helper stop its own child group and wait for it.
+            kill(owned.pid, SIGTERM)
+            stopped = SelfTest.waitUntil(8, gone)
+        }
+        report("cleanup stopped owned helper and agent PIDs", stopped,
+               "helper=\(owned?.pid ?? -1) agent=\(owned?.child ?? -1).")
+    }
+
+    private func send(_ text: String) -> Bool {
+        guard safe(), let reader else { return false }
+        reader.refresh()
+        reader.composer.textView.text = text
+        return reader.send()
+    }
+
+    private func body(_ selector: String = "document.body") -> String {
+        guard let page = reader?.reader?.page else { return "" }
+        return SelfTest.js(page, "\(selector).innerText") as? String ?? ""
+    }
+
+    private func countUser(_ prompt: String, pending: Bool = false) -> Int {
+        guard let page = reader?.reader?.page,
+              let data = try? JSONEncoder().encode(prompt), let literal = String(data: data, encoding: .utf8) else { return -1 }
+        let selector = pending ? "section.entry.user.pending" : "section.entry.user:not(.pending)"
+        return (SelfTest.js(page, "Array.from(document.querySelectorAll('\(selector)')).filter(e => e.innerText.includes(\(literal))).length") as? NSNumber)?.intValue ?? -1
+    }
+
+    private func reply(_ token: String) -> Bool {
+        guard let chat, let page = reader?.reader?.page,
+              let data = try? JSONEncoder().encode(token), let literal = String(data: data, encoding: .utf8) else { return false }
+        let rendered = SelfTest.js(page,
+            "Array.from(document.querySelectorAll('section.entry.assistant')).some(e => e.innerText.includes(\(literal)))") as? Bool
+        return chat.allEntries.contains { $0.kind == .assistant && $0.text.contains(token) } && rendered == true
+    }
+
+    private func arrowDown() {
+        guard let surface = terminal?.surface else { return }
+        var key = ghostty_input_key_s()
+        key.keycode = 125
+        key.mods = GHOSTTY_MODS_NONE
+        key.consumed_mods = GHOSTTY_MODS_NONE
+        key.text = nil
+        key.unshifted_codepoint = 0
+        key.composing = false
+        key.action = GHOSTTY_ACTION_PRESS
+        _ = ghostty_surface_key(surface, key)
+        key.action = GHOSTTY_ACTION_RELEASE
+        _ = ghostty_surface_key(surface, key)
+    }
+
+    func slash() {
+        var observed = Set<String>()
+        var bounded = false
+        for prefix in ["/", "/c", "/m", "/re"] {
+            guard safe(), let terminal else { report("suggestion scan", false); return }
+            terminal.typeCommandText(prefix)
+            guard pause(0.6, allowingMenu: true) else { report("suggestion scan", false); return }
+            var seen = Set<String>()
+            var ended = false
+            for _ in 0..<160 {
+                guard safe(allowingMenu: true) else { report("suggestion scan", false); return }
+                let current = screen
+                observed.formUnion(LiveCheckRules.commands(on: current))
+                if !seen.insert(current).inserted { ended = true; break }
+                arrowDown()
+                guard pause(0.2, allowingMenu: true) else { report("suggestion scan", false); return }
+            }
+            bounded = bounded || !ended
+            terminal.pressEscape()
+            terminal.pressBackspace(times: 256)
+            guard wait(3, allowingMenu: true, until: { TerminalScreen.analyze(self.screen).menu == nil }) else {
+                report("cleared suggestions", false); return
+            }
+        }
+        report("suggestions paged without submitting", !observed.isEmpty && !bounded,
+               "Observed \(observed.sorted().joined(separator: ",")); traversal cap reached=\(bounded).")
+        guard !observed.isEmpty, failure == nil, let app = model, let chat else { return }
+        var listed: [ReaderCommand]?
+        let catalogue = ReaderCommandCatalog()
+        catalogue.load(.init(agent: agent, folder: app.workingDirectory(of: chat), transcript: chat.transcriptPath)) { listed = $0 }
+        guard wait(10, until: { listed != nil }) else { report("loaded command catalogue", false); return }
+        let names = Set((listed ?? []).filter { $0.sigil == "/" }.map(\.name))
+        report("TUI commands present in reader", observed.subtracting(names).isEmpty,
+               "Missing in reader: \(observed.subtracting(names).sorted().joined(separator: ",")).")
+        report("reader commands observed in TUI", names.subtracting(observed).isEmpty && !bounded,
+               "Not observed in TUI (may be gated): \(names.subtracting(observed).sorted().joined(separator: ",")).")
+
+        let sent = send("/model")
+        let peeked = sent && wait(15, allowingMenu: true) {
+            self.mode?.isPeeking(chat) == true && TerminalScreen.analyze(self.screen).menu != nil && self.screen.lowercased().contains("model")
+        }
+        report("/model opens the real picker and peeks terminal", peeked, String(screen.suffix(450)))
+        guard peeked, safe(allowingMenu: true) else { return }
+        terminal?.pressEscape()
+        let returned = wait(15, allowingMenu: true) {
+            TerminalScreen.analyze(self.screen).menu == nil && self.mode?.showsReader(chat) == true &&
+                self.window?.firstResponder === self.reader?.composer.textView
+        }
+        report("Esc returns to reader with composer focus", returned, String(screen.suffix(450)))
+        guard returned else { return }
+
+        // /cost is a panel in current Claude builds. /status is also presented as terminal
+        // output by some Codex builds. Record what the real reader exposes without requiring
+        // a transcript line that the provider may not write.
+        let command = agent == "claude" ? "/cost" : "/status"
+        let before = Set(chat.allEntries.map(\.id))
+        let commandSent = send(command)
+        let shown = commandSent && wait(15, allowingMenu: true) {
+            let added = chat.allEntries.filter { !before.contains($0.id) }
+            let rendered = added.contains { $0.kind == .notice && !$0.text.hasPrefix("Ran /") && self.body().contains($0.text) }
+            let markers = self.agent == "claude" ? ["total cost", "total duration", "total tokens", "usage"]
+                : ["context", "session", "token", "usage"]
+            let terminalOutput = markers.contains { self.screen.lowercased().contains($0) }
+            return rendered || (self.mode?.isPeeking(chat) == true && terminalOutput && self.reader?.isTyping == false)
+        }
+        let notices = chat.allEntries.filter { !before.contains($0.id) && $0.kind == .notice }.map(\.text).joined(separator: " | ")
+        report("\(command) exposes local output", shown, "reader notices=\(notices); terminal peek=\(mode?.isPeeking(chat) == true); \(String(screen.suffix(450)))")
+        report("reader presentation for local command", shown,
+               notices.isEmpty ? "Terminal peek; no transcript notice." : notices)
+    }
+
+    func queued() {
+        let first = "Without tools, count from 1 to 60, one number per line, then say done."
+        let token = "queue" + UUID().uuidString.prefix(8).lowercased()
+        let second = "Without tools, reply only \(token)."
+        let sent = send(first)
+        let busy = sent && wait(45) {
+            TerminalScreen.analyze(self.screen).busy && self.reader?.isTyping == false &&
+                self.reader?.composerMode.isWorking == true
+        }
+        report("first turn is busy before second send", busy, String(screen.suffix(450)))
+        guard busy, let chat else { return }
+        let queued = send(second)
+        let pending = chat.pendingMessages.entries.filter { $0.text == second && $0.pending == true }
+        report("second send immediately enters pending queue", queued && pending.count == 1,
+               "Matching pending entries=\(pending.count).")
+        let shown = wait(3) { self.countUser(second, pending: true) == 1 && self.body().contains("Queued") }
+        report("reader shows one Queued message", shown, String(body().suffix(450)))
+        let delivered = wait(120) {
+            chat.allEntries.filter { $0.kind == .user && $0.text == second }.count == 1 &&
+                !chat.pendingMessages.entries.contains { $0.text == second } && self.reply(token)
+        }
+        report("queued send becomes one real user message and receives reply", delivered,
+               "users=\(chat.allEntries.filter { $0.kind == .user && $0.text == second }.count), pending=\(chat.pendingMessages.entries.count).")
+        report("reader has no duplicate after queue delivery",
+               delivered && countUser(first) == 1 && countUser(second) == 1 && countUser(second, pending: true) == 0,
+               "first=\(countUser(first)) second=\(countUser(second)) pending=\(countUser(second, pending: true)).")
+    }
+
+    func relaunch() {
+        let beforeToken = "before" + UUID().uuidString.prefix(8).lowercased()
+        let afterToken = "after" + UUID().uuidString.prefix(8).lowercased()
+        let first = "Without tools, reply only \(beforeToken)."
+        let second = "Without tools, reply only \(afterToken)."
+        let sent = send(first)
+        let answered = sent && wait(120) { self.reply(beforeToken) && self.reader?.composerMode == .ready && !TerminalScreen.analyze(self.screen).busy }
+        report("first message and reply rendered before quit", answered)
+        guard answered, let id = chatID, let previous = SessionHelper.info(id) else { return }
+        model?.save()
+        weak var oldModel = model
+        weak var oldReader = reader
+        unmount()
+        let detached = SelfTest.waitUntil(10) { SessionHelper.info(id)?.attached == false }
+        report("quit releases app objects while the same agent survives",
+               detached && oldModel == nil && oldReader == nil && SessionHelper.info(id)?.child == previous.child,
+               "detached=\(detached), model released=\(oldModel == nil), reader released=\(oldReader == nil).")
+        let restored = AppModel()
+        model = restored
+        restored.load()
+        restored.select(id)
+        mount()
+        let reattached = wait(60) {
+            SessionHelper.info(id)?.child == previous.child && SessionHelper.info(id)?.attached == true &&
+                self.reader?.composerMode == .ready && self.reply(beforeToken)
+        }
+        report("saved state reload reattaches same PID and replays history", reattached)
+        guard reattached else { return }
+        let nextSent = send(second)
+        let replied = nextSent && wait(120) { self.reply(afterToken) }
+        report("reader follows message and reply after relaunch",
+               replied && countUser(first) == 1 && countUser(second) == 1 && reply(beforeToken),
+               "first=\(countUser(first)), second=\(countUser(second)); \(String(screen.suffix(450)))")
+    }
+
+    func subagents() {
+        guard let app = model, let chat, let host else { return }
+        let token = "child" + UUID().uuidString.prefix(8).lowercased()
+        let tool = agent == "claude" ? "Agent tool with model haiku" : "spawn_agent tool with your current model"
+        let prompt = "Use the \(tool) to start exactly one subagent whose only task is to reply \(token) without tools or file access; wait for it, then reply done."
+        let sent = send(prompt)
+        let found = sent && wait(120) { app.subagentBrowser.count(for: chat.id) > 0 }
+        report("sidebar observes an open subagent", found,
+               found ? "open=\(app.subagentBrowser.count(for: chat.id))"
+               : "No active row observed. A missing tool is not established by an assistant refusal. \(String(screen.suffix(450)))")
+        guard found, let child = app.subagentBrowser.open[chat.id]?.first else { return }
+        app.selectSubagent(child.id, in: chat.id)
+        let childReader = SubagentReaderController(model: app)
+        self.childReader = childReader
+        childReader.install(in: host, top: host.topAnchor)
+        childReader.sync()
+        let rendered = wait(120) {
+            childReader.sync()
+            guard let path = app.subagentBrowser.selection?.agent.transcript,
+                  FileManager.default.fileExists(atPath: path) else { return false }
+            return (SelfTest.js(childReader.reader.page,
+                                "Array.from(document.querySelectorAll('section.entry.assistant')).some(e => e.innerText.includes('\(token)'))") as? Bool) == true
+        }
+        report("child transcript is found and renders in its reader", rendered,
+               "transcript=\(app.subagentBrowser.selection?.agent.transcript ?? "not found").")
+        let retired = wait(60) {
+            childReader.sync()
+            return app.subagentBrowser.count(for: chat.id) == 0 && app.subagentBrowser.selection?.agent.state.isActive == false
+        }
+        report("completed child leaves open sidebar list", retired,
+               "open=\(app.subagentBrowser.count(for: chat.id)).")
+    }
+}

@@ -675,7 +675,8 @@ final class AppModel: ObservableObject, TerminalEvents {
         select(chat.id)
     }
 
-    private func launch(_ chat: Chat, argv: [String], in project: Project) {
+    // Live checks use this same launch path with an explicit inexpensive model.
+    func launch(_ chat: Chat, argv: [String], in project: Project) {
         guard let g = GhosttyApp.shared else { return }
         let cwd = workingDirectory(of: chat)
         // The agent runs inside hantuu-session, so it outlives the app (Sessions/).

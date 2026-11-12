@@ -31,6 +31,12 @@ enum SelfTest {
     }
 
     static func run(workdir: URL) -> Int32 {
+        if let folder = ProcessInfo.processInfo.environment["HANTUU_LIVE"], !folder.isEmpty,
+           LiveCheckRules.inside(URL(fileURLWithPath: folder), workdir) {
+            check("live configuration: preserve probe folder", false,
+                  "HANTUU_LIVE must be outside the self-test workdir, which is deleted at startup.")
+            return 1
+        }
         try? FileManager.default.removeItem(at: workdir)
         Paths.ensure(workdir)
         print("hantuu self test, workdir \(workdir.path)\n")
@@ -62,6 +68,8 @@ enum SelfTest {
         fileViewer(workdir) // the Code tab as a file viewer and editor (FileViewer/FileViewerSelfTest.swift)
         usage(workdir)    // usage limits and the footer rings (Usage/UsageSelfTest.swift)
         keepAwake(workdir)  // the lid-shut switch, its limits, the crash check (Tests/KeepAwakeSelfTest.swift)
+        liveChecksLogic(workdir)
+        liveChecks(workdir) // Real agents only when HANTUU_LIVE names a trusted probe folder.
 
         print("\n\(passes) passed, \(failures) failed")
         return failures == 0 ? 0 : 1

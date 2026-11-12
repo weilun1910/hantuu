@@ -17,6 +17,8 @@ final class ReaderModeController: NSObject {
     var statusProvider: (Chat) -> StatusState? = { StatusCenter.shared.state(of: $0.id) }
     /// MainAreaController re-runs its layout when the face or the peek changes.
     var onLayoutChange: (() -> Void)?
+    /// Opt-in live probes veto Return if a safety menu appeared after the paste began.
+    var permitsSubmit: (TerminalView) -> Bool = { _ in true }
 
     let root = FillView(color: Theme.background)
     let bottom = NSView()
@@ -536,7 +538,7 @@ final class ReaderModeController: NSObject {
             // The same pause TerminalView.submit leaves, so the agent has taken the paste in.
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
                 guard let self, self.outbox.first?.id == id else { return }
-                if self.canType(id) {
+                if self.canType(id) && self.permitsSubmit(t) {
                     t.pressReturn()
                     if let command { self.didSendCommand(command, terminal: t) }
                 }
