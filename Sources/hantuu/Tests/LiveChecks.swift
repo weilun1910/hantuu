@@ -7,7 +7,30 @@ import Darwin
 /// parsing and selection rules below. No fixture test launches an agent or reads its home.
 enum LiveCheckRules {
     static let agents = ["claude", "codex"]
-    static let features = ["slash", "queued", "send-now", "relaunch", "subagents", "reader", "review", "sidebar", "side", "composer", "command-arguments"]
+    static let features = ["slash", "queued", "send-now", "relaunch", "subagents", "reader", "review", "sidebar", "side", "composer", "command-arguments", "menus"]
+
+    /// The only permission the menus probe can approve is its generated printf token.
+    static func menuProbeCommandMatches(inputJSON: String, expected: String) -> Bool {
+        guard expected.range(of: #"^printf '%s\\n' 'menuprobe[a-f0-9]{32}'$"#, options: .regularExpression) != nil,
+              let data = inputJSON.data(using: .utf8),
+              let input = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+              input["command"] as? String == expected,
+              input["dangerouslyDisableSandbox"] as? Bool != true,
+              input["run_in_background"] as? Bool != true else { return false }
+        return true
+    }
+
+    /// Require explicit current effort text; a list of supported levels is not evidence.
+    static func currentClaudeEffort(_ menu: ReaderMenu) -> String? {
+        guard menu.agent == "claude", menu.actionable, menu.allowsHorizontal,
+              menu.kind == .model || menu.kind == .effort else { return nil }
+        if menu.horizontalSelection, menu.kind == .effort,
+           let selected = menu.selected, ["low", "medium", "high", "xhigh", "max"].contains(selected) { return selected }
+        let text = ([menu.context, menu.footer] + menu.options.map(\.detail)).joined(separator: "\n").lowercased()
+        let pattern = #"(?:current effort|effort(?: level)?)\s*:\s*(low|medium|high|max)\b"#
+        guard let range = text.range(of: pattern, options: .regularExpression) else { return nil }
+        return String(text[range]).components(separatedBy: ":").last?.trimmingCharacters(in: .whitespaces)
+    }
 
     /// Codex walks ancestors itself, so a Git ceiling environment variable is insufficient.
     static func gitAncestor(_ folder: URL, exists: (URL) -> Bool = { FileManager.default.fileExists(atPath: $0.path) }) -> URL? {
@@ -264,8 +287,8 @@ extension SelfTest {
         let env = ProcessInfo.processInfo.environment
         guard let raw = env["HANTUU_LIVE"], !raw.isEmpty else { return }
         guard let agents = LiveCheckRules.selection(env["HANTUU_LIVE_AGENTS"], allowed: LiveCheckRules.agents),
-              let features = LiveCheckRules.selection(env["HANTUU_LIVE_FEATURES"], allowed: LiveCheckRules.features) else {
-            check("live configuration: selectors", false, "Use claude,codex and slash,queued,send-now,relaunch,subagents,reader,review,sidebar,side,composer,command-arguments.")
+              let features = LiveCheckRules.selection(env["HANTUU_LIVE_FEATURES"] ?? LiveCheckRules.features.filter { $0 != "menus" }.joined(separator: ","), allowed: LiveCheckRules.features) else {
+            check("live configuration: selectors", false, "Use claude,codex and slash,queued,send-now,relaunch,subagents,reader,review,sidebar,side,composer,command-arguments,menus.")
             return
         }
         let folder = URL(fileURLWithPath: raw).standardizedFileURL.resolvingSymlinksInPath()
@@ -322,6 +345,7 @@ extension SelfTest {
                     case "side": probe.sideQuestions()
                     case "composer": probe.composerParity()
                     case "command-arguments": probe.commandArguments()
+                    case "menus": probe.menus()
                     default: break
                     }
                 }
@@ -354,6 +378,30 @@ private final class LiveCheckSession {
     private var host: FillView?
     private var failure: String?
     private var finished = false
+    // Scoped to this disposable menus chat, one exact structured request at a time.
+    private var menuProbeCommand: String?
+    private var menuProbeQuestion: String?
+
+    private func scopedMenuRequests() -> [ReaderRequest] {
+        guard feature == "menus", let chat, let session = chat.sessionID,
+              let provider = ReaderRequestProvider(rawValue: agent) else { return [] }
+        return ReaderRequestBridge.poll(chatID: chat.id, sessionID: session, provider: provider)
+    }
+
+    private func matchesMenuProbe(_ request: ReaderRequest) -> Bool {
+        guard feature == "menus", let chat, request.chatID == chat.id,
+              request.sessionID == chat.sessionID, request.resolvedProvider.rawValue == agent,
+              request.cwd.map({ URL(fileURLWithPath: $0).standardizedFileURL.resolvingSymlinksInPath() == folder }) == true else { return false }
+        if let expected = menuProbeCommand, request.tool == "Bash" {
+            return LiveCheckRules.menuProbeCommandMatches(inputJSON: request.inputJSON, expected: expected)
+        }
+        if let question = menuProbeQuestion, request.tool == "AskUserQuestion", agent == "claude" {
+            return request.questions.count == 1 && request.questions[0].question == question &&
+                request.questions[0].options.map(\.label) == ["First", "Second"] &&
+                request.questions[0].multiSelect != true
+        }
+        return false
+    }
 
     var chat: Chat? { model?.selectedChat }
     var terminal: TerminalView? { chat?.terminal }
@@ -376,6 +424,16 @@ private final class LiveCheckSession {
 
     private func safe(allowingMenu: Bool = false) -> Bool {
         if failure != nil { return false }
+        let requests = feature == "menus" ? scopedMenuRequests() : []
+        let scopedRequest = requests.count == 1 && matchesMenuProbe(requests[0])
+        // Never exempt login, trust or update screens, even alongside a matching hook.
+        let terminalMenu = TerminalScreen.analyze(screen).menu
+        let tail = screen.split(whereSeparator: \.isNewline).suffix(24).joined(separator: " ").lowercased()
+        let hardBoundary = (terminalMenu.map { $0.kind == .trust || $0.kind == .update } ?? false) ||
+            ["sign in to", "log in to", "select login method"].contains(where: tail.contains)
+        if scopedRequest && !hardBoundary && terminal?.processExited == false && chat?.status != .ended {
+            return true
+        }
         if let reason = LiveCheckRules.blocker(screen, allowingMenu: allowingMenu) {
             failure = "\(reason) left unanswered in \(folder.path). Trust that probe folder manually if needed. \(String(screen.suffix(450)))"
         } else if chat?.status == .ended || terminal?.processExited != false {
@@ -425,6 +483,10 @@ private final class LiveCheckSession {
             : ["--model", codexModel, "-c", "model_reasoning_effort=\"low\""]
         if agent == "codex", feature == "subagents" {
             argv += ["-c", "features.multi_agent_v2=true"]
+        }
+        if feature == "menus" {
+            argv += agent == "claude" ? ["--permission-mode", "default"]
+                : ["-c", "approval_policy=\"untrusted\"", "-c", "sandbox_mode=\"read-only\""]
         }
         app.launch(chat, argv: argv, in: project)
         mount()
@@ -599,6 +661,248 @@ private final class LiveCheckSession {
         _ = ghostty_surface_key(surface, key)
     }
 
+    /// A response file removes the pending hook before the terminal redraws. Observe that
+    /// transition without sending anything or treating a stale permission status as new.
+    private func settleMenuResponse() -> Bool {
+        let settled = SelfTest.waitUntil(45) {
+            self.tick()
+            return self.reader?.composerMode == .ready && self.reader?.isTyping == false &&
+                TerminalScreen.analyze(self.screen).menu == nil && self.chat?.activity != .needsPermission
+        }
+        report("response reaches ready boundary without further input", settled)
+        return settled && safe()
+    }
+
+    /// Explicit live feature. Captures are real TUI screens; source fixtures live elsewhere.
+    func menus() {
+        guard let reader, let chat, safe() else { return }
+        func capture(_ name: String) {
+            do { try screen.write(to: dir.appendingPathComponent("live-\(agent)-menus-\(name).txt"), atomically: true, encoding: .utf8) }
+            catch { report("raw menu capture", false, String(describing: error)) }
+        }
+        let opened = send("/model") && wait(15, allowingMenu: true) {
+            reader.mirroredMenu?.kind == .model || TerminalScreen.analyze(self.screen).menu != nil
+        }
+        capture("model")
+        report("model picker opened", opened)
+        guard opened, safe(allowingMenu: true) else { return }
+        var originalModelLabel: String?
+        if let menu = reader.mirroredMenu, menu.kind == .model, menu.actionable,
+           let current = menu.options.first(where: { $0.label.contains("(current)") })?.label {
+            originalModelLabel = current
+            let selected = reader.chooseMenuOption(label: current)
+            let settled = selected && wait(15, allowingMenu: true) {
+                reader.mirroredMenu?.kind == .effort || TerminalScreen.analyze(self.screen).menu == nil
+            }
+            report("same current model selected through reader", settled)
+            capture("after-model")
+            guard settled else { return }
+        } else {
+            report("SKIP same-model selection: no exact actionable current label", true,
+                   "Raw capture retained. No model confirmation sent.")
+        }
+        if agent == "claude" {
+            // Prefer a verified inline value; otherwise open Claude's dedicated slider.
+            if reader.mirroredMenu.flatMap(LiveCheckRules.currentClaudeEffort) == nil {
+                if TerminalScreen.analyze(screen).menu != nil {
+                    if reader.mirroredMenu != nil { _ = reader.sendMenuKey(.escape) }
+                    else { dismissPicker() }
+                    guard wait(15, allowingMenu: true, until: { reader.composerMode == .ready && TerminalScreen.analyze(self.screen).menu == nil }) else { return }
+                }
+                let openedEffort = send("/effort") && wait(15, allowingMenu: true) {
+                    reader.mirroredMenu != nil || TerminalScreen.analyze(self.screen).menu != nil
+                }
+                capture("effort-baseline")
+                guard openedEffort else { report("effort picker opened", false); return }
+            }
+            if let baseline = reader.mirroredMenu,
+               let baselineEffort = LiveCheckRules.currentClaudeEffort(baseline),
+               let index = ["low", "medium", "high", "xhigh", "max"].firstIndex(of: baselineEffort), index < 4,
+               baseline.horizontalSelection ? index + 1 < baseline.options.count : index < 2 {
+                let expectedEffort = ["low", "medium", "high", "xhigh", "max"][index + 1]
+                let right = reader.sendMenuKey(.right)
+                let changed = right && wait(10, allowingMenu: true) {
+                    guard let current = reader.mirroredMenu else { return false }
+                    return current.agent == baseline.agent && current.kind == baseline.kind &&
+                        current.title == baseline.title &&
+                        (baseline.horizontalSelection || current.selected == baseline.selected) &&
+                        LiveCheckRules.currentClaudeEffort(current) == expectedEffort
+                }
+                capture("effort-adjusted")
+                report("effort Right produces an observed change", changed)
+                guard changed, let current = reader.mirroredMenu, current.actionable, current.allowsHorizontal else { return }
+                let left = reader.sendMenuKey(.left)
+                let restored = left && wait(10, allowingMenu: true) { reader.mirroredMenu == baseline }
+                capture("effort-restored")
+                report("effort Left restores exact original display", restored)
+                guard restored else { return }
+            } else {
+                report("SKIP effort roundtrip: no verified current value with an available higher level", true)
+            }
+        } else {
+            func effortIdentity(_ label: String) -> String {
+                label.replacingOccurrences(of: " (current)", with: "").trimmingCharacters(in: .whitespaces)
+            }
+            func reopenEffort() -> Bool {
+                guard send("/model"), wait(15, allowingMenu: true, until: { reader.mirroredMenu?.kind == .model }),
+                      let modelMenu = reader.mirroredMenu, modelMenu.actionable,
+                      let originalModelLabel, modelMenu.options.contains(where: { $0.label == originalModelLabel }),
+                      reader.chooseMenuOption(label: originalModelLabel) else { return false }
+                return wait(15, allowingMenu: true) { reader.mirroredMenu?.kind == .effort }
+            }
+            if let baseline = reader.mirroredMenu, baseline.kind == .effort,
+               baseline.actionable, baseline.allowsSessionConfirm,
+               baseline.options.filter({ $0.label.contains("(current)") }).count == 1,
+               let current = baseline.options.first(where: { $0.label.contains("(current)") }),
+               let alternate = baseline.options.first(where: {
+                   !$0.label.contains("(current)") && ["Low", "Medium", "Medium (default)", "High", "Extra high"].contains($0.label)
+               }),
+               originalModelLabel != nil {
+                let originalIdentity = effortIdentity(current.label)
+                let alternateIdentity = effortIdentity(alternate.label)
+                let selected = reader.chooseMenuOption(label: alternate.label, sessionOnly: true)
+                let closed = selected && wait(15, allowingMenu: true) {
+                    reader.mirroredMenu == nil && reader.composerMode == .ready
+                }
+                report("alternate effort selected for this session only", closed)
+                guard closed, reopenEffort(), let changed = reader.mirroredMenu,
+                      changed.actionable, changed.allowsSessionConfirm else {
+                    report("effort picker reopens for restoration", false); return
+                }
+                capture("effort-adjusted")
+                let changedCurrent = changed.options.filter { $0.label.contains("(current)") }
+                let confirmedAlternate = changedCurrent.count == 1 && effortIdentity(changedCurrent[0].label) == alternateIdentity
+                report("reopened effort confirms alternate current value", confirmedAlternate)
+                guard confirmedAlternate,
+                      let restoreLabel = changed.options.first(where: { effortIdentity($0.label) == originalIdentity })?.label,
+                      reader.chooseMenuOption(label: restoreLabel, sessionOnly: true),
+                      wait(15, allowingMenu: true, until: { reader.mirroredMenu == nil && reader.composerMode == .ready }),
+                      reopenEffort(), let restored = reader.mirroredMenu else {
+                    report("original effort restored for this session", false); return
+                }
+                capture("effort-restored")
+                let restoredCurrent = restored.options.filter { $0.label.contains("(current)") }
+                let verified = restored.actionable && restoredCurrent.count == 1 &&
+                    effortIdentity(restoredCurrent[0].label) == originalIdentity
+                report("reopened effort verifies original current value", verified)
+                guard verified else { return }
+            } else {
+                report("SKIP Codex effort roundtrip: full current/alternate labels or session-only footer unavailable", true)
+            }
+        }
+        if TerminalScreen.analyze(screen).menu != nil {
+            if reader.mirroredMenu != nil { _ = reader.sendMenuKey(.escape) }
+            else { dismissPicker() }
+        }
+        guard wait(15, allowingMenu: true, until: { TerminalScreen.analyze(self.screen).menu == nil && reader.composerMode == .ready }) else { return }
+
+        if agent == "claude" {
+            let question = "Menu probe " + UUID().uuidString
+            menuProbeQuestion = question
+            defer { menuProbeQuestion = nil }
+            let prompted = send("Use AskUserQuestion now with exactly one single-select question: \(question). Use exactly two options, First and Second. Do not use any other tools. After the answer, reply done.")
+            var request: ReaderRequest?
+            let found = prompted && wait(45, allowingMenu: true) {
+                request = self.scopedMenuRequests().first(where: self.matchesMenuProbe)
+                return request != nil || (reader.composerMode == .ready && !reader.isTyping)
+            }
+            capture("question")
+            if found, let request, let interaction = reader.reader?.interaction {
+                interaction.refresh()
+                _ = interaction.message(["type": "readerRequest", "requestID": request.id.uuidString,
+                                         "action": "answer", "answers": [question: "First"]])
+                let answered = chat.liveEntries.contains { $0.id == "request-response:" + request.id.uuidString }
+                report("structured question answered through reader", answered)
+                guard answered, settleMenuResponse() else { return }
+            } else {
+                report(failure == nil ? "SKIP question: exact structured request unavailable" : "question blocked safely", failure == nil)
+                guard failure == nil, reader.composerMode == .ready else { return }
+            }
+            menuProbeQuestion = nil
+        } else {
+            let featureOutput = LoginShell.run("codex features list", timeout: 15)
+            let enabled = LiveCheckRules.featureEnabled("default_mode_request_user_input", output: featureOutput)
+            if enabled == true {
+                let question = "Menu probe " + UUID().uuidString
+                let prompted = send("Use request_user_input now with exactly one question: \(question). Use exactly two options: First with description Select first., and Second with description Select second. Do not use any other tools. After the answer, reply done.")
+                func verifiedQuestion() -> ReaderMenu? {
+                    guard let menu = reader.mirroredMenu, menu.agent == "codex", menu.kind == .question,
+                          menu.actionable, menu.context.contains(question), menu.options.count == 2 else { return nil }
+                    let labels = menu.options.map { LiveCheckRules.oneLine($0.label) }
+                    guard ["First", "First Select first."].contains(labels[0]),
+                          ["Second", "Second Select second."].contains(labels[1]) else { return nil }
+                    return menu
+                }
+                let found = prompted && wait(45, allowingMenu: true) { verifiedQuestion() != nil }
+                capture("question")
+                if found, let menu = verifiedQuestion(), safe(allowingMenu: true) {
+                    let selected = reader.chooseMenuOption(label: menu.options[0].label)
+                    let answered = selected && wait(45, allowingMenu: true) {
+                        reader.mirroredMenu == nil && reader.composerMode == .ready && !reader.isTyping
+                    }
+                    report("verified Codex question answered through reader", answered)
+                    guard answered else { return }
+                } else {
+                    report(failure == nil ? "SKIP Codex question: requested exact question card unavailable" : "Codex question blocked safely", failure == nil,
+                           "Feature reported enabled; no unverified question was answered.")
+                    guard failure == nil, reader.composerMode == .ready else { return }
+                }
+            } else {
+                let evidence = featureOutput.split(whereSeparator: \.isNewline).first {
+                    $0.split(whereSeparator: \.isWhitespace).first == "default_mode_request_user_input"
+                }.map(String.init) ?? "default_mode_request_user_input was not exposed"
+                report("SKIP Codex question: Default capability not enabled or verified", true,
+                       "Requires Plan or default_mode_request_user_input. Observed: " + evidence)
+            }
+        }
+        for action in ["deny", "allow"] {
+            let token = "menuprobe" + UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
+            let command = "printf '%s\\n' '" + token + "'"
+            menuProbeCommand = command
+            defer { menuProbeCommand = nil }
+            let prompted = send("Request approval to run this exact harmless shell command once in the current probe folder: \(command). Do not edit files, read files, run other commands or retry after denial. Do not change the command. After the tool finishes or is denied, reply done.")
+            var request: ReaderRequest?
+            let found = prompted && wait(45, allowingMenu: true) {
+                request = self.scopedMenuRequests().first(where: self.matchesMenuProbe)
+                return request != nil || (reader.composerMode == .ready && !reader.isTyping)
+            }
+            capture(action + "-request")
+            guard found, let request, let interaction = reader.reader?.interaction else {
+                report(failure == nil ? "SKIP \(action): exact scoped approval request unavailable" : "\(action) blocked safely", failure == nil,
+                       "No permission response sent. The provider may allow printf without prompting.")
+                guard failure == nil, reader.composerMode == .ready else { return }
+                continue
+            }
+            interaction.refresh()
+            _ = interaction.message(["type": "readerRequest", "requestID": request.id.uuidString, "action": action])
+            let acknowledged = chat.liveEntries.contains { $0.id == "request-response:" + request.id.uuidString }
+            report("\(action) exact harmless request through reader", acknowledged)
+            capture(action + "-response")
+            guard acknowledged, settleMenuResponse() else { return }
+            let operations = chat.allEntries.compactMap(\.operation).filter { $0.command == command }
+            if action == "allow" {
+                let outputSeen = operations.contains { operation in
+                    guard operation.state == "completed", let output = operation.output else { return false }
+                    return output.split(whereSeparator: \.isNewline).contains { $0.trimmingCharacters(in: .whitespaces) == token }
+                }
+                report("Allow produces exact token in recorded tool output", outputSeen,
+                       "Assistant prose and the echoed command cannot satisfy this check.")
+            } else {
+                let denied = operations.contains { operation in
+                    let output = (operation.output ?? "").lowercased()
+                    return ["declined", "denied", "rejected"].contains(where: output.contains)
+                }
+                if denied { report("Deny recorded by provider tool result", true) }
+                else { report("SKIP Deny result evidence unavailable", true,
+                              "Reader acknowledgement was observed, but the provider exposed no explicit denial result.") }
+                report("Deny does not produce token stdout", !operations.contains { operation in
+                    (operation.output ?? "").split(whereSeparator: \.isNewline).contains { $0.trimmingCharacters(in: .whitespaces) == token }
+                })
+            }
+            menuProbeCommand = nil
+        }
+    }
+
     func slash() {
         var observed = Set<String>()
         var bounded = false
@@ -661,11 +965,11 @@ private final class LiveCheckSession {
 
         let sent = send("/model")
         let peeked = sent && wait(15, allowingMenu: true) {
-            self.mode?.isPeeking(chat) == true && TerminalScreen.analyze(self.screen).menu != nil &&
+            (self.mode?.isPeeking(chat) == true || reader.mirroredMenu != nil) && TerminalScreen.analyze(self.screen).menu != nil &&
                 self.screen.lowercased().contains("model") && CommandMenuScreen.rows(self.screen).isEmpty &&
                 CommandMenuScreen.input(self.screen, agent: self.agent) != "/model"
         }
-        report("/model opens the real picker and peeks terminal", peeked, String(screen.suffix(450)))
+        report("/model opens the real picker in reader or terminal fallback", peeked, String(screen.suffix(450)))
         guard peeked, safe(allowingMenu: true) else { return }
         dismissPicker()
         let returned = wait(15, allowingMenu: true) {

@@ -11,6 +11,7 @@ final class ReaderInteraction {
     private var leasedChat: UUID?
     private var leasedSession: String?
     private var requests: [ReaderRequest] = []
+    var hasPendingRequest: Bool { !requests.isEmpty }
     private var health: ReaderHealth?
     var externalHealth: (() -> ReaderHealth)?
     private(set) var findOpen = false
@@ -65,6 +66,33 @@ final class ReaderInteraction {
             page.call("readerFind", ["action": "close"])
             return nil
         }
+        // Only the main composer routes native request keys. Focused web cards handle
+        // their own keys, preserving text input, Find, sidebar and other reader scope.
+        if ownsMainChat, !findOpen, flags.isEmpty,
+           let controller = ReaderModeController.main,
+           window.firstResponder === controller.composer.textView,
+           !controller.composer.textView.hasMarkedText(), let request = requests.first {
+            let requestKey: String?
+            switch event.keyCode {
+            case 126: requestKey = "ArrowUp"
+            case 125: requestKey = "ArrowDown"
+            case 48: requestKey = "Tab"
+            case 53: requestKey = "Escape"
+            case 36, 76: requestKey = "Enter"
+            default: requestKey = key.flatMap { $0.count == 1 && "123456789".contains($0) ? $0 : nil }
+            }
+            if let requestKey {
+                if event.isARepeat { return nil }
+                refresh()
+                guard requests.contains(where: { $0.id == request.id }),
+                      model?.selectedChatID == request.chatID,
+                      model?.selectedChat?.sessionID == request.sessionID,
+                      model?.subagentBrowser.selection == nil else { return nil }
+                focusReader()
+                page.call("readerRequestKey", ["requestID": request.id.uuidString, "key": requestKey, "fromComposer": true] as [String: Any])
+                return nil
+            }
+        }
         // Tab from the composer enters the visible transcript, never the hidden TUI.
         if event.keyCode == 48, flags == [.control, .option] {
             focusReader()
@@ -111,7 +139,7 @@ final class ReaderInteraction {
                 ? ReaderHealth(state: "incomplete", message: "The process ended with an incomplete transcript record. Earlier messages and completed tools are preserved.") : .disconnected
         } else { nextHealth = chat?.follower?.health ?? .locating }
         if nextHealth != health { health = nextHealth; page.call("readerHealth", nextHealth) }
-        guard ownsMainChat, let chat, chat.agentID == "claude", chat.status != .ended,
+        guard ownsMainChat, let chat, let provider = ReaderRequestProvider(rawValue: chat.agentID), chat.status != .ended,
               model.subagentBrowser.selection == nil, let session = chat.sessionID, !session.isEmpty else {
             if leasedChat != nil { release(); page.call("readerRequests", []) }
             return
@@ -119,7 +147,7 @@ final class ReaderInteraction {
         if leasedChat != chat.id || leasedSession != session { release() }
         leasedChat = chat.id
         leasedSession = session
-        let pending = ReaderRequestBridge.poll(chatID: chat.id, sessionID: session)
+        let pending = ReaderRequestBridge.poll(chatID: chat.id, sessionID: session, provider: provider)
         if pending != requests { requests = pending; page.call("readerRequests", pending) }
     }
 
@@ -137,10 +165,11 @@ final class ReaderInteraction {
                   let text = message["requestID"] as? String, let id = UUID(uuidString: text),
                   let request = requests.first(where: { $0.id == id }), let model,
                   let chat = model.selectedChat, request.chatID == chat.id, request.sessionID == chat.sessionID,
+                  request.resolvedProvider.rawValue == chat.agentID,
                   let actionText = message["action"] as? String,
                   let action = ReaderRequestResponse.Action(rawValue: actionText) else { return true }
             let response = ReaderRequestResponse(id: request.id, chatID: chat.id, sessionID: request.sessionID,
-                                                 action: action, answers: message["answers"] as? [String: String] ?? [:])
+                                                 action: action, answers: message["answers"] as? [String: String] ?? [:], provider: request.resolvedProvider)
             let accepted = ReaderRequestBridge.respond(response)
             page.call("readerRequestResult", ["requestID": text, "accepted": accepted,
                                                "message": accepted ? "Response requested" : "This request is no longer available. Use the terminal."] as [String: Any])

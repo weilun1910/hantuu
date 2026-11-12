@@ -81,6 +81,7 @@ enum SelfTest {
         autoreleasepool { readerMode(workdir) } // settings, the message box, Stop, the banner, snapshots (ReaderMode/ReaderModeSelfTest.swift)
         autoreleasepool { readerCommands(workdir) }
         autoreleasepool { releaseSnapshots(workdir) } // reader command menus and queued messages for the 2.2 release
+        autoreleasepool { readerMenus(workdir) }
         autoreleasepool { sideChats(workdir) }
         autoreleasepool { agentWork(workdir) } // subagents, background tasks, the status they hold up, snapshots (Tests/AgentWorkSelfTest.swift)
         autoreleasepool { projectPanels(workdir) }

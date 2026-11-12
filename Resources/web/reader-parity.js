@@ -233,7 +233,7 @@
     for (const [id, card] of requestCards) if (!keep.has(id)) { card.remove(); requestCards.delete(id); }
     for (const request of requests || []) {
       if (requestCards.has(request.id)) continue;
-      const card = node('section', 'reader-request'); card.dataset.requestId = request.id;
+      const card = node('section', 'reader-request'); card.dataset.requestId = request.id; card.tabIndex = -1;
       const title = node('h3', '', request.tool === 'AskUserQuestion' ? 'Question for you' : 'Permission requested'); card.appendChild(title);
       if (request.cwd) card.appendChild(node('div', 'parity-note', 'Directory: ' + request.cwd));
       const feedback = node('div', 'parity-note'); feedback.setAttribute('role', 'status');
@@ -241,6 +241,7 @@
       let input = {}; try { input = JSON.parse(request.inputJSON || '{}'); } catch (_) { /* Raw input is still displayed below. */ }
       const questions = request.tool === 'AskUserQuestion' && Array.isArray(input.questions) ? input.questions : [];
       function respond(action) {
+        if (card._requestPending) return;
         const response = {};
         if (action === 'answer') {
           for (const answer of answers) {
@@ -250,7 +251,8 @@
             response[answer.question] = selected.join(', ');
           }
         }
-        controls.forEach(c => { c.disabled = true; }); feedback.textContent = 'Response requested';
+        card._requestPending = true;
+        controls.forEach(c => { c.disabled = c.dataset.requestTerminal !== 'true'; }); feedback.textContent = 'Response requested';
         R.post({ type: 'readerRequest', requestID: request.id, action, answers: response });
       }
       if (questions.length) {
@@ -269,7 +271,7 @@
             other.addEventListener('input', () => { if (other.value) options.forEach(o => { o.control.checked = false; }); });
             options.forEach(o => o.control.addEventListener('change', () => { other.value = ''; }));
           }
-          fieldset.appendChild(other); controls.push(other); card.appendChild(fieldset); answers.push({ question: q.question, options, other });
+          fieldset.appendChild(other); controls.push(other); card.appendChild(fieldset); answers.push({ question: q.question, options, other, fieldset });
         });
         const submit = button('Submit answer', () => respond('answer')); controls.push(submit); card.appendChild(submit);
       } else {
@@ -279,8 +281,12 @@
           const b = button(label, () => respond(action)); controls.push(b); card.appendChild(b);
         }
       }
-      const terminal = button('Show Terminal', () => respond('terminal')); controls.push(terminal); card.append(terminal, feedback);
+      const terminal = button('Show Terminal', () => {
+        if (card._requestPending) R.post({ type: 'showTerminal' }); else respond('terminal');
+      });
+      terminal.dataset.requestTerminal = 'true'; controls.push(terminal); card.append(terminal, feedback);
       card._requestControls = controls; card._requestFeedback = feedback;
+      card._requestAnswers = answers; card._requestRespond = respond;
       requestCards.set(request.id, card); requestHost.appendChild(card);
     }
     requestHost.hidden = !requestCards.size;
@@ -289,8 +295,50 @@
     const card = requestCards.get(payload.requestID); if (!card) return;
     card._requestFeedback.textContent = payload.message || (payload.accepted ? 'Response requested' : 'Response could not be delivered. Try the terminal.');
     // The native bridge remains the authority on whether the request is live.
-    if (!payload.accepted) card._requestControls.forEach(c => { c.disabled = false; });
+    if (!payload.accepted) { card._requestPending = false; card._requestControls.forEach(c => { c.disabled = false; }); }
   }
+  // A request ID is mandatory even for native forwarding, so a delayed key cannot
+  // land on a newer request. Arrival and focus alone never send a response.
+  function requestKey(payload) {
+    const card = requestCards.get(payload.requestID);
+    if (!card || card._requestPending || (findbar && !findbar.hidden)) return false;
+    const key = payload.key;
+    let active = payload.fromComposer ? null : document.activeElement;
+    if (!payload.fromComposer && !card.contains(active)) return false;
+    if (active && (active.matches('input[type="text"], textarea, select') || active.isContentEditable)) return false;
+    const controls = card._requestControls.filter(c => !c.disabled);
+    const questions = card._requestAnswers;
+    const questionIndex = questions.findIndex(q => q.fieldset.contains(active));
+    if (key === 'Escape') { card._requestRespond('deny'); return true; }
+    if (key === 'Tab' && questions.length) {
+      const next = questions[(questionIndex + 1) % questions.length];
+      (next.options[0]?.control || next.other).focus(); return true;
+    }
+    if (/^[1-9]$/.test(key)) {
+      const options = questions.length ? questions[Math.max(0, questionIndex)].options.map(o => o.control) : controls.filter(c => c.tagName === 'BUTTON');
+      const option = options[Number(key) - 1];
+      if (option) { option.focus(); if (option.tagName === 'INPUT') option.click(); }
+      return true;
+    }
+    if (key === 'ArrowDown' || key === 'ArrowUp') {
+      const index = controls.indexOf(active), delta = key === 'ArrowDown' ? 1 : -1;
+      controls[index < 0 ? (delta > 0 ? 0 : controls.length - 1) : (index + delta + controls.length) % controls.length]?.focus();
+      return true;
+    }
+    if (key === 'Enter' || key === ' ') {
+      if (active && controls.includes(active) && active.matches('button, input[type="radio"], input[type="checkbox"]')) active.click();
+      else card.focus();
+      return true;
+    }
+    return false;
+  }
+  document.addEventListener('keydown', ev => {
+    if (ev.defaultPrevented || ev.isComposing || ev.metaKey || ev.ctrlKey || ev.altKey || ev.shiftKey) return;
+    const card = ev.target.closest?.('.reader-request');
+    if (!card || ev.target.matches('input[type="text"], textarea, select') || ev.target.isContentEditable) return;
+    if (ev.repeat && (['Enter', ' ', 'Escape'].includes(ev.key) || /^[1-9]$/.test(ev.key))) { ev.preventDefault(); return; }
+    if (requestKey({ requestID: card.dataset.requestId, key: ev.key })) { ev.preventDefault(); ev.stopPropagation(); }
+  });
   function setStatus(payload) {
     let banner = document.getElementById('reader-status');
     if (!banner) { banner = node('div', 'reader-status'); banner.id = 'reader-status'; banner.setAttribute('role', 'status'); document.body.prepend(banner); }
@@ -302,7 +350,7 @@
     const interactive = ev.target.closest('button, summary, input, textarea, select, a');
     R.post({ type: interactive ? 'focusRequested' : 'composerFocus' });
   }, true);
-  window.ReaderParity = { setRequests, requestResult, openFind: openSearch, nextMatch: backwards => { if (!findbar || findbar.hidden) openSearch(); else move(backwards === true || backwards === -1 ? -1 : 1); }, closeFind: closeSearch, renderEntry, register, prune, refreshSearch, openSearch, closeSearch, setStatus,
+  window.ReaderParity = { setRequests, requestResult, requestKey, openFind: openSearch, nextMatch: backwards => { if (!findbar || findbar.hidden) openSearch(); else move(backwards === true || backwards === -1 ? -1 : 1); }, closeFind: closeSearch, renderEntry, register, prune, refreshSearch, openSearch, closeSearch, setStatus,
     reset(id) { restore(); records.clear(); pinChecklist(null); if (chat !== id) { setRequests([]); expanded.clear(); closeSearch(); chat = id; } },
     searchText,
   };

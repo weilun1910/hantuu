@@ -24,6 +24,11 @@ final class ReaderModeController: NSObject {
     let bottom = NSView()
     let composer = ComposerBox()
     let commandMenu = CommandMenu()
+    let menuCard = ReaderMenuCard()
+    private(set) var mirroredMenu: ReaderMenu?
+    private var menuOperation: UUID?
+    private var menuNotice: String?
+    private var menuMonitor: Any?
     private let commandCatalog: ReaderCommandCatalog
     private var commandContext: ReaderCommandCatalog.Context?
     private var commandLoadAt = Date.distantPast
@@ -140,6 +145,14 @@ final class ReaderModeController: NSObject {
         statusHost = ChromeHostingView(rootView: ReaderModeStatus(state: status))
         peekBar = ChromeHostingView(rootView: PeekBar { [weak self] in self?.backToReader() }.environmentObject(model))
         buildBottom()
+        menuCard.onChoose = { [weak self] label in _ = self?.chooseMenuOption(label: label) }
+        menuCard.onSubmitText = { [weak self] text in _ = self?.submitMenuText(text) }
+        menuCard.onKey = { [weak self] key in _ = self?.sendMenuKey(key) }
+        menuCard.onTerminal = { [weak self] in self?.showTerminal() }
+        menuMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            guard let self else { return event }
+            return self.handleMenuKey(event) ? nil : event
+        }
         draftStore.onFailure = { [weak self] _ in self?.recoveryLabel.stringValue = "Draft could not be saved. Keep this window open and copy your input." }
         let tv = composer.textView
         tv.onSend = { [weak self] in self?.send() }
@@ -208,7 +221,7 @@ final class ReaderModeController: NSObject {
             .store(in: &bag)
     }
 
-    deinit { timer?.invalidate() }
+    deinit { timer?.invalidate(); if let menuMonitor { NSEvent.removeMonitor(menuMonitor) } }
 
     private func buildBottom() {
         root.translatesAutoresizingMaskIntoConstraints = false
@@ -216,6 +229,14 @@ final class ReaderModeController: NSObject {
         root.addSubview(bottom)
         bottom.addSubview(statusHost)
         bottom.addSubview(composer)
+        menuCard.translatesAutoresizingMaskIntoConstraints = false
+        bottom.addSubview(menuCard)
+        NSLayoutConstraint.activate([
+            menuCard.leadingAnchor.constraint(equalTo: statusHost.leadingAnchor),
+            menuCard.trailingAnchor.constraint(equalTo: statusHost.trailingAnchor),
+            menuCard.topAnchor.constraint(equalTo: statusHost.topAnchor),
+            menuCard.bottomAnchor.constraint(equalTo: statusHost.bottomAnchor),
+        ])
         bottomHeight = bottom.heightAnchor.constraint(equalToConstant: 0)
         statusHeight = statusHost.heightAnchor.constraint(equalToConstant: 0)
         composerHeight = composer.heightAnchor.constraint(equalToConstant: composer.preferredHeight)
@@ -367,6 +388,7 @@ final class ReaderModeController: NSObject {
     /// Called by MainAreaController whenever it lays out the selected chat.
     @discardableResult
     func sync(selected: Chat?) -> Layout {
+        if selected?.id != shownChatID || selected.map({ !mode.showsReader($0) }) != false { clearMirroredMenu() }
         if selected?.id != menuProbeChatID || selected.map({ !mode.showsReader($0) }) == true { cancelMenuProbe() }
         guard let chat = selected else {
             root.isHidden = true
@@ -396,6 +418,7 @@ final class ReaderModeController: NSObject {
     }
 
     private func switchChat(to chat: Chat) {
+        clearMirroredMenu()
         if shownChatID != nil {
             saveDraft()
             try? draftStore.flush()
@@ -483,7 +506,7 @@ final class ReaderModeController: NSObject {
                 waiting: st?.waits.isEmpty == false, turnActive: st?.turnActive == true,
                 identityWaiting: chat.codexIdentityWaiting, paused: chat.pendingMessages.queuePaused,
                 inputNeedsReview: chat.pendingMessages.inputNeedsReview, editing: editing,
-                transportBusy: isTyping || !outbox.isEmpty || menuProbeChatID == chat.id || controlWaiting)
+                transportBusy: isTyping || !outbox.isEmpty || menuProbeChatID == chat.id || controlWaiting || (model.selectedChatID == chat.id && (mirroredMenu != nil || menuOperation != nil || reader?.interaction.hasPendingRequest == true)))
             guard ready, let id = chat.pendingMessages.firstWaitingID else { queueReadySince[chat.id] = nil; continue }
             // Wait for a stable ready frame after the previous Return. Status and screen
             // updates can arrive separately, especially when the terminal is not selected.
@@ -529,22 +552,42 @@ final class ReaderModeController: NSObject {
 
     /// Works out the message box's state for the selected chat and applies it.
     func refresh() {
+        reader?.interaction.refresh()
         refreshQueues()
         updateTimer()
         guard let chat = model.selectedChat, chat.id == shownChatID else { return }
         let live = isLive(chat)
         if live, chat.codexIdentityWaiting {
+            clearMirroredMenu()
             apply(.blocked(title: "Waiting for session identity", detail: "The Codex session is being verified. You can inspect it in the terminal."), chat: chat)
             return
         }
         var screen = TerminalScreen.State()
+        var rawScreen = ""
         if live, let t = chat.terminal, mode.face(of: chat) == .reader {
-            screen = TerminalScreen.analyze(t.activeScreenText())
+            rawScreen = t.activeScreenText()
+            screen = TerminalScreen.analyze(rawScreen)
             if screen.ready { readyChats.insert(chat.id) }
             if menuProbe != nil {
                 if !mayProbe(chat, terminal: t) { cancelMenuProbe() }
                 else { screen.menu = nil }
             }
+        }
+        reader?.interaction.refresh()
+        let structured = reader?.interaction.hasPendingRequest == true
+        let parsed = live && mode.showsReader(chat) && menuProbe == nil && !structured
+            ? ReaderMenuParser.parse(rawScreen, agent: chat.agent.id) : nil
+        if parsed == nil { if menuOperation == nil || structured { clearMirroredMenu() } }
+        else {
+            let enteringInput = mirroredMenu?.input == nil && parsed?.input != nil
+            if mirroredMenu?.identity != parsed?.identity { menuNotice = nil }
+            mirroredMenu = parsed
+            menuCard.update(menu: parsed, busy: menuOperation != nil, notice: menuNotice)
+            if enteringInput { menuCard.focusInput() }
+            screen.menu = ScreenMenu(kind: .menu, line: parsed!.title)
+            composer.textView.dismissCommands()
+            commandMenu.isHidden = true
+            mentionMenu.isHidden = true
         }
         var activity = chat.activity
         if let at = stoppedAt[chat.id] {
@@ -575,7 +618,7 @@ final class ReaderModeController: NSObject {
             chat.pendingMessages.sendNowEnabled = sendNowAvailable
         }
 
-        if !typing, menuProbe == nil,
+        if !typing, menuProbe == nil, mirroredMenu == nil, !structured,
            ReaderCommandLogic.autoPeek(sentAt: commandSentAt[chat.id], now: Date(), menu: screen.menu),
            mode.showsReader(chat) {
             commandPeekAt[chat.id] = Date()
@@ -614,10 +657,10 @@ final class ReaderModeController: NSObject {
             status.mode = m
         }
         composer.isHidden = m == .none
-        statusHost.isHidden = ReaderModeStatusModel.height(for: m) == 0
+        statusHost.isHidden = mirroredMenu != nil || ReaderModeStatusModel.height(for: m) == 0
         composer.enabled = !m.isBlocked
         composer.textView.isEditable = m != .none
-        composer.textView.placeholder = m.isBlocked ? "Answer in the terminal to carry on" : "Message \(chat.agent.name)"
+        composer.textView.placeholder = m.isBlocked ? (mirroredMenu != nil ? "Answer the menu above to carry on" : "Answer the request above or show the terminal") : "Message \(chat.agent.name)"
         deliveryBar.isHidden = m == .none
         agentControls.isHidden = m == .none
         queueButton.isHidden = !m.isWorking
@@ -639,7 +682,7 @@ final class ReaderModeController: NSObject {
     }
 
     private func updateHeights() {
-        let s = ReaderModeStatusModel.height(for: composerMode)
+        let s = mirroredMenu == nil ? ReaderModeStatusModel.height(for: composerMode) : menuCard.preferredHeight
         let c = composer.preferredHeight
         let gap: CGFloat = composerMode.isBlocked ? -1 : (s > 0 ? 6 : 0)
         statusHeight.constant = s
@@ -1074,9 +1117,8 @@ final class ReaderModeController: NSObject {
         chat.pendingMessages.enqueue(id: id, text: command, files: [], agentID: chat.agentID, existing: chat.allEntries, stage: .typing, sessionID: chat.sessionID)
         model.save()
         type([.command(command), .pressReturn], into: chat.terminal!, chatID: chat.id, id: id, queued: true)
-        // Keep the native dialog visible; never choose its current default on the user's behalf.
-        commandPeekAt[chat.id] = Date()
-        showTerminal()
+        // Observe the dialog after it opens. Recognized menus stay in the reader.
+        commandSentAt[chat.id] = Date()
     }
 
     // MARK: Typing into the terminal
@@ -1218,8 +1260,8 @@ final class ReaderModeController: NSObject {
         let commands = ReaderCommandCatalog.builtins(agent: chat.agent.id)
         let opens = commands.first { $0.name == invocation.name }?.opensTerminal(arguments: invocation.arguments) ?? false
         if opens, model.selectedChat?.id == chat.id, mode.showsReader(chat) {
-            commandPeekAt[chat.id] = Date()
-            showTerminal()
+            // Give the CLI time to draw a complete menu before deciding on fallback.
+            commandSentAt[chat.id] = Date()
         }
     }
 
@@ -1314,8 +1356,212 @@ final class ReaderModeController: NSObject {
         model.save()
     }
 
+    private func clearMirroredMenu() {
+        menuOperation = nil
+        mirroredMenu = nil
+        menuNotice = nil
+        menuCard.update(menu: nil)
+    }
+
+    private func menuOwner(_ chat: Chat, terminal: TerminalView, session: String?) -> Bool {
+        model.selectedChatID == chat.id && shownChatID == chat.id && chat.sessionID == session &&
+            chat.terminal === terminal && terminal.surface != nil && isLive(chat) &&
+            mode.showsReader(chat) && root.window != nil && !root.isHiddenOrHasHiddenAncestor && model.subagentBrowser.selection == nil &&
+            !chat.codexIdentityWaiting && !isTyping && menuProbe == nil &&
+            reader?.interaction.hasPendingRequest != true
+    }
+
+    /// Test probes use the same entry point as the card. Only a fresh, exact label is acted on.
+    @discardableResult
+    func chooseMenuOption(label: String, confirm: Bool = true, sessionOnly: Bool = false) -> Bool {
+        reader?.interaction.refresh()
+        guard menuOperation == nil, menuNotice == nil, let chat = model.selectedChat,
+              let terminal = chat.terminal, let menu = mirroredMenu, menu.actionable,
+              menu.options.contains(where: { $0.label == label }),
+              menuOwner(chat, terminal: terminal, session: chat.sessionID) else { return false }
+        if sessionOnly && !menu.allowsSessionConfirm { return false }
+        let actual = ReaderMenuParser.parse(terminal.activeScreenText(), agent: chat.agent.id)
+        guard actual == menu else { failMenu("The menu changed before the click. Use Show Terminal."); return false }
+        let token = UUID(), session = chat.sessionID
+        menuOperation = token
+        var selection = ReaderMenuSelection(menu: menu, label: label, confirm: confirm, sessionOnly: sessionOnly)
+        let deadline = Date().addingTimeInterval(8)
+        func step() {
+            guard self.menuOperation == token else { return }
+            self.reader?.interaction.refresh()
+            guard self.menuOwner(chat, terminal: terminal, session: session) else {
+                self.failMenu("The session or input owner changed. No further keys were sent."); return
+            }
+            guard Date() < deadline else {
+                self.failMenu("The menu action expired. No further key was sent. Use Show Terminal."); return
+            }
+            let raw = terminal.activeScreenText()
+            let next = ReaderMenuParser.parse(raw, agent: chat.agent.id)
+            let state = TerminalScreen.analyze(raw)
+            let closed = next == nil && state.menu == nil && (state.ready || state.busy)
+            switch selection.observe(next, closed: closed) {
+            case .done:
+                self.menuOperation = nil
+                self.menuNotice = nil
+                self.refresh()
+                return
+            case .refuse(let reason): self.failMenu(reason); return
+            case .key(let key): self.pressMenuKey(key, terminal: terminal)
+            case .wait: break
+            }
+            guard Date() < deadline else {
+                self.failMenu("The terminal did not confirm the change. No key was retried. Use Show Terminal."); return
+            }
+            self.menuCard.update(menu: next ?? menu, busy: true)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { step() }
+        }
+        step()
+        return true
+    }
+
+    /// A free-text reply is pasted only into an observed input field. Its exact echo is
+    /// required on two reads before Return. Existing terminal text is never erased blindly.
+    @discardableResult
+    func submitMenuText(_ text: String) -> Bool {
+        reader?.interaction.refresh()
+        guard menuOperation == nil, menuNotice == nil, let menu = mirroredMenu, menu.actionable,
+              let chat = model.selectedChat, let terminal = chat.terminal,
+              menuOwner(chat, terminal: terminal, session: chat.sessionID),
+              ReaderMenuParser.parse(terminal.activeScreenText(), agent: chat.agent.id) == menu else { return false }
+        guard let suffix = ReaderMenuTextSubmission.suffix(for: text, menu: menu) else {
+            failMenu("This answer cannot be entered safely from the reader. Use Show Terminal to edit it.")
+            return false
+        }
+        let token = UUID(), session = chat.sessionID
+        menuOperation = token
+        if !suffix.isEmpty { terminal.pasteText(suffix) }
+        let deadline = Date().addingTimeInterval(8)
+        var submission = ReaderMenuTextSubmission(menu: menu, text: text)
+        func observe() {
+            guard self.menuOperation == token else { return }
+            self.reader?.interaction.refresh()
+            guard self.menuOwner(chat, terminal: terminal, session: session), Date() < deadline else {
+                self.failMenu("The answer could not be confirmed. Input may remain in the terminal. Use Show Terminal."); return
+            }
+            let raw = terminal.activeScreenText()
+            let current = ReaderMenuParser.parse(raw, agent: chat.agent.id)
+            let state = TerminalScreen.analyze(raw)
+            let closed = current == nil && state.menu == nil && (state.ready || state.busy)
+            switch submission.observe(current, closed: closed) {
+            case .done: self.menuOperation = nil; self.refresh(); return
+            case .refuse(let reason): self.failMenu(reason); return
+            case .key(let key): self.pressMenuKey(key, terminal: terminal)
+            case .wait: break
+            }
+            self.menuCard.update(menu: current ?? menu, busy: true)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { observe() }
+        }
+        menuCard.update(menu: menu, busy: true)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { observe() }
+        return true
+    }
+
+    /// Navigation forwards one known key and waits for a visible change. It never presses
+    /// Enter on a later page or retries a key whose effect could not be established.
+    @discardableResult
+    func sendMenuKey(_ key: ReaderMenuKey) -> Bool {
+        reader?.interaction.refresh()
+        guard let menu = mirroredMenu, menu.actionable else { return false }
+        if key == .enter || key == .space {
+            guard let label = menu.selected else { return false }
+            return chooseMenuOption(label: label)
+        }
+        if key == .up || key == .down {
+            guard let label = menu.selected, let index = menu.options.firstIndex(where: { $0.label == label }) else { return false }
+            let next = index + (key == .down ? 1 : -1)
+            guard menu.options.indices.contains(next) else { return true }
+            return chooseMenuOption(label: menu.options[next].label, confirm: false)
+        }
+        let noteKey = key == .notes && menu.agent == "codex" && menu.kind == .question && menu.footer.lowercased().contains("tab to add notes")
+        guard key == .escape || ((key == .left || key == .right) && menu.allowsHorizontal) || (key == .tab && menu.allowsTab) || noteKey,
+              menuOperation == nil, menuNotice == nil, let chat = model.selectedChat, let terminal = chat.terminal,
+              menuOwner(chat, terminal: terminal, session: chat.sessionID),
+              ReaderMenuParser.parse(terminal.activeScreenText(), agent: chat.agent.id) == menu else { return false }
+        let token = UUID(), session = chat.sessionID
+        let before = terminal.activeScreenText()
+        guard ReaderMenuParser.parse(before, agent: chat.agent.id) == menu else { return false }
+        menuOperation = token
+        let nativeKey: ReaderMenuKey = key == .tab && menu.agent == "codex" && menu.kind == .question && menu.allowsHorizontal ? .right : key
+        pressMenuKey(nativeKey, terminal: terminal)
+        let deadline = Date().addingTimeInterval(3)
+        func observe() {
+            guard self.menuOperation == token else { return }
+            guard self.menuOwner(chat, terminal: terminal, session: session) else { self.failMenu("The input owner changed. Use Show Terminal."); return }
+            let raw = terminal.activeScreenText(), state = TerminalScreen.analyze(terminal.activeScreenText())
+            let next = ReaderMenuParser.parse(raw, agent: chat.agent.id)
+            if raw != before, next != nil || state.menu == nil && (state.ready || state.busy) {
+                self.menuOperation = nil; self.refresh(); return
+            }
+            if Date() >= deadline { self.failMenu("The terminal did not confirm the change. Use Show Terminal."); return }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { observe() }
+        }
+        menuCard.update(menu: menu, busy: true)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { observe() }
+        return true
+    }
+
+    private func failMenu(_ reason: String) {
+        menuOperation = nil
+        menuNotice = reason
+        menuCard.update(menu: mirroredMenu, notice: reason)
+    }
+
+    private func pressMenuKey(_ key: ReaderMenuKey, terminal: TerminalView) {
+        let stroke: TerminalKeyStroke
+        switch key {
+        case .up: stroke = TerminalKeyStroke(keyCode: 126, codepoint: 0)
+        case .down: stroke = TerminalKeyStroke(keyCode: 125, codepoint: 0)
+        case .left: stroke = TerminalKeyStroke(keyCode: 123, codepoint: 0)
+        case .right: stroke = TerminalKeyStroke(keyCode: 124, codepoint: 0)
+        case .tab, .notes: stroke = TerminalKeyStroke(keyCode: 48, codepoint: 9)
+        case .escape: stroke = TerminalKeyStroke(keyCode: 53, codepoint: 27)
+        case .enter: stroke = TerminalKeyStroke(keyCode: 36, codepoint: 13)
+        case .space: stroke = TerminalKeyStroke(keyCode: 49, codepoint: 32)
+        case .session: terminal.typeCommandText("s"); return
+        }
+        terminal.pressKeys([stroke])
+    }
+
+    private func handleMenuKey(_ event: NSEvent) -> Bool {
+        guard mirroredMenu != nil, !root.isHidden, root.window === event.window,
+              reader?.interaction.findOpen != true,
+              let responder = event.window?.firstResponder as? NSView,
+              responder === composer.textView || responder.isDescendant(of: menuCard),
+              !composer.textView.hasMarkedText(),
+              event.modifierFlags.intersection([.command, .control, .option, .shift]).isEmpty else { return false }
+        if event.isARepeat && ([UInt16(36), 76, 49, 53].contains(event.keyCode) || Int(event.characters ?? "") != nil) { return true }
+        if let button = responder as? NSButton, [UInt16(36), 76, 49].contains(event.keyCode) {
+            if button.isEnabled { button.performClick(nil) }
+            return true
+        }
+        let key: ReaderMenuKey?
+        switch event.keyCode {
+        case 126: key = .up
+        case 125: key = .down
+        case 123: key = .left
+        case 124: key = .right
+        case 48: key = .tab
+        case 53: key = .escape
+        case 36, 76: key = .enter
+        case 49: key = .space
+        default: key = nil
+        }
+        if let key { _ = sendMenuKey(key); return true }
+        if let text = event.characters, let digit = Int(text),
+           let option = mirroredMenu?.options.first(where: { $0.number == digit }) {
+            _ = chooseMenuOption(label: option.label); return true
+        }
+        return false
+    }
+
     /// Shows the live terminal so a menu can be answered there.
     func showTerminal() {
+        clearMirroredMenu()
         cancelMenuProbe()
         guard let chat = model.selectedChat, isLive(chat) else { return }
         calmChecks = 0

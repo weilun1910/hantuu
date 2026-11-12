@@ -89,7 +89,7 @@ enum TerminalScreen {
                              "allow codex to work in this folder", "one you trust"]
     static let updateMarks = ["update available", "update now", "skip until"]
     static let menuMarks = ["enter to confirm", "enter to select", "press enter to continue", "to navigate", "(y/n)",
-                            "esc to cancel", "esc to close", "esc to go back", "escape to close", "press any key to continue"]
+                            "esc to cancel", "esc to close", "esc to go back", "escape to close", "press any key to continue", "enter to submit answer", "enter to submit all", "tab or esc to clear notes", "space to toggle", "to submit answer", "to submit all", "switch questions", "enter confirm", "enter select", "enter default", "esc back", "esc cancel", "enter/space to change", "type to filter"]
 
     /// Claude Code and Codex both show this while a turn runs.
     static let busyMark = "esc to interrupt"

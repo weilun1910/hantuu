@@ -49,11 +49,13 @@ enum AgentHooks {
 
     /// The helper owns one synchronous request; a missing reader lease produces no decision.
     /// Keep the status event, and never run shell text supplied by a tool's arguments.
-    static var permissionCommand: String {
+    static var permissionCommand: String { permissionCommand(provider: .claude) }
+
+    static func permissionCommand(provider: ReaderRequestProvider) -> String {
         guard let executable = Bundle.main.executableURL?.path else { return appendCommand }
         let quoted = "'" + executable.replacingOccurrences(of: "'", with: "'\\''") + "'"
         return #"p=$(cat); if [ -n "$HANTUU_EVENTS" ]; then { lockf -s -t 5 1; printf '%s\n' "$p"; } >> "$HANTUU_EVENTS"; fi 2>/dev/null; printf '%s' "$p" | "#
-            + quoted + " " + ReaderRequestBridge.flag + " 2>/dev/null; exit 0"
+            + ReaderRequestBridge.providerEnvKey + "=" + provider.rawValue + " " + quoted + " " + ReaderRequestBridge.flag + " 2>/dev/null; exit 0"
     }
 
     /// The JSON for `claude --settings`. Hooks from it are added to the user's own hooks
@@ -196,10 +198,25 @@ enum AgentHooks {
 
     static func tomlArray(_ items: [String]) -> String { "[" + items.map(tomlString).joined(separator: ",") + "]" }
 
+    /// Pinned Codex 0.167.1 synchronous permission hook. This per-launch override
+    /// leaves provider files untouched and never forwards suggested grants.
+    static var codexPermissionOverride: String {
+        "hooks.PermissionRequest=[{matcher=\"Bash|apply_patch\",hooks=[{type=\"command\",command="
+            + tomlString(permissionCommand(provider: .codex)) + ",timeout=95,async=false}]}]"
+    }
+
+    /// Codex 0.167.1 discovers hooks from each config layer separately, including
+    /// SessionFlags. This adds a hook alongside existing user/project/managed hooks;
+    /// it does not replace their runtime handlers. Any handler's deny remains final.
+    /// Sources: codex-rs/config/src/loader/mod.rs, hooks/src/engine/discovery.rs,
+    /// hooks/src/events/permission_request.rs at openai/codex rust-v0.167.1.
+    /// Keep normal hook trust and managed-only restrictions. The hooks feature is
+    /// already on by default; do not override a user's explicit disabled setting.
     /// `-c` overrides for one Codex run. tui.notifications makes Codex send an OSC 9 desktop
     /// notification for approvals and questions, which libghostty hands to hantuu.
     static func codexArguments(existingNotify: NotifyLookup = existingCodexNotify()) -> [String] {
         var args = [
+            "-c", codexPermissionOverride,
             "-c", "tui.notifications=" + tomlArray(["approval-requested", "plan-mode-prompt", "async-question"]),
             "-c", "tui.notification_method=\"osc9\"",
             "-c", "tui.notification_condition=\"always\"",

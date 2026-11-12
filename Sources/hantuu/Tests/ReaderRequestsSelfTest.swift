@@ -17,11 +17,19 @@ extension SelfTest {
         let answer = ReaderRequestResponse(id: request.id, chatID: chat, sessionID: "fixture", action: .deny)
         check("requests: response is single use", ReaderRequestBridge.respond(answer, now: now) && !ReaderRequestBridge.respond(answer, now: now))
         check("requests: answered hook is removed from controls", ReaderRequestBridge.poll(chatID: chat, sessionID: "fixture", now: now).isEmpty)
+        let codexRequest = ReaderRequest(id: UUID(), chatID: chat, sessionID: "fixture", tool: "apply_patch", inputJSON: "{}",
+            helperPID: ProcessInfo.processInfo.processIdentifier, createdAt: now, expiresAt: now.addingTimeInterval(90), provider: .codex)
+        try? JSONEncoder().encode(codexRequest).write(to: folder.appendingPathComponent(codexRequest.id.uuidString + ".request.json"))
+        check("requests: Claude lease hides Codex request", ReaderRequestBridge.poll(chatID: chat, sessionID: "fixture", now: now).isEmpty)
+        check("requests: Codex lease offers Codex request", ReaderRequestBridge.poll(chatID: chat, sessionID: "fixture", now: now, provider: .codex).map(\.id) == [codexRequest.id])
+        let codexAnswer = ReaderRequestResponse(id: codexRequest.id, chatID: chat, sessionID: "fixture", action: .allow, provider: .codex)
+        check("requests: Codex response is single use", ReaderRequestBridge.respond(codexAnswer, now: now) && !ReaderRequestBridge.respond(codexAnswer, now: now))
         ReaderRequestBridge.release(chatID: chat)
         check("requests: released reader cannot reply", !ReaderRequestBridge.respond(answer, now: now))
     }
 
     static func readerRequests() {
+        readerRequestKeyboard()
         let chat = UUID()
         let now = Date(timeIntervalSince1970: 1000)
         let permission = Data(#"{"hook_event_name":"PermissionRequest","session_id":"session-fixture","tool_name":"Bash","tool_input":{"command":"printf fixture"},"permission_suggestions":[{"type":"setMode","mode":"bypassPermissions"}]}"#.utf8)
@@ -51,6 +59,49 @@ extension SelfTest {
         check("requests: subagent never borrowed by parent", ReaderRequest.fromHook(Data(subagent.utf8), chatID: chat, now: now, pid: 123) == nil)
         let codex = Data(#"{"type":"response_item","payload":{"type":"function_call","call_id":"call_fixture","name":"request_user_input","arguments":"{\"questions\":[]}"}}"#.utf8)
         check("requests: Codex transcript has no live approval channel", ReaderRequest.fromHook(codex, chatID: chat, now: now, pid: 123) == nil)
+        guard let codexRequest = ReaderRequest.fromHook(permission, chatID: chat, now: now, pid: 123, provider: .codex) else {
+            check("requests: Codex live hook fixture parses", false); return
+        }
+        check("requests: Codex provider identity retained", codexRequest.resolvedProvider == .codex)
+        for action in [ReaderRequestResponse.Action.allow, .deny] {
+            let reply = ReaderRequestResponse(id: codexRequest.id, chatID: chat, sessionID: codexRequest.sessionID,
+                                              action: action, provider: .codex)
+            let text = reply.hookOutput(for: codexRequest, now: now).map { String(decoding: $0, as: UTF8.self) } ?? ""
+            check("requests: Codex \(action.rawValue) uses supported decision only", text.contains("PermissionRequest")
+                && text.contains(action.rawValue) && !text.contains("updatedInput") && !text.contains("updatedPermissions")
+                && !text.contains("interrupt"))
+        }
+        check("requests: cross-provider response rejected", ReaderRequestResponse(id: codexRequest.id, chatID: chat,
+            sessionID: codexRequest.sessionID, action: .allow).hookOutput(for: codexRequest, now: now) == nil)
+        check("requests: Codex question answers stay in terminal", ReaderRequest.fromHook(Data(questionJSON.utf8),
+            chatID: chat, now: now, pid: 123, provider: .codex) == nil)
+        check("requests: Codex answer action rejected", ReaderRequestResponse(id: codexRequest.id, chatID: chat,
+            sessionID: codexRequest.sessionID, action: .answer, provider: .codex).hookOutput(for: codexRequest, now: now) == nil)
+        let patch = String(decoding: permission, as: UTF8.self).replacingOccurrences(of: "Bash", with: "apply_patch")
+        check("requests: Codex patch hook supported", ReaderRequest.fromHook(Data(patch.utf8), chatID: chat,
+            now: now, pid: 123, provider: .codex)?.tool == "apply_patch")
+        for field in ["agent_id", "agent_type"] {
+            let child = String(decoding: permission, as: UTF8.self).replacingOccurrences(of: "\"tool_name\"",
+                with: "\"\(field)\":\"child\",\"tool_name\"")
+            check("requests: Codex child \(field) stays in terminal", ReaderRequest.fromHook(Data(child.utf8),
+                chatID: chat, now: now, pid: 123, provider: .codex) == nil)
+        }
+        if let data = try? JSONEncoder().encode(request),
+           var legacy = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            legacy.removeValue(forKey: "provider")
+            let encoded = try? JSONSerialization.data(withJSONObject: legacy)
+            let decoded = encoded.flatMap { try? JSONDecoder().decode(ReaderRequest.self, from: $0) }
+            check("requests: old request payload remains Claude", decoded?.resolvedProvider == .claude)
+        } else { check("requests: old request payload remains Claude", false) }
+        let arguments = AgentHooks.codexArguments(existingNotify: .none)
+        check("requests: Codex respects hook trust and disabled feature", !arguments.contains("--dangerously-bypass-hook-trust")
+            && !arguments.contains { $0.hasPrefix("features.hooks=") || $0.hasPrefix("hooks.states") })
+        check("requests: Codex launch adds only its permission event", arguments.filter { $0.hasPrefix("hooks.") } == [AgentHooks.codexPermissionOverride])
+        check("requests: Codex launch adds synchronous permission hook", arguments.contains(AgentHooks.codexPermissionOverride)
+            && AgentHooks.codexPermissionOverride.contains("timeout=95,async=false")
+            && AgentHooks.codexPermissionOverride.contains("Bash|apply_patch")
+            && AgentHooks.codexPermissionOverride.contains("HANTUU_READER_PROVIDER=codex"))
+        check("requests: Claude launch keeps its provider", AgentHooks.permissionCommand.contains("HANTUU_READER_PROVIDER=claude"))
         let plan = String(decoding: permission, as: UTF8.self).replacingOccurrences(of: "Bash", with: "ExitPlanMode")
         check("requests: plan mode stays in provider UI", ReaderRequest.fromHook(Data(plan.utf8), chatID: chat, now: now, pid: 123) == nil)
         check("requests: malformed input falls back", ReaderRequest.fromHook(Data("{}".utf8), chatID: chat, now: now, pid: 123) == nil)

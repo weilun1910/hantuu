@@ -368,6 +368,7 @@
     },
     readerHealth(payload) { if (parity) parity.setStatus(payload); },
     readerRequests(payload) { if (parity) parity.setRequests(payload); },
+    readerRequestKey(payload) { if (parity) parity.requestKey(payload); },
     readerRequestResult(payload) { if (parity) parity.requestResult(payload); },
     readerFileResult(payload) {
       for (const link of list.querySelectorAll('a.parity-file')) if (link.dataset.path === payload.path) {

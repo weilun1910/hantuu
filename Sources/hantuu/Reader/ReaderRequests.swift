@@ -1,6 +1,8 @@
 import Foundation
 import Darwin
 
+enum ReaderRequestProvider: String, Codable { case claude, codex }
+
 /// A live hook invocation, never inferred from a transcript or terminal pixels.
 struct ReaderRequest: Codable, Equatable {
     let id: UUID
@@ -12,6 +14,8 @@ struct ReaderRequest: Codable, Equatable {
     let createdAt: Date
     let expiresAt: Date
     var cwd: String? = nil
+    var provider: ReaderRequestProvider? = nil
+    var resolvedProvider: ReaderRequestProvider { provider ?? .claude }
 
     struct Question: Codable, Equatable {
         let question: String
@@ -22,7 +26,7 @@ struct ReaderRequest: Codable, Equatable {
     }
 
     var questions: [Question] {
-        guard tool == "AskUserQuestion", let data = inputJSON.data(using: .utf8),
+        guard resolvedProvider == .claude, tool == "AskUserQuestion", let data = inputJSON.data(using: .utf8),
               let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let raw = object["questions"], let encoded = try? JSONSerialization.data(withJSONObject: raw),
               let result = try? JSONDecoder().decode([Question].self, from: encoded) else { return [] }
@@ -34,7 +38,7 @@ struct ReaderRequest: Codable, Equatable {
             && expiresAt.timeIntervalSince(createdAt) <= ReaderRequestBridge.lifetime
     }
 
-    static func fromHook(_ data: Data, chatID: UUID, now: Date, pid: Int32) -> ReaderRequest? {
+    static func fromHook(_ data: Data, chatID: UUID, now: Date, pid: Int32, provider: ReaderRequestProvider = .claude) -> ReaderRequest? {
         guard data.count <= 1_048_576,
               let o = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               o["hook_event_name"] as? String == "PermissionRequest",
@@ -44,9 +48,11 @@ struct ReaderRequest: Codable, Equatable {
               (o["agent_id"] as? String).map({ $0.isEmpty }) ?? true, // Child ownership is separate.
               let input = o["tool_input"] as? [String: Any],
               let json = try? JSONSerialization.data(withJSONObject: input, options: [.sortedKeys]) else { return nil }
+        guard provider != .codex || (["Bash", "apply_patch"].contains(tool)
+            && o["agent_id"] == nil && o["agent_type"] == nil) else { return nil }
         let request = ReaderRequest(id: UUID(), chatID: chatID, sessionID: session, tool: tool,
                                     inputJSON: String(decoding: json, as: UTF8.self), helperPID: pid,
-                                    createdAt: now, expiresAt: now.addingTimeInterval(ReaderRequestBridge.lifetime), cwd: o["cwd"] as? String)
+                                    createdAt: now, expiresAt: now.addingTimeInterval(ReaderRequestBridge.lifetime), cwd: o["cwd"] as? String, provider: provider)
         if tool == "AskUserQuestion" {
             let questions = request.questions
             guard !questions.isEmpty, questions.count <= 4,
@@ -64,10 +70,11 @@ struct ReaderRequestResponse: Codable {
     let sessionID: String
     let action: Action
     var answers: [String: String] = [:]
+    var provider: ReaderRequestProvider? = nil
 
-    /// No updatedPermissions, mode change, input rewriting, or session-wide grants.
+    /// Only Claude question answers rewrite input. No permission or mode grants.
     func hookOutput(for request: ReaderRequest, now: Date) -> Data? {
-        guard id == request.id, request.belongs(to: chatID, session: sessionID, now: now), action != .terminal else { return nil }
+        guard (provider ?? .claude) == request.resolvedProvider, id == request.id, request.belongs(to: chatID, session: sessionID, now: now), action != .terminal else { return nil }
         var decision: [String: Any]
         switch action {
         case .allow:
@@ -77,7 +84,7 @@ struct ReaderRequestResponse: Codable {
             decision = ["behavior": "deny", "message": "The user declined this request in hantuu."]
         case .answer:
             let questions = request.questions
-            guard request.tool == "AskUserQuestion", !questions.isEmpty,
+            guard request.resolvedProvider == .claude, request.tool == "AskUserQuestion", !questions.isEmpty,
                   Set(answers.keys) == Set(questions.map(\.question)),
                   answers.values.allSatisfy({ !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && $0.utf8.count <= 16_384 }),
                   let data = request.inputJSON.data(using: .utf8),
@@ -90,12 +97,13 @@ struct ReaderRequestResponse: Codable {
     }
 }
 
-/// Local rendezvous for the app's own synchronous Claude hook. No provider config edits.
+/// Local rendezvous for the app's own synchronous provider hooks. No provider config edits.
 /// Poll only while the owned main reader is visible and its current session is confirmed.
-/// Other providers, historical entries, subagents and unsupported prompts use Show Terminal.
+/// Historical entries, subagents and unsupported prompts use Show Terminal.
 enum ReaderRequestBridge {
     static let flag = "--reader-permission-hook"
     static let envKey = "HANTUU_READER_REQUESTS"
+    static let providerEnvKey = "HANTUU_READER_PROVIDER"
     static let chatEnvKey = "HANTUU_READER_CHAT"
     static let lifetime: TimeInterval = 90
     static let leaseLifetime: TimeInterval = 3
@@ -105,21 +113,22 @@ enum ReaderRequestBridge {
     private struct Lease: Codable {
         let sessionID: String
         let at: Date
-        func valid(session: String, now: Date) -> Bool {
-            sessionID == session && at <= now && now.timeIntervalSince(at) < leaseLifetime
+        var provider: ReaderRequestProvider? = nil
+        func valid(session: String, provider expected: ReaderRequestProvider, now: Date) -> Bool {
+            (provider ?? .claude) == expected && sessionID == session && at <= now && now.timeIntervalSince(at) < leaseLifetime
         }
     }
 
-    static func poll(chatID: UUID, sessionID: String, now: Date = Date()) -> [ReaderRequest] {
+    static func poll(chatID: UUID, sessionID: String, now: Date = Date(), provider: ReaderRequestProvider = .claude) -> [ReaderRequest] {
         guard !sessionID.isEmpty else { return [] }
         let dir = directory(for: chatID)
         do {
             try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
-            try write(Lease(sessionID: sessionID, at: now), to: dir.appendingPathComponent("lease.json"))
+            try write(Lease(sessionID: sessionID, at: now, provider: provider), to: dir.appendingPathComponent("lease.json"))
         } catch { return [] }
         let files = (try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)) ?? []
         return files.filter { $0.lastPathComponent.hasSuffix(".request.json") }.compactMap { url in
-            guard let request: ReaderRequest = read(url),
+            guard let request: ReaderRequest = read(url), request.resolvedProvider == provider,
                   request.belongs(to: chatID, session: sessionID, now: now),
                   request.helperPID > 1, kill(request.helperPID, 0) == 0,
                   !FileManager.default.fileExists(atPath: responseURL(request, dir: dir).path) else { return nil }
@@ -134,8 +143,9 @@ enum ReaderRequestBridge {
 
     static func respond(_ response: ReaderRequestResponse, now: Date = Date()) -> Bool {
         let dir = directory(for: response.chatID)
-        guard let lease: Lease = read(dir.appendingPathComponent("lease.json")), lease.valid(session: response.sessionID, now: now),
+        guard let lease: Lease = read(dir.appendingPathComponent("lease.json")), lease.valid(session: response.sessionID, provider: response.provider ?? .claude, now: now),
               let request: ReaderRequest = read(dir.appendingPathComponent(response.id.uuidString + ".request.json")),
+              request.resolvedProvider == (response.provider ?? .claude),
               request.id == response.id, request.belongs(to: response.chatID, session: response.sessionID, now: now),
               request.helperPID > 1, kill(request.helperPID, 0) == 0,
               response.action == .terminal || response.hookOutput(for: request, now: now) != nil,
@@ -154,17 +164,18 @@ enum ReaderRequestBridge {
     static func runHook() -> Int32 {
         let env = ProcessInfo.processInfo.environment
         guard let path = env[envKey], let chatText = env[chatEnvKey], let chat = UUID(uuidString: chatText) else { return 0 }
+        guard let provider = ReaderRequestProvider(rawValue: env[providerEnvKey] ?? "claude") else { return 0 }
         let dir = URL(fileURLWithPath: path, isDirectory: true)
         let input = FileHandle.standardInput.readDataToEndOfFile()
-        guard let request = ReaderRequest.fromHook(input, chatID: chat, now: Date(), pid: getpid()),
-              let lease: Lease = read(dir.appendingPathComponent("lease.json")), lease.valid(session: request.sessionID, now: Date()) else { return 0 }
+        guard let request = ReaderRequest.fromHook(input, chatID: chat, now: Date(), pid: getpid(), provider: provider),
+              let lease: Lease = read(dir.appendingPathComponent("lease.json")), lease.valid(session: request.sessionID, provider: provider, now: Date()) else { return 0 }
         let requestURL = dir.appendingPathComponent(request.id.uuidString + ".request.json")
         let responseURL = responseURL(request, dir: dir)
         defer { try? FileManager.default.removeItem(at: requestURL); try? FileManager.default.removeItem(at: responseURL) }
         do { try write(request, to: requestURL) } catch { return 0 }
         let parent = getppid()
         while Date() < request.expiresAt && getppid() == parent && parent > 1 {
-            guard let active: Lease = read(dir.appendingPathComponent("lease.json")), active.valid(session: request.sessionID, now: Date()) else { return 0 }
+            guard let active: Lease = read(dir.appendingPathComponent("lease.json")), active.valid(session: request.sessionID, provider: provider, now: Date()) else { return 0 }
             if let response: ReaderRequestResponse = read(responseURL) {
                 if let output = response.hookOutput(for: request, now: Date()) {
                     FileHandle.standardOutput.write(output)

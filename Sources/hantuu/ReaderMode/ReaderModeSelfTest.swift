@@ -731,13 +731,14 @@ extension SelfTest {
         let bareCommandMark = bytes().count
         rm.composer.textView.text = "/model"
         _ = rm.send()
-        check("commands peek: a known picker opens the terminal after submission", waitUntil(5) { mode.isPeeking(chat) })
-        _ = waitUntil(3) { !rm.isTyping && bytes().last == 0x0D }
+        let bareArrived = waitUntil(5) { !rm.isTyping && bytes().count > bareCommandMark && bytes().last == 0x0D }
+        check("commands mirror: submission waits for menu evidence before revealing terminal", bareArrived && !mode.isPeeking(chat))
         check("commands transport: a bare command sends exactly one Return", String(decoding: bytes().suffix(from: bareCommandMark), as: UTF8.self) == "/model\r")
         _ = rm.sync(selected: chat)
         w.makeFirstResponder(rm.focusTarget(for: tv))
-        check("commands peek: the visible terminal gets keyboard focus", w.firstResponder === tv)
-        check("commands peek: a calm prompt returns after the opening grace period", waitUntil(5) { rm.refresh(); return !mode.isPeeking(chat) })
+        check("commands mirror: a fake agent with no menu keeps composer focus", w.firstResponder === rm.composer.textView)
+        rm.refresh()
+        check("commands mirror: a calm prompt stays in the reader", !mode.isPeeking(chat))
         _ = rm.sync(selected: chat)
         w.makeFirstResponder(rm.focusTarget(for: tv))
         check("commands peek: focus returns to the message box", w.firstResponder === rm.composer.textView)
