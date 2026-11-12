@@ -7,9 +7,22 @@ extension SelfTest {
         let root = workdir.appendingPathComponent("side-chats")
         Paths.ensure(root)
         let args = (try? SideQuestionCommand.arguments(agent: "claude", session: "fixture-session")) ?? []
+        check("side: exact Claude headless argument list", args == [
+            "--print", "--resume", "fixture-session", "--fork-session", "--no-session-persistence",
+            "--output-format", "stream-json", "--verbose", "--include-partial-messages",
+            "--tools", "", "--strict-mcp-config", "--mcp-config", "{\"mcpServers\":{}}",
+            "--disable-slash-commands", "--settings", "{\"disableAllHooks\":true}",
+            "--append-system-prompt", "Answer only the side question supplied now. The inherited conversation is reference context. Do not continue its tasks. You cannot run tools or make changes. Do not claim to have executed tools."
+        ])
         check("side: Claude forks without saving a provider session", args.contains("--fork-session") && args.contains("--no-session-persistence") && args.contains("fixture-session"))
         check("side: Claude streams and disables tools, hooks and MCP", args.contains("--include-partial-messages") && args.contains("stream-json") && args.contains("--strict-mcp-config") && args.contains("{\"disableAllHooks\":true}") && args.contains("--disable-slash-commands") && args.contains("--tools") && args.contains(""))
         let codex = (try? SideQuestionCommand.arguments(agent: "codex", session: "fixture")) ?? []
+        check("side: exact Codex exec argument list bypasses folder check before fork", codex == [
+            "exec", "--skip-git-repo-check", "--disable", "hooks", "--disable", "apps", "-s", "read-only",
+            "-c", "approval_policy=\"never\"", "-c", "agents.enabled=false", "-c", "notify=[]",
+            "-c", "web_search=\"disabled\"", "--ephemeral", "--json", "--thread-source", "hantuu_side",
+            "fork", "fixture", "-"
+        ])
         check("side: Codex uses ephemeral fork, never resume", codex.first == "exec" && codex.contains("--ephemeral") && codex.suffix(3) == ["fork", "fixture", "-"] && !codex.contains("resume"))
         check("side: Codex requests read-only tools and disables hooks and apps", codex.contains("read-only") && codex.contains("approval_policy=\"never\"") && codex.contains("hooks") && codex.contains("apps"))
         check("side: missing parent session is rejected", (try? SideQuestionCommand.arguments(agent: "claude", session: "")) == nil)
@@ -32,6 +45,20 @@ extension SelfTest {
         var failed = SideAnswerStream()
         failed.consume(Data(#"{"type":"result","is_error":true,"errors":["Not signed in"]}"#.utf8), eof: true)
         check("side: model failures have a visible message", failed.error == "Not signed in" && failed.finished)
+        let rawError = "Error: Not inside a trusted directory and --skip-git-repo-check was not specified."
+        let message = SideQuestionCommand.failureMessage(agent: "codex", raw: rawError, startedAnswer: false)
+        let failure = SideQuestion(question: "Why?", state: .failed, error: message, rawError: rawError)
+        check("side: folder failures explain the provider and keep CLI detail separate",
+              message == "Codex couldn't start a side question here: its folder check rejected this directory."
+              && failure.entries.last?.detail == rawError && failure.entries.last?.detailTitle == "CLI output")
+        check("side: an interrupted answer is described as a finish failure",
+              SideQuestionCommand.failureMessage(agent: "claude", raw: "Error: Not signed in", startedAnswer: true)
+                == "Claude Code couldn't finish this side question: Not signed in")
+        let legacy = SideQuestion(question: "Earlier", state: .failed, error: "Earlier error")
+        if let encoded = try? JSONEncoder().encode(legacy),
+           let decoded = try? JSONDecoder().decode(SideQuestion.self, from: encoded) {
+            check("side: old history without CLI detail still decodes", decoded.rawError == nil && decoded.error == "Earlier error")
+        } else { check("side: old history without CLI detail still decodes", false) }
         var codexStream = SideAnswerStream()
         for event in [
             #"{"type":"item.updated","item":{"id":"a","type":"agent_message","text":"Part"}}"#,
@@ -104,8 +131,64 @@ extension SelfTest {
         check("side: removing a chat drops its history file", store.histories[one] == nil && !FileManager.default.fileExists(atPath: directory.appendingPathComponent(one.uuidString + ".json").path))
 
         nativeSideFixtures(root)
+        sideFolderAndSessionFixtures(root)
         sideReaderRouting(root, script: script)
         sideSnapshots(root)
+    }
+
+    private static func sideFolderAndSessionFixtures(_ root: URL) {
+        let folder = root.appendingPathComponent("folder-routing")
+        let checkout = folder.appendingPathComponent("checkout")
+        Paths.ensure(checkout)
+        let cwdFile = folder.appendingPathComponent("cwd.txt")
+        let script = folder.appendingPathComponent("route.sh")
+        try? """
+        #!/bin/sh
+        cat >/dev/null
+        pwd -P > "$1"
+        printf '%s\\n' 'Error: fixture startup failed' >&2
+        exit 1
+        """.write(to: script, atomically: true, encoding: .utf8)
+        for agent in ["claude", "codex"] {
+            let model = AppModel()
+            let project = Project(path: folder.path)
+            let chat = Chat(projectID: project.id, agentID: agent)
+            chat.sessionID = "old-session"
+            chat.status = .ended
+            model.projects = [project]
+            model.chats = [chat]
+            model.selectedChatID = chat.id
+            model.transcriptLocations = TranscriptLocations(claude: folder.appendingPathComponent("claude"), codex: folder.appendingPathComponent("codex"))
+            model.codexProcessID = { _ in nil }
+            model.codexOpenRollouts = { _, _ in [] }
+            let transcript = folder.appendingPathComponent("\(agent)-resumed.jsonl")
+            try? Data().write(to: transcript)
+            // This is the same identity handoff used by Codex's process-owned rollout probe.
+            model.followSession(chat, session: .init(id: "resumed-session", path: transcript.path), verifiedCodex: agent == "codex")
+            let store = SideChatStore(directory: folder.appendingPathComponent("\(agent)-history"), logger: { _ in })
+            model.sideChats = store
+            var captured: [String] = []
+            store.commandOverride = { _, args in
+                captured = args
+                return (URL(fileURLWithPath: "/bin/sh"), [script.path, cwdFile.path])
+            }
+            for useCheckout in [false, true] {
+                chat.worktree = useCheckout ? WorktreeInfo(repo: folder.path, root: checkout.path, directory: checkout.path, branch: "fixture") : nil
+                let expected = useCheckout ? checkout : folder
+                _ = model.askSideQuestion("Tiny question", in: chat)
+                let completed = waitUntil(5) { !store.running.contains(chat.id) }
+                let cwd = (try? String(contentsOf: cwdFile, encoding: .utf8))?.trimmingCharacters(in: .whitespacesAndNewlines)
+                check("side: \(agent) uses the current session and \(useCheckout ? "checkout" : "project") folder",
+                      completed && captured.contains("resumed-session") && !captured.contains("old-session")
+                        && cwd == expected.resolvingSymlinksInPath().path)
+                check("side: \(agent) process failure saves readable and raw errors",
+                      store.histories[chat.id]?.last?.state == .failed
+                        && store.histories[chat.id]?.last?.rawError == "Error: fixture startup failed"
+                        && store.histories[chat.id]?.last?.error?.contains("couldn't start a side question here: fixture startup failed") == true)
+            }
+            chat.follower?.stop()
+            chat.discoveryTimer?.invalidate()
+        }
     }
 
     private static func sideReaderRouting(_ root: URL, script: URL) {
@@ -235,6 +318,17 @@ extension SelfTest {
             (js(panel.reader.page, "document.querySelectorAll('.md strong').length > 0 && document.querySelectorAll('pre code').length > 0 && document.querySelectorAll('.katex').length > 0") as? Bool) == true
         })
         snapshot("answered")
+        let rawFailure = "Error: Not inside a trusted directory and --skip-git-repo-check was not specified."
+        let failure = SideQuestion(question: "Why did it fail?", state: .failed,
+                                   error: SideQuestionCommand.failureMessage(agent: "codex", raw: rawFailure, startedAnswer: false),
+                                   rawError: rawFailure)
+        panel.reader.updateTranscript(id: "side-failure-fixture", entries: failure.entries, base: root.path, emptyText: "")
+        check("side: CLI failure details start collapsed", waitUntil(5) {
+            (js(panel.reader.page, "(() => { const d = document.querySelector('section.entry.error details'); return !!d && !d.open && d.querySelector('summary').textContent === 'CLI output' && d.querySelector('pre').textContent.includes('--skip-git-repo-check'); })()") as? Bool) == true
+        })
+        check("side: CLI failure disclosure opens without losing the raw line",
+              (js(panel.reader.page, "(() => { const d = document.querySelector('section.entry.error details'); if (!d) return false; d.querySelector('summary').click(); return d.open && d.querySelector('pre').textContent === 'Error: Not inside a trusted directory and --skip-git-repo-check was not specified.'; })()") as? Bool) == true)
+        snapshot("error")
         let slow = root.appendingPathComponent("snapshot-cli.sh")
         let delta = #"{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"The parent conversation keeps running while this answer arrives..."}}}"#
         try? ("#!/bin/sh\ncat >/dev/null\nprintf '%s\\n' '" + delta + "'\nexec /bin/sleep 20\n").write(to: slow, atomically: true, encoding: .utf8)

@@ -88,7 +88,11 @@ final class SideChatStore: ObservableObject {
                 let problem = stream.error ?? (status != 0 ? (stderr.isEmpty ? "The CLI exited with status \(status). Check that it is signed in and up to date." : stderr) : nil)
                     ?? (!stream.finished ? "The CLI ended before completing its answer. Check that it supports streaming side questions." : nil)
                 self.histories[chat]?[index].state = stopped ? .stopped : (problem == nil ? .answered : .failed)
-                self.histories[chat]?[index].error = stopped ? nil : problem
+                self.histories[chat]?[index].error = stopped ? nil : problem.map {
+                    SideQuestionCommand.failureMessage(agent: agent, raw: $0, startedAnswer: !stream.answer.isEmpty)
+                }
+                self.histories[chat]?[index].rawError = stopped || problem == nil ? nil
+                    : [problem, stderr.isEmpty || stderr == problem ? nil : stderr].compactMap { $0 }.joined(separator: "\n\n")
             }
             self.jobs[chat] = nil
             self.running.remove(chat)
@@ -263,6 +267,7 @@ extension AppModel {
     func askSideQuestion(_ question: String, in chat: Chat) -> Bool {
         openSideQuestions(in: chat)
         let executable = agents.first { $0.id == chat.agentID }?.path
+        // Read the current identity on every ask; transcript discovery replaces it after /resume.
         return sideChats.ask(chat: chat.id, agent: chat.agentID, session: chat.sessionID,
                              executable: executable, folder: workingDirectory(of: chat), question: question)
     }

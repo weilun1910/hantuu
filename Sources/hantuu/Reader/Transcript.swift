@@ -18,6 +18,8 @@ struct ReaderEntry: Codable, Equatable {
     var kind: Kind
     var text: String
     var detail: String? = nil
+    /// A titled detail starts collapsed; untitled details retain their existing presentation.
+    var detailTitle: String? = nil
     var tool: String? = nil
     /// Inline images: data: URLs from the transcript, or absolute file paths.
     var images: [String] = []

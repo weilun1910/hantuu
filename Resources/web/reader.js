@@ -161,7 +161,17 @@
           const pre = document.createElement('pre');
           pre.className = 'full';
           pre.textContent = e.detail;
-          el.appendChild(pre);
+          if (e.detailTitle) {
+            const disclosure = document.createElement('details');
+            disclosure.className = 'parity-disclosure';
+            const summary = document.createElement('summary');
+            summary.textContent = e.detailTitle;
+            disclosure.appendChild(summary);
+            disclosure.appendChild(pre);
+            el.appendChild(disclosure);
+          } else {
+            el.appendChild(pre);
+          }
         }
         break;
       case 'plan':

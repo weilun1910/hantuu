@@ -7,13 +7,17 @@ struct SideQuestion: Codable, Identifiable, Equatable {
     var answer = ""
     var state: State = .streaming
     var error: String?
+    var rawError: String?
     var createdAt = Date()
 
     var entries: [ReaderEntry] {
         let key = id.uuidString
         var result = [ReaderEntry(id: key + "-q", kind: .user, text: question)]
         if !answer.isEmpty { result.append(ReaderEntry(id: key + "-a", kind: .assistant, text: answer)) }
-        if let error { result.append(ReaderEntry(id: key + "-error", kind: .error, text: error)) }
+        if let error {
+            result.append(ReaderEntry(id: key + "-error", kind: .error, text: error,
+                                      detail: rawError, detailTitle: rawError == nil ? nil : "CLI output"))
+        }
         if state == .streaming { result.append(ReaderEntry(id: key + "-state", kind: .notice, text: "Answering...")) }
         if state == .stopped { result.append(ReaderEntry(id: key + "-state", kind: .notice, text: "Stopped")) }
         return result
@@ -26,7 +30,7 @@ enum SideQuestionCommand {
         if agent == "codex" {
             // Codex's native side conversations allow non-mutating exploration. Forking
             // keeps its parent rollout untouched; the sandbox restricts local writes.
-            return ["exec", "--disable", "hooks", "--disable", "apps", "-s", "read-only",
+            return ["exec", "--skip-git-repo-check", "--disable", "hooks", "--disable", "apps", "-s", "read-only",
                     "-c", "approval_policy=\"never\"", "-c", "agents.enabled=false", "-c", "notify=[]",
                     "-c", "web_search=\"disabled\"", "--ephemeral", "--json", "--thread-source", "hantuu_side",
                     "fork", session, "-"]
@@ -47,6 +51,20 @@ enum SideQuestionCommand {
         let message: String
         init(_ message: String) { self.message = message }
         var errorDescription: String? { message }
+    }
+
+    static func failureMessage(agent: String, raw: String, startedAnswer: Bool) -> String {
+        let name = AgentCatalog.definition(agent).name
+        let lines = raw.components(separatedBy: .newlines).map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+        var reason = lines.first(where: { $0.lowercased().hasPrefix("error:") })
+            ?? lines.first(where: { !$0.isEmpty }) ?? "The CLI exited without an explanation."
+        if reason.lowercased().hasPrefix("error:") { reason = String(reason.dropFirst(6)).trimmingCharacters(in: .whitespaces) }
+        if raw.contains("Not inside a trusted directory") && raw.contains("--skip-git-repo-check") {
+            reason = "its folder check rejected this directory."
+        }
+        reason = String(reason.prefix(400))
+        return startedAnswer ? "\(name) couldn't finish this side question: \(reason)"
+            : "\(name) couldn't start a side question here: \(reason)"
     }
 
     /// Only reader input is intercepted. Native terminal commands never pass this route.

@@ -6,7 +6,18 @@ import GhosttyKit
 /// parsing and selection rules below. No fixture test launches an agent or reads its home.
 enum LiveCheckRules {
     static let agents = ["claude", "codex"]
-    static let features = ["slash", "queued", "send-now", "relaunch", "subagents", "reader", "review", "sidebar"]
+    static let features = ["slash", "queued", "send-now", "relaunch", "subagents", "reader", "review", "sidebar", "side"]
+
+    /// Codex walks ancestors itself, so a Git ceiling environment variable is insufficient.
+    static func gitAncestor(_ folder: URL, exists: (URL) -> Bool = { FileManager.default.fileExists(atPath: $0.path) }) -> URL? {
+        var current = folder.standardizedFileURL.resolvingSymlinksInPath()
+        while true {
+            if exists(current.appendingPathComponent(".git")) { return current }
+            let parent = current.deletingLastPathComponent()
+            if parent.path == current.path { return nil }
+            current = parent
+        }
+    }
 
     static func codexModel(for feature: String, configured: String?) -> String {
         configured ?? (feature == "subagents" ? "gpt-6.1-sol" : "gpt-6-luna")
@@ -148,6 +159,12 @@ extension SelfTest {
               LiveCheckRules.inside(dir.appendingPathComponent("live/data"), dir) &&
               !LiveCheckRules.inside(URL(fileURLWithPath: dir.path + "-other/data"), dir))
         check("live checks: diagnostics stay on one line", LiveCheckRules.oneLine("a\nb\t c") == "a b c")
+        check("live checks: side feature is selectable for both agents",
+              LiveCheckRules.selection("side", allowed: LiveCheckRules.features) == ["side"])
+        let fakeRoot = URL(fileURLWithPath: "/fixture/project")
+        check("live checks: nested folders do not falsely qualify as non-git",
+              LiveCheckRules.gitAncestor(fakeRoot.appendingPathComponent("tmp/fresh"), exists: { $0.path == "/fixture/project/.git" }) == fakeRoot
+              && LiveCheckRules.gitAncestor(fakeRoot, exists: { _ in false }) == nil)
         check("live checks: child probe uses Sol unless its model is explicitly overridden",
               LiveCheckRules.codexModel(for: "subagents", configured: nil) == "gpt-6.1-sol" &&
               LiveCheckRules.codexModel(for: "queued", configured: nil) == "gpt-6-luna" &&
@@ -159,7 +176,7 @@ extension SelfTest {
         guard let raw = env["HANTUU_LIVE"], !raw.isEmpty else { return }
         guard let agents = LiveCheckRules.selection(env["HANTUU_LIVE_AGENTS"], allowed: LiveCheckRules.agents),
               let features = LiveCheckRules.selection(env["HANTUU_LIVE_FEATURES"], allowed: LiveCheckRules.features) else {
-            check("live configuration: selectors", false, "Use claude,codex and slash,queued,send-now,relaunch,subagents,reader,review,sidebar.")
+            check("live configuration: selectors", false, "Use claude,codex and slash,queued,send-now,relaunch,subagents,reader,review,sidebar,side.")
             return
         }
         let folder = URL(fileURLWithPath: raw).standardizedFileURL.resolvingSymlinksInPath()
@@ -193,6 +210,11 @@ extension SelfTest {
             let multiAgent = agent == "codex" && features.contains("subagents")
                 ? LiveCheckRules.featureEnabled("multi_agent_v2", output: LoginShell.run("codex features list", timeout: 15)) : true
             for feature in features {
+                if feature == "side", let repo = LiveCheckRules.gitAncestor(folder) {
+                    check("live \(agent) side: non-git probe folder", false,
+                          "Choose a trusted HANTUU_LIVE folder outside Git repositories for the side check. Ancestor repository: \(repo.path). No model call started.")
+                    continue
+                }
                 if agent == "codex", feature == "subagents", multiAgent == nil {
                     check("live codex subagents: v2 feature gate", false,
                           "codex features list did not expose multi_agent_v2. No prompt sent; this probe requires the v2 spawn_agent API.")
@@ -211,6 +233,7 @@ extension SelfTest {
                 case "reader": probe.readerParity()
                 case "review": probe.reviewFeedback()
                 case "sidebar": probe.sidebar()
+                case "side": probe.sideQuestions()
                 default: break
                 }
             }
@@ -612,6 +635,87 @@ private final class LiveCheckSession {
         report("reader has no duplicate after queue delivery",
                delivered && countUser(first) == 1 && countUser(second) == 1 && countUser(second, pending: true) == 0,
                "first=\(countUser(first)) second=\(countUser(second)) pending=\(countUser(second, pending: true)).")
+    }
+
+    func sideQuestions() {
+        guard let app = model, let chat, let host,
+              let executable = app.agents.first(where: { $0.id == agent })?.path else {
+            report("side CLI is available", false)
+            return
+        }
+        let token = "side" + UUID().uuidString.prefix(8).lowercased()
+        let parentPrompt = "Remember the token \(token). Reply only ready. Do not use tools."
+        guard send(parentPrompt) else { report("parent prompt sent", false); return }
+        let parentReady = wait(90) {
+            self.reply("ready") && self.reader?.composerMode == .ready && chat.sessionID != nil && chat.transcriptPath != nil
+        }
+        report("tiny parent answer rendered and session discovered", parentReady)
+        guard parentReady, let session = chat.sessionID, let transcript = chat.transcriptPath else { return }
+        guard pause(0.5) else { return }
+        let parentEntries = chat.allEntries
+        let beforeTranscript = try? Data(contentsOf: URL(fileURLWithPath: transcript))
+        let parentInput = reader?.composer.textView.string
+        let store = app.sideChats
+        // Only the live probe pins cheaper models. The production command remains unchanged.
+        store.commandOverride = { provider, arguments in
+            var args = arguments
+            if provider == "claude" { args += ["--model", "haiku"] }
+            else { args.insert(contentsOf: ["--model", self.codexModel, "-c", "model_reasoning_effort=\"low\""], at: 1) }
+            return (URL(fileURLWithPath: executable), args)
+        }
+        let panel = SidePanelController(model: app)
+        panel.root.frame = NSRect(x: 540, y: 0, width: 560, height: 700)
+        host.addSubview(panel.root)
+        panel.sync(active: true)
+        var observedStream = false
+        let subscription = store.$histories.sink { histories in
+            if let last = histories[chat.id]?.last, last.state == .streaming && last.answer.contains(token) {
+                observedStream = true
+            }
+        }
+        let temp = folder.appendingPathComponent("tmp/side-" + UUID().uuidString.lowercased())
+        defer {
+            store.stop(chat.id)
+            let stopped = SelfTest.waitUntil(5) { !store.running.contains(chat.id) }
+            report("side process stopped before cleanup", stopped)
+            subscription.cancel()
+            store.commandOverride = nil
+            panel.sync(active: false)
+            panel.root.removeFromSuperview()
+            if stopped { try? FileManager.default.removeItem(at: temp) }
+        }
+        func renderedAnswer() -> Bool {
+            guard let data = try? JSONEncoder().encode(token), let literal = String(data: data, encoding: .utf8) else { return false }
+            let count = store.histories[chat.id]?.filter { !$0.answer.isEmpty }.count ?? 0
+            return (SelfTest.js(panel.reader.page,
+                "(() => { const rows = Array.from(document.querySelectorAll('section.entry.assistant')); return rows.length === \(count) && rows.slice(-1).some(e => e.innerText.includes(\(literal))); })()") as? Bool) == true
+        }
+        func awaitAnswer(_ name: String) -> Bool {
+            let completed = wait(90) { !store.running.contains(chat.id) }
+            let last = store.histories[chat.id]?.last
+            let answered = completed && last?.state == .answered && last?.answer.contains(token) == true
+            report(name + " answers from the forked parent", answered, last?.error ?? "No answer before timeout.")
+            let rendered = answered && wait(10) { renderedAnswer() }
+            report(name + " streams into the Side tab", rendered && observedStream && app.panelTab == .side)
+            return answered && rendered
+        }
+        guard send("/btw What token did I ask you to remember? Reply only the token. Do not use tools.") else {
+            report("reader routes side question", false)
+            return
+        }
+        guard awaitAnswer("chat folder") else { return }
+        do { try FileManager.default.createDirectory(at: temp, withIntermediateDirectories: true) }
+        catch { report("fresh non-git folder created", false, error.localizedDescription); return }
+        report("fresh side folder has no Git ancestor", LiveCheckRules.gitAncestor(temp) == nil)
+        observedStream = false
+        let asked = store.ask(chat: chat.id, agent: agent, session: session, executable: executable,
+                              folder: temp.path, question: "Repeat the token from the parent conversation. Reply only that token. Do not use tools.")
+        report("side command starts in a fresh non-git folder", asked)
+        guard asked, awaitAnswer("fresh non-git folder") else { return }
+        report("side answers leave parent transcript and input unchanged",
+               beforeTranscript != nil && beforeTranscript == (try? Data(contentsOf: URL(fileURLWithPath: transcript)))
+                && chat.allEntries == parentEntries && reader?.composer.textView.string == parentInput
+                && chat.sessionID == session)
     }
 
     func sendNow() {
