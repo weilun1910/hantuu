@@ -683,7 +683,8 @@ final class ReaderModeController: NSObject {
             self.focusComposer()
         }, pasteToTerminal: { steps in
             guard let terminal = chat.terminal else { return }
-            self.type(steps, into: terminal, after: feedback.image.map { [$0] } ?? [])
+            // Browser feedback is a draft in the agent's box, never a queued send.
+            self.type(steps, into: terminal, chatID: chat.id, id: UUID().uuidString, queued: false, after: feedback.image.map { [$0] } ?? [])
             self.model.focusRequest.send(terminal)
         })
         return true
