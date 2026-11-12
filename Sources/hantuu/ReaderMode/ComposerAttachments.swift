@@ -38,7 +38,7 @@ struct ComposerAttachment: Equatable, Identifiable, Codable {
     var isFolder: Bool { (try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true }
 
     /// Attachments for what a paste or a drop held. Pictures without a file are saved to
-    /// PastedImages.folder first; ones that can't be read are skipped.
+    /// PastedImages.folder first; failures stay visible so the user can retry or remove them.
     static func make(from content: ComposerPasteboard.Content, existing: [ComposerAttachment] = [], now: Date = Date()) -> [ComposerAttachment] {
         var pastedCount = existing.filter(\.pasted).count
         func pastedLabel() -> String {

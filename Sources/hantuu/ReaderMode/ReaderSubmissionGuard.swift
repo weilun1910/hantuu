@@ -29,3 +29,23 @@ enum ReaderQueueDrain {
             !editing && !transportBusy
     }
 }
+
+/// Tracks an observed empty input after Return before inferring a later native restore.
+/// Merely waiting longer cannot distinguish a slow CLI from a restored prompt.
+struct ReaderInputRestoration {
+    var terminal: ObjectIdentifier
+    var sessionID: String?
+    var pendingID: String
+    private var observedEmpty = false
+
+    init(terminal: ObjectIdentifier, sessionID: String?, pendingID: String = "") {
+        self.terminal = terminal
+        self.sessionID = sessionID
+        self.pendingID = pendingID
+    }
+
+    mutating func observe(empty: Bool, matches: Bool, eligible: Bool) -> Bool {
+        if empty { observedEmpty = true }
+        return observedEmpty && !empty && matches && eligible
+    }
+}

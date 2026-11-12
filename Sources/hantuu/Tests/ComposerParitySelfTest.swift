@@ -14,6 +14,25 @@ extension SelfTest {
         check("submission: update prompt blocks a command",
               ReaderSubmissionGuard.refusal(screen: "Update available\n/model  Choose model\nenter to select", waiting: false, command: "/model") != nil)
 
+        let terminalIdentity = NSObject()
+        for provider in ["claude", "codex"] {
+            for text in ["ordinary prompt", "/model", "/rename fixture-title"] {
+                var observation = ReaderInputRestoration(terminal: ObjectIdentifier(terminalIdentity), sessionID: provider)
+                var pending = PendingReaderMessages()
+                pending.enqueue(id: "fresh", text: text, files: [], agentID: provider, existing: [])
+                pending.markSubmitted(id: "fresh")
+                let marker = provider == "claude" ? "❯" : "›"
+                let oldFrame = "────────────────────\n\(marker) \(text)\n────────────────────\n? for shortcuts"
+                let matching = pending.isRestored(in: oldFrame)
+                check("submission: \(provider) fresh Return echo cannot lock \(text)", matching &&
+                    !observation.observe(empty: false, matches: matching, eligible: true) &&
+                    !observation.observe(empty: false, matches: matching, eligible: true))
+                check("submission: \(provider) empty input arms restoration without locking", !observation.observe(empty: true, matches: false, eligible: true))
+                check("submission: \(provider) busy input cannot be treated as restored", !observation.observe(empty: false, matches: true, eligible: false))
+                check("submission: \(provider) later restored input remains protected", observation.observe(empty: false, matches: true, eligible: true))
+            }
+        }
+
         let shortcuts = ReaderModeMenuTarget.composerItems()
         check("parity: message focus shortcut is Command-L", shortcuts.first?.keyEquivalent == "l" && shortcuts.first?.keyEquivalentModifierMask == [.command])
         check("parity: attachment shortcut is Option-Command-A and leaves Archive unchanged", shortcuts.last?.keyEquivalent == "a" && shortcuts.last?.keyEquivalentModifierMask == [.command, .option])

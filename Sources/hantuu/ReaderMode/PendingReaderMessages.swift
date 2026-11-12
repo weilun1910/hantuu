@@ -45,7 +45,7 @@ struct PendingReaderMessages: Codable {
     var entries: [ReaderEntry] {
         messages.map { message in
             var entry = message.entry
-            entry.pendingState = message.stage == .waiting ? (queuePaused ? "Queue paused" : "Waiting to send") : [
+            entry.pendingState = message.stage == .waiting ? (queuePaused ? "Queue paused" : "Queued") : [
                 Stage.preparing: "Preparing", .typing: "Preparing to send", .sent: "Sent to agent", .delivering: "Delivering",
                 .unconfirmed: "Delivery unconfirmed", .failed: "Not sent"
             ][message.stage]

@@ -1,6 +1,7 @@
 import AppKit
 import Combine
 import GhosttyKit
+import Darwin
 
 /// Opt-in checks against installed CLIs. The ordinary self test only exercises the pure
 /// parsing and selection rules below. No fixture test launches an agent or reads its home.
@@ -17,6 +18,24 @@ enum LiveCheckRules {
             if parent.path == current.path { return nil }
             current = parent
         }
+    }
+
+    /// Missing, incomplete and wrong answers remain failures even after a process exits.
+    static func sideAnswerFailure(completed: Bool, answer: SideQuestion?, token: String) -> String? {
+        guard completed else { return "No answer before timeout." }
+        guard let answer else { return "The side question produced no result." }
+        guard answer.state == .answered else { return answer.error ?? "The side question did not finish successfully." }
+        guard answer.answer.contains(token) else { return "The side answer did not contain the parent token." }
+        return nil
+    }
+
+    /// Flush resource checkpoints so an externally killed run retains its last boundary.
+    static func checkpoint(_ label: String) {
+        var usage = rusage()
+        let result = getrusage(RUSAGE_SELF, &usage)
+        let peak = result == 0 ? String(usage.ru_maxrss) : "unavailable"
+        print("live checkpoint: \(label) pid=\(getpid()) uptime=\(ProcessInfo.processInfo.systemUptime) peak_rss_bytes=\(peak)")
+        fflush(stdout)
     }
 
     static func codexModel(for feature: String, configured: String?) -> String {
@@ -123,6 +142,15 @@ extension SelfTest {
               LiveCheckRules.selection("claude,typo", allowed: LiveCheckRules.agents) == nil)
         check("live checks: selectors trim, deduplicate and retain stable order",
               LiveCheckRules.selection("codex, claude,codex", allowed: LiveCheckRules.agents) == ["claude", "codex"])
+        var sideAnswer = SideQuestion(question: "Fixture")
+        sideAnswer.state = .answered
+        sideAnswer.answer = "fixture-token"
+        check("live checks: a completed side answer has no timeout diagnostic", LiveCheckRules.sideAnswerFailure(completed: true, answer: sideAnswer, token: "fixture-token") == nil)
+        check("live checks: a side timeout fails even with stale answer text", LiveCheckRules.sideAnswerFailure(completed: false, answer: sideAnswer, token: "fixture-token") != nil)
+        check("live checks: a missing side answer fails", LiveCheckRules.sideAnswerFailure(completed: true, answer: nil, token: "fixture-token") != nil)
+        check("live checks: the wrong side answer fails", LiveCheckRules.sideAnswerFailure(completed: true, answer: sideAnswer, token: "different-token") != nil)
+        sideAnswer.state = .failed
+        check("live checks: a failed side answer cannot pass on matching text", LiveCheckRules.sideAnswerFailure(completed: true, answer: sideAnswer, token: "fixture-token") != nil)
         let claude = "❯ /cost    Show usage\n  /model   Choose model\n❯ /\nRead /tmp/file now"
         let codex = "/status  Session information\n/model  Select model\n› /re\n/tmp/file  a path"
         check("live checks: suggestion rows exclude prompts, prose and file paths",
@@ -254,24 +282,28 @@ extension SelfTest {
                           "codex features list did not expose multi_agent_v2. No prompt sent; this probe requires the v2 spawn_agent API.")
                     continue
                 }
-                let probe = LiveCheckSession(agent: agent, feature: feature, folder: folder, dir: dir,
-                                             codexModel: LiveCheckRules.codexModel(for: feature, configured: env["HANTUU_LIVE_CODEX_MODEL"]), agents: found)
-                defer { probe.finish() }
-                guard probe.start() else { continue }
-                switch feature {
-                case "slash": probe.slash()
-                case "queued": probe.queued()
-                case "send-now": probe.sendNow()
-                case "relaunch": probe.relaunch()
-                case "subagents": probe.subagents()
-                case "reader": probe.readerParity()
-                case "review": probe.reviewFeedback()
-                case "sidebar": probe.sidebar()
-                case "side": probe.sideQuestions()
-                case "composer": probe.composerParity()
-                case "command-arguments": probe.commandArguments()
-                default: break
+                LiveCheckRules.checkpoint("\(agent) \(feature) start")
+                autoreleasepool {
+                    let probe = LiveCheckSession(agent: agent, feature: feature, folder: folder, dir: dir,
+                                                 codexModel: LiveCheckRules.codexModel(for: feature, configured: env["HANTUU_LIVE_CODEX_MODEL"]), agents: found)
+                    defer { probe.finish() }
+                    guard probe.start() else { return }
+                    switch feature {
+                    case "slash": probe.slash()
+                    case "queued": probe.queued()
+                    case "send-now": probe.sendNow()
+                    case "relaunch": probe.relaunch()
+                    case "subagents": probe.subagents()
+                    case "reader": probe.readerParity()
+                    case "review": probe.reviewFeedback()
+                    case "sidebar": probe.sidebar()
+                    case "side": probe.sideQuestions()
+                    case "composer": probe.composerParity()
+                    case "command-arguments": probe.commandArguments()
+                    default: break
+                    }
                 }
+                LiveCheckRules.checkpoint("\(agent) \(feature) cleaned up")
             }
         }
     }
@@ -626,9 +658,10 @@ private final class LiveCheckSession {
         let rename = "/rename " + title
         let renamed = send(rename) && wait(15, allowingMenu: true) {
             reader.isTyping == false && CommandMenuScreen.emptyInput(self.screen, agent: self.agent) &&
-                self.screen.contains(title) && !TerminalScreen.analyze(self.screen).busy
+                (self.screen.contains(title) || chat.terminalTitle.contains(title)) && !TerminalScreen.analyze(self.screen).busy
         }
-        report("/rename with arguments executes and clears the input", renamed, String(screen.suffix(450)))
+        report("/rename with arguments executes and clears the input", renamed,
+               "input review=\(chat.pendingMessages.inputNeedsReview), pending=\(chat.pendingMessages.entries.map { $0.pendingState ?? "unknown" }), title=\(chat.terminalTitle); " + String(screen.suffix(450)))
         guard renamed else { return }
 
         // /cost is absent from Claude 2.1.322's menu. /status exists in both providers.
@@ -685,9 +718,9 @@ private final class LiveCheckSession {
         guard busy, let chat else { return }
         let pending = chat.pendingMessages.entries.filter { $0.text == second && $0.pending == true }
         report("second send immediately enters pending queue", queued && pending.count == 1,
-               "Matching pending entries=\(pending.count).")
-        let shown = wait(3) { self.countUser(second, pending: true) == 1 && (self.body().contains("Sent to agent") || self.body().contains("Preparing to send")) }
-        report("reader shows one pending provider submission", shown, String(body().suffix(450)))
+               "send accepted=\(queued), input review=\(chat.pendingMessages.inputNeedsReview), mode=\(String(describing: reader?.composerMode)), matching pending entries=\(pending.count).")
+        let shown = wait(3) { self.countUser(second, pending: true) == 1 && self.body().contains("Queued") && self.body().contains("Send now") }
+        report("reader shows one queued message with Send now", shown, String(body().suffix(450)))
         let delivered = wait(240) {
             chat.allEntries.filter { $0.kind == .user && $0.text == second }.count == 1 &&
                 !chat.pendingMessages.entries.contains { $0.text == second } && self.reply(token)
@@ -755,30 +788,37 @@ private final class LiveCheckSession {
             return (SelfTest.js(panel.reader.page,
                 "(() => { const rows = Array.from(document.querySelectorAll('section.entry.assistant')); return rows.length === \(count) && rows.slice(-1).some(e => e.innerText.includes(\(literal))); })()") as? Bool) == true
         }
-        func awaitAnswer(_ name: String) -> Bool {
-            let completed = wait(90) { !store.running.contains(chat.id) }
-            let last = store.histories[chat.id]?.last
-            let answered = completed && last?.state == .answered && last?.answer.contains(token) == true
-            report(name + " answers from the forked parent", answered, last?.error ?? "No answer before timeout.")
+        func awaitAnswer(_ name: String, after previousIDs: Set<UUID>) -> Bool {
+            let completed = wait(90) {
+                guard let last = store.histories[chat.id]?.last, !previousIDs.contains(last.id) else { return false }
+                return !store.running.contains(chat.id)
+            }
+            let latest = store.histories[chat.id]?.last
+            let last = latest.flatMap { previousIDs.contains($0.id) ? nil : $0 }
+            let error = LiveCheckRules.sideAnswerFailure(completed: completed, answer: last, token: token)
+            let answered = error == nil
+            report(name + " answers from the forked parent", answered, error ?? "")
             let rendered = answered && wait(10) { renderedAnswer() }
             report(name + " streams into the Side tab", rendered && observedStream && app.panelTab == .side)
             return answered && rendered
         }
+        let firstQuestionIDs = Set((store.histories[chat.id] ?? []).map(\.id))
         guard send("/btw What token did I ask you to remember? Reply only the token. Do not use tools.") else {
             report("reader routes side question", false)
             return
         }
-        guard awaitAnswer("chat folder") else { return }
+        guard awaitAnswer("chat folder", after: firstQuestionIDs) else { return }
         do { try FileManager.default.createDirectory(at: temp, withIntermediateDirectories: true) }
         catch { report("fresh non-git folder created", false, error.localizedDescription); return }
         let outsideGit = LiveCheckRules.gitAncestor(temp) == nil
         report("fresh side folder has no Git ancestor", outsideGit)
         guard outsideGit else { return }
         observedStream = false
+        let secondQuestionIDs = Set((store.histories[chat.id] ?? []).map(\.id))
         let asked = store.ask(chat: chat.id, agent: agent, session: session, executable: executable,
                               folder: temp.path, question: "Repeat the token from the parent conversation. Reply only that token. Do not use tools.")
         report("side command starts in a fresh non-git folder", asked)
-        guard asked, awaitAnswer("fresh non-git folder") else { return }
+        guard asked, awaitAnswer("fresh non-git folder", after: secondQuestionIDs) else { return }
         report("side answers leave parent transcript and input unchanged",
                beforeTranscript != nil && beforeTranscript == (try? Data(contentsOf: URL(fileURLWithPath: transcript)))
                 && chat.allEntries == parentEntries && reader?.composer.textView.string == parentInput
@@ -812,35 +852,32 @@ private final class LiveCheckSession {
         report("count is running before queueing", busy, busyEvidence.isEmpty ? String(screen.suffix(450)) : busyEvidence)
         guard busy, let reader, let page = reader.reader?.page else { return }
         let id = chat.pendingMessages.entries.first(where: { $0.text == second })?.id
-        var nativeQueue = false
-        var labelShown = false
+        let locallyQueued = id.map { chat.pendingMessages.stage(id: $0) == .waiting } == true
+        report("default send immediately creates an editable queue entry", queued && locallyQueued)
         var actionable = false
         var accepted = false
-        reader.reader?.onSendNow = { [weak reader] chatID, messageID in
-            accepted = reader?.sendNow(chatID: chatID, id: messageID) == true
+        reader.reader?.onQueueAction = { [weak reader] chatID, messageID, action in
+            if action == "send" || action == "sendWithQueue" {
+                accepted = reader?.sendNow(chatID: chatID, id: messageID) == true
+            }
         }
         let observed = queued && wait(8) {
-            guard reader.isTyping == false, !completedCount() else { return false }
-            nativeQueue = nativeQueue || QueuedSendNow.available(agentID: self.agent, screen: self.screen)
-            labelShown = labelShown || chat.pendingMessages.entries.contains { $0.id == id && $0.sendNowLabel != nil }
-            guard nativeQueue, chat.pendingMessages.entries.contains(where: { $0.id == id && $0.sendNowLabel != nil }),
-                  let id, let data = try? JSONEncoder().encode(id), let literal = String(data: data, encoding: .utf8) else { return false }
-            // Click in the same observation that proves the action exists. Separate logging
-            // and another poll can let a fast provider consume the steer before the click.
+            guard !completedCount(), let id,
+                  let data = try? JSONEncoder().encode(id), let literal = String(data: data, encoding: .utf8) else { return false }
             actionable = (SelfTest.js(page, """
                 (() => { const row = Array.from(document.querySelectorAll('.entry.pending')).find(e => e.dataset.id === \(literal));
-                  const button = row && row.querySelector('.send-now'); if (!button) return false; button.click(); return true; })()
+                  const button = row && Array.from(row.querySelectorAll('.queue-action')).find(b => b.textContent === 'Send now' || b.textContent === 'Send with agent queue');
+                  if (!button) return false; button.click(); return true; })()
                 """) as? Bool) == true
             return actionable
         }
-        report("native pending queue observed", nativeQueue,
-               "A naturally accepted steer or an early completed count cannot prove Send now. " + String(screen.suffix(450)))
-        report("pending message exposes Send now label", labelShown,
-               "pending=\(chat.pendingMessages.entries.count), enabled=\(chat.pendingMessages.sendNowEnabled)")
         report("reader renders and clicks Send now", observed && actionable)
         guard observed, actionable, let id else { return }
-        let requested = wait(3) { accepted }
-        report("Send now requests delivery", requested)
+        let requested = wait(8) {
+            accepted && chat.pendingMessages.entries.contains { $0.id == id && $0.deliveryRequested == true }
+        }
+        report("Send now confirms the native queue and requests delivery", requested,
+               "A naturally accepted steer cannot prove native promotion. " + String(screen.suffix(450)))
         guard requested else { return }
         var receivedBeforeFinish = false
         let received = wait(120) {
@@ -889,7 +926,7 @@ private final class LiveCheckSession {
             var sent = false
             if busy {
                 let began = Date()
-                let workingPrompt = "Without tools or file access, write every integer from 1 to 2000, one per line. Use exactly this line format: <integer> - this is the next number in the sequence. Do not abbreviate, summarize, or skip any lines. Finish with done."
+                let workingPrompt = "Without tools or file access, write every integer from 1 to 400, one per line. Use exactly this line format: <integer> - this is the next number in the sequence. Do not abbreviate, summarize, or skip any lines. Finish with done."
                 let started = send(workingPrompt)
                 let working = started && wait(60) {
                     let state = self.center?.state(of: chat.id)

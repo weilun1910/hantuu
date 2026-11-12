@@ -24,10 +24,14 @@ enum SelfTest {
     static func waitUntil(_ timeout: TimeInterval, _ cond: () -> Bool) -> Bool {
         let end = Date().addingTimeInterval(timeout)
         while Date() < end {
-            if cond() { return true }
-            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+            let satisfied = autoreleasepool {
+                if cond() { return true }
+                RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+                return false
+            }
+            if satisfied { return true }
         }
-        return cond()
+        return autoreleasepool { cond() }
     }
 
     static func run(workdir: URL) -> Int32 {
@@ -41,57 +45,57 @@ enum SelfTest {
         Paths.ensure(workdir)
         print("hantuu self test, workdir \(workdir.path)\n")
 
-        readerRequests()
-        readerRequestFiles(workdir)
-        readerChecklist()
-        readerEvidence()
-        readerEvidenceLifetimes()
-        readerHealthFixtures(workdir)
-        readerEvidenceRendering(workdir)
-        claudeParsing()
-        codexParsing()
-        queuedMessages(workdir)
-        composerAttachmentTransport(workdir)
-        composerAgentControls(workdir)
-        composerDraftMention(workdir)
-        composerMentionSnapshots(workdir.appendingPathComponent("composer-snapshots"))
-        composerParity(workdir)
-        savedState(workdir)
-        discovery(workdir)
-        follower(workdir)
-        sessionFollowing(workdir)
-        transcriptRecovery(workdir)
-        transcriptTiming(workdir)
-        paths(workdir)
-        misc()
-        agentDetection()
-        surface(workdir)
-        reader(workdir)
-        sessions(workdir) // Sessions/SessionSelfTest.swift
-        review(workdir)
-        panelGit(workdir)
-        panelFeedback(workdir)
-        panelFreshness(workdir)
-        status(workdir)   // agent states, hooks, notifications, snapshots (Status/StatusSelfTest.swift)
-        readerMode(workdir) // settings, the message box, Stop, the banner, snapshots (ReaderMode/ReaderModeSelfTest.swift)
-        readerCommands(workdir)
-        releaseSnapshots(workdir) // reader command menus and queued messages for the 2.2 release
-        sideChats(workdir)
-        agentWork(workdir)  // subagents, background tasks, the status they hold up, snapshots (Tests/AgentWorkSelfTest.swift)
-        projectPanels(workdir)
-        browserTab(workdir)
-        subagentBrowser(workdir) // sidebar navigation and read-only child transcripts
-        sidebarParity(workdir)
-        chatHistory(workdir)
-        codexSessionIdentity(workdir)
-        fileViewer(workdir) // the Code tab as a file viewer and editor (FileViewer/FileViewerSelfTest.swift)
-        panelRecovery(workdir)
-        usage(workdir)    // usage limits and the footer rings (Usage/UsageSelfTest.swift)
-        keepAwake(workdir)  // the lid-shut switch, its limits, the crash check (Tests/KeepAwakeSelfTest.swift)
-        liveChecksLogic(workdir)
-        appLifetimes(workdir)
-        liveChecks(workdir) // Real agents only when HANTUU_LIVE names a trusted probe folder.
-
+        autoreleasepool { readerRequests() }
+        autoreleasepool { readerRequestFiles(workdir) }
+        autoreleasepool { readerChecklist() }
+        autoreleasepool { readerEvidence() }
+        autoreleasepool { readerEvidenceLifetimes() }
+        autoreleasepool { readerHealthFixtures(workdir) }
+        autoreleasepool { readerEvidenceRendering(workdir) }
+        autoreleasepool { claudeParsing() }
+        autoreleasepool { codexParsing() }
+        autoreleasepool { queuedMessages(workdir) }
+        autoreleasepool { composerAttachmentTransport(workdir) }
+        autoreleasepool { composerAgentControls(workdir) }
+        autoreleasepool { composerDraftMention(workdir) }
+        autoreleasepool { composerMentionSnapshots(workdir.appendingPathComponent("composer-snapshots")) }
+        autoreleasepool { composerParity(workdir) }
+        autoreleasepool { savedState(workdir) }
+        autoreleasepool { discovery(workdir) }
+        autoreleasepool { follower(workdir) }
+        autoreleasepool { sessionFollowing(workdir) }
+        autoreleasepool { transcriptRecovery(workdir) }
+        autoreleasepool { codexResumeRecovery(workdir) }
+        autoreleasepool { transcriptTiming(workdir) }
+        autoreleasepool { paths(workdir) }
+        autoreleasepool { misc() }
+        autoreleasepool { agentDetection() }
+        autoreleasepool { surface(workdir) }
+        autoreleasepool { reader(workdir) }
+        autoreleasepool { sessions(workdir) } // Sessions/SessionSelfTest.swift
+        autoreleasepool { review(workdir) }
+        autoreleasepool { panelGit(workdir) }
+        autoreleasepool { panelFeedback(workdir) }
+        autoreleasepool { panelFreshness(workdir) }
+        autoreleasepool { status(workdir) } // agent states, hooks, notifications, snapshots (Status/StatusSelfTest.swift)
+        autoreleasepool { readerMode(workdir) } // settings, the message box, Stop, the banner, snapshots (ReaderMode/ReaderModeSelfTest.swift)
+        autoreleasepool { readerCommands(workdir) }
+        autoreleasepool { releaseSnapshots(workdir) } // reader command menus and queued messages for the 2.2 release
+        autoreleasepool { sideChats(workdir) }
+        autoreleasepool { agentWork(workdir) } // subagents, background tasks, the status they hold up, snapshots (Tests/AgentWorkSelfTest.swift)
+        autoreleasepool { projectPanels(workdir) }
+        autoreleasepool { browserTab(workdir) }
+        autoreleasepool { subagentBrowser(workdir) } // sidebar navigation and read-only child transcripts
+        autoreleasepool { sidebarParity(workdir) }
+        autoreleasepool { chatHistory(workdir) }
+        autoreleasepool { codexSessionIdentity(workdir) }
+        autoreleasepool { fileViewer(workdir) } // the Code tab as a file viewer and editor (FileViewer/FileViewerSelfTest.swift)
+        autoreleasepool { panelRecovery(workdir) }
+        autoreleasepool { usage(workdir) } // usage limits and the footer rings (Usage/UsageSelfTest.swift)
+        autoreleasepool { keepAwake(workdir) } // the lid-shut switch, its limits, the crash check (Tests/KeepAwakeSelfTest.swift)
+        autoreleasepool { liveChecksLogic(workdir) }
+        autoreleasepool { appLifetimes(workdir) }
+        autoreleasepool { liveChecks(workdir) } // Real agents only when HANTUU_LIVE names a trusted probe folder.
         print("\n\(passes) passed, \(failures) failed")
         return failures == 0 ? 0 : 1
     }

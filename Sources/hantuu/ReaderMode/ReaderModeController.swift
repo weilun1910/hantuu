@@ -75,6 +75,7 @@ final class ReaderModeController: NSObject {
     private var preparationTargets: [String: (UUID, String?, TerminalView)] = [:]
     private var queueReadySince: [UUID: Date] = [:]
     private var submittedAt: [UUID: Date] = [:]
+    private var inputRestoration: [UUID: ReaderInputRestoration] = [:]
     private var editingQueueIDs: [UUID: String] = [:]
     private var editingQueueID: String? {
         get { shownChatID.flatMap { editingQueueIDs[$0] } }
@@ -242,6 +243,7 @@ final class ReaderModeController: NSObject {
         deliveryBar.orientation = .horizontal
         deliveryBar.spacing = 10
         deliveryChoice.addItems(withTitles: ["Return: Steer", "Return: Queue"])
+        deliveryChoice.selectItem(at: 1)
         deliveryChoice.controlSize = .small
         deliveryChoice.toolTip = "While working: Return uses this action; Command-Return uses the other. Queue stays in hantuu until the next turn."
         for button in [queueButton, steerButton, resumeQueueButton, cancelQueueEdit, previousDraftButton, reviewedInputButton, keymapButton] {
@@ -466,16 +468,14 @@ final class ReaderModeController: NSObject {
 
     /// Delivery belongs to the owning chat, regardless of the currently displayed face.
     private func refreshQueues() {
+        let pendingChats = Set(model.chats.filter { !$0.pendingMessages.isEmpty }.map(\.id))
+        inputRestoration = inputRestoration.filter { pendingChats.contains($0.key) }
         for chat in model.chats where !chat.pendingMessages.isEmpty {
             if chat.pendingMessages.expire() { model.save() }
             guard isLive(chat), let terminal = chat.terminal else { continue }
             let raw = terminal.activeScreenText()
             let screen = TerminalScreen.analyze(raw)
-            if screen.ready && !screen.busy && screen.menu == nil, !chat.pendingMessages.inputNeedsReview,
-               !outbox.contains(where: { $0.chatID == chat.id }), chat.pendingMessages.isRestored(in: raw) {
-                chat.pendingMessages.inputNeedsReview = true
-                cancelTransport(chat, reason: "The terminal restored input. Check it before resending.")
-            }
+            observeRestoredInput(chat, terminal: terminal, raw: raw, screen: screen)
             let st = statusProvider(chat)
             let editing = editingQueueIDs[chat.id] != nil
             let controlWaiting = model.selectedChatID == chat.id && pendingControl != nil
@@ -498,6 +498,33 @@ final class ReaderModeController: NSObject {
         }
     }
 
+    /// A Return does not redraw the CLI synchronously. Its old input is not a restore.
+    private func observeRestoredInput(_ chat: Chat, terminal: TerminalView, raw: String, screen: TerminalScreen.State) {
+        guard !chat.pendingMessages.inputNeedsReview,
+              !outbox.contains(where: { $0.chatID == chat.id }),
+              var observation = inputRestoration[chat.id],
+              observation.terminal == ObjectIdentifier(terminal) else { return }
+        guard let recovery = chat.pendingMessages.recovery(id: observation.pendingID) else {
+            inputRestoration[chat.id] = nil
+            return
+        }
+        if observation.sessionID != chat.sessionID {
+            guard observation.sessionID == nil, recovery.sessionID == chat.sessionID else {
+                inputRestoration[chat.id] = nil
+                return
+            }
+            observation.sessionID = chat.sessionID
+        }
+        let restored = observation.observe(empty: screen.ready && screen.menu == nil && CommandMenuScreen.emptyInput(raw, agent: chat.agentID),
+            matches: chat.pendingMessages.isRestored(in: raw),
+            eligible: screen.ready && !screen.busy && screen.menu == nil)
+        inputRestoration[chat.id] = observation
+        if restored {
+            chat.pendingMessages.inputNeedsReview = true
+            cancelTransport(chat, reason: "The terminal restored input. Check it before resending.")
+        }
+    }
+
     // MARK: State
 
     /// Works out the message box's state for the selected chat and applies it.
@@ -517,14 +544,6 @@ final class ReaderModeController: NSObject {
             if menuProbe != nil {
                 if !mayProbe(chat, terminal: t) { cancelMenuProbe() }
                 else { screen.menu = nil }
-            }
-            // Esc in the terminal can restore queued text without writing an interruption.
-            // Only trust the input box once our own paste has completely finished.
-            if screen.ready && !screen.busy && screen.menu == nil, !chat.pendingMessages.inputNeedsReview,
-               !outbox.contains(where: { $0.chatID == chat.id }),
-               chat.pendingMessages.isRestored(in: t.activeScreenText()) {
-                chat.pendingMessages.inputNeedsReview = true
-                cancelTransport(chat, reason: "The terminal restored input. Check it before resending.")
             }
         }
         var activity = chat.activity
@@ -790,7 +809,8 @@ final class ReaderModeController: NSObject {
         }
         let sendID = editingQueueID ?? "pending-" + UUID().uuidString
         let chosen = intent ?? (deliveryChoice.indexOfSelectedItem == 1 ? .queue : .steer)
-        let wait = composerMode.isWorking && chosen == .queue || editingQueueID != nil
+        let working = composerMode.isWorking || TerminalScreen.analyze(t.activeScreenText()).busy || statusProvider(chat)?.turnActive == true
+        let wait = working && chosen == .queue || editingQueueID != nil
         chat.pendingMessages.enqueue(id: sendID, text: text, files: [], agentID: chat.agent.id,
                                      existing: chat.allEntries, stage: wait ? .waiting : .preparing,
                                      attachments: attachments, sessionID: chat.sessionID)
@@ -826,10 +846,12 @@ final class ReaderModeController: NSObject {
         guard ComposerMode.resolve(input).canSend, !chat.codexIdentityWaiting,
               !chat.pendingMessages.inputNeedsReview else { return false }
         chat.pendingMessages.enqueue(id: id, text: text, files: [], agentID: chat.agent.id,
-                                     existing: chat.allEntries, stage: .preparing, sessionID: chat.sessionID)
+                                     existing: chat.allEntries,
+                                     stage: chat.activity == .working || screen.busy || status?.turnActive == true ? .waiting : .preparing,
+                                     sessionID: chat.sessionID)
         model.save()
         startTimer()
-        startPending(chat, id: id)
+        if chat.pendingMessages.stage(id: id) != .waiting { startPending(chat, id: id) }
         return true
     }
 
@@ -919,9 +941,7 @@ final class ReaderModeController: NSObject {
         case "up" where owned: chat.pendingMessages.move(id: id, offset: -1)
         case "down" where owned: chat.pendingMessages.move(id: id, offset: 1)
         case "send" where owned, "sendWithQueue" where owned:
-            refresh()
-            guard composerMode.canSend, !isTyping, editingQueueID != id else { return }
-            startPending(chat, id: id, promote: composerMode.isWorking)
+            _ = sendNow(chatID: chatID, id: id)
         case "edit" where owned:
             preserveDraft(chat)
             editingQueueID = id
@@ -1170,6 +1190,7 @@ final class ReaderModeController: NSObject {
                     self.model.save()
                 }
                 self.submittedAt[first.chatID] = Date()
+                self.inputRestoration[first.chatID] = ReaderInputRestoration(terminal: ObjectIdentifier(terminal), sessionID: self.model.chats.first(where: { $0.id == first.chatID })?.sessionID, pendingID: id)
                 self.queueReadySince[first.chatID] = nil
                 terminal.pressReturn()
                 if let command = first.command { self.didSendCommand(command, terminal: terminal) }
@@ -1208,6 +1229,13 @@ final class ReaderModeController: NSObject {
         guard let chat = model.selectedChat, chat.id == chatID, chat.id == shownChatID,
               mode.showsReader(chat) else { return false }
         refresh()
+        if chat.pendingMessages.stage(id: id) == .waiting {
+            guard composerMode.canSend, !isTyping, editingQueueID == nil,
+                  !chat.pendingMessages.inputNeedsReview else { return false }
+            let working = composerMode.isWorking || chat.terminal.map { TerminalScreen.analyze($0.activeScreenText()).busy } == true || statusProvider(chat)?.turnActive == true
+            startPending(chat, id: id, promote: working)
+            return true
+        }
         return sendNativeQueue(chat, id: id)
     }
 
@@ -1232,7 +1260,9 @@ final class ReaderModeController: NSObject {
 
     private func sendFirstQueuedNow() -> Bool {
         guard let chat = model.selectedChat,
-              let entry = chat.pendingMessages.entries.first(where: { $0.sendNowLabel != nil }) else { return false }
+              let entry = chat.pendingMessages.entries.first(where: {
+                  $0.sendNowLabel != nil || (chat.agentID == "claude" && chat.pendingMessages.stage(id: $0.id) == .waiting)
+              }) else { return false }
         return sendNow(chatID: chat.id, id: entry.id)
     }
 

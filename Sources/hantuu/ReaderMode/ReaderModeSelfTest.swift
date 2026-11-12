@@ -338,7 +338,16 @@ extension SelfTest {
         let c = ComposerAttachment.make(from: .images([.init(data: png, type: .png)]), now: t0)
         let names = [a, b, c].compactMap(\.first?.url.lastPathComponent)
         check("saved: names sort by time, and two in the same second don't clash", names.count == 3 && Set(names).count == 3 && names[0] < names[1], "\(names)")
-        check("saved: an unreadable picture is skipped", ComposerAttachment.make(from: .images([.init(data: Data("nope".utf8), type: .tiff)])).isEmpty)
+        let unreadable = ComposerAttachment.make(from: .images([.init(data: Data("nope".utf8), type: .tiff)]))
+        let failedImage = unreadable.first.map { attachment in
+            if case .failed(let reason) = attachment.preparation { return !reason.isEmpty && attachment.pasted }
+            return false
+        } ?? false
+        check("saved: an unreadable picture remains a failed chip", unreadable.count == 1 && failedImage)
+        var unreadableResult: Result<[ComposerMessage.OutgoingFile], ComposerAttachmentTransport.Failure>?
+        ComposerAttachmentTransport.prepare(unreadable, agentID: "claude") { _, result in unreadableResult = result }
+        if case .some(.failure(_)) = unreadableResult { check("saved: an unreadable picture cannot submit", true) }
+        else { check("saved: an unreadable picture cannot submit", false) }
 
         // A big picture: a 6000 x 4000 TIFF full of noise, the slowest case there is. The chip
         // appears at once and the PNG is written in the background.
@@ -512,9 +521,15 @@ extension SelfTest {
 
     /// A "chat" whose program shows an idle prompt line, turns on bracketed paste and records
     /// every byte it gets.
-    static func recordingTerminal(_ g: GhosttyApp, dir: URL, file: URL) -> TerminalView {
+    static func recordingTerminal(_ g: GhosttyApp, dir: URL, file: URL, acknowledgeImageBytes: Int? = nil) -> TerminalView {
         try? FileManager.default.removeItem(at: file)
-        let script = "stty -icanon -icrnl -echo min 1 time 0; printf '\\033[?2004h'; printf '  ? for shortcuts\\n'; exec cat -u > \(ShellEscape.quote(file.path))"
+        let recording: String
+        if let count = acknowledgeImageBytes {
+            recording = "dd bs=1 count=\(count) of=\(ShellEscape.quote(file.path)) 2>/dev/null; printf '[Image #1]\\n  ? for shortcuts\\n'; exec cat -u >> \(ShellEscape.quote(file.path))"
+        } else {
+            recording = "exec cat -u > \(ShellEscape.quote(file.path))"
+        }
+        let script = "stty -icanon -icrnl -echo min 1 time 0; printf '\\033[?2004h'; printf '  ? for shortcuts\\n'; " + recording
         return TerminalView(app: g.app, launch: .init(workingDirectory: dir.path, command: "/bin/sh -c \(ShellEscape.quote(script))"), handlesChildExit: true)
     }
 
@@ -566,9 +581,11 @@ extension SelfTest {
             owner.activity = .working
             controller.refresh()
             controller.composer.textView.text = "first background message"
-            let first = controller.send(intent: .queue)
+            let first = controller.send()
             controller.composer.textView.text = "second background message"
-            let second = controller.send(intent: .queue)
+            let second = controller.send()
+            check("queue default: \(provider) Return retains editable queued bubbles without terminal input",
+                  first && second && owner.pendingMessages.entries.allSatisfy { $0.pendingState == "Queued" && $0.pendingActions?.contains("edit") == true } && ownerBytes().isEmpty)
             mode.toggle(other)
             app.selectedChatID = other.id
             controller.sync(selected: other)
@@ -844,7 +861,7 @@ extension SelfTest {
         chat.activity = .working
         rm.refresh()
         rm.composer.textView.text = "queued reader thought"
-        let queuedSend = rm.send()
+        let queuedSend = rm.send(intent: .steer)
         check("queue send: a busy send immediately creates a pending bubble", queuedSend && chat.pendingMessages.entries.first?.text == "queued reader thought")
         if let id = chat.pendingMessages.entries.first?.id {
             check("send now: cannot interrupt a message that is still being pasted", !rm.sendNow(chatID: chat.id, id: id))
@@ -865,7 +882,7 @@ extension SelfTest {
         // Stop during a delayed paste cancels Return and preserves a recoverable copy.
         rm.composer.textView.text = "cancel before return"
         let cancelMark = bytes().count
-        _ = rm.send()
+        _ = rm.send(intent: .steer)
         let cancelled = rm.stop()
         RunLoop.main.run(until: Date().addingTimeInterval(0.8))
         check("queue send: Stop retains input and cancels the delayed Return",

@@ -190,5 +190,57 @@ extension SelfTest {
         check("send now: \(agent) composer shortcut preserves its draft and sends the native action",
               waitUntil(5) { bytes() == expected + expected } && controller.composer.textView.text == "Keep this draft" &&
               chat.pendingMessages.entries.first?.deliveryRequested == true)
+
+        // The default reader Queue stays editable until its own Send now action is used.
+        // The screen can report work before the structured activity hook catches up.
+        chat.pendingMessages = PendingReaderMessages()
+        chat.activity = .idle
+        controller.refresh()
+        let mark = bytes().count
+        controller.composer.textView.text = "local waiting message"
+        let queued = controller.send()
+        let localID = chat.pendingMessages.entries.first?.id
+        check("send now: \(agent) default Queue creates a bubble without terminal bytes", queued &&
+              localID.map { chat.pendingMessages.stage(id: $0) == .waiting } == true && bytes().count == mark)
+        check("queue: \(agent) busy screen holds Queue before activity catches up", queued && chat.activity == .idle && chat.pendingMessages.firstWaitingID == localID)
+        chat.activity = .working
+        controller.refresh()
+        controller.composer.textView.text = "Preserve this next draft"
+        let localButton = waitUntil(5) {
+            js(page, "Array.from(document.querySelectorAll('.queue-action')).some(b => b.textContent === 'Send now')") as? Bool == true
+        }
+        check("send now: \(agent) waiting bubble has Send now", localButton)
+        if localButton {
+            _ = js(page, "Array.from(document.querySelectorAll('.queue-action')).find(b => b.textContent === 'Send now').click(); 0")
+        }
+        let promoted = waitUntil(5) { chat.pendingMessages.entries.first?.deliveryRequested == true && !controller.isTyping &&
+            Data(bytes().dropFirst(mark)) == Data("local waiting message\r".utf8) + expected }
+        let newBytes = Data(bytes().dropFirst(mark))
+        check("send now: \(agent) local action submits once then uses native promotion", promoted &&
+              newBytes == Data("local waiting message\r".utf8) + expected && controller.composer.textView.string == "Preserve this next draft")
+        chat.pendingMessages = PendingReaderMessages()
+        let steerMark = bytes().count
+        controller.composer.textView.text = "explicit steer"
+        controller.composer.textView.onAlternateSend?()
+        check("send now: \(agent) alternate send explicitly steers", waitUntil(5) { !controller.isTyping && Data(bytes().dropFirst(steerMark)) == Data("explicit steer\r".utf8) } &&
+              Data(bytes().dropFirst(steerMark)) == Data("explicit steer\r".utf8) && chat.pendingMessages.entries.first.map { chat.pendingMessages.stage(id: $0.id) == .sent } == true)
+
+        chat.pendingMessages = PendingReaderMessages()
+        controller.composer.textView.text = "keyboard waiting message"
+        let keyboardQueued = controller.send()
+        let keyboardMark = bytes().count
+        let localShortcut = keyEvent(agent == "claude" ? 36 : 53, agent == "claude" ? "\r" : "\u{1b}",
+                                     mods: agent == "claude" ? .control : [], window: window)
+        if let localShortcut { controller.composer.textView.keyDown(with: localShortcut) }
+        if agent == "claude" {
+            check("send now: Claude Control-Return promotes the local queue", keyboardQueued && waitUntil(5) {
+                Data(bytes().dropFirst(keyboardMark)) == Data("keyboard waiting message\r".utf8) + expected &&
+                    chat.pendingMessages.entries.first?.deliveryRequested == true
+            })
+        } else {
+            check("queue: Codex Escape keeps Stop behavior for input still held locally", keyboardQueued && waitUntil(5) {
+                Data(bytes().dropFirst(keyboardMark)) == Data([0x1b])
+            } && chat.pendingMessages.queuePaused && chat.pendingMessages.firstWaitingID != nil)
+        }
     }
 }

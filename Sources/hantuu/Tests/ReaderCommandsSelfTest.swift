@@ -45,7 +45,9 @@ extension SelfTest {
         }
         check("commands: file-only messages keep their leading space", ComposerMessage.steps(text: nil, files: [.init(path: "/tmp/example.txt", image: false)], agentID: "claude") == [.paste(" /tmp/example.txt"), .pressReturn])
         check("commands: unknown names still reach the agent", ComposerMessage.steps(text: "/custom:name arg", files: [], agentID: "claude") == [.command("/custom:name arg"), .pressReturn])
-        check("commands: absolute paths and multiline prose stay pastes", ComposerMessage.steps(text: "/tmp/example.txt", files: [], agentID: "codex") == [.paste("/tmp/example.txt"), .pressReturn] && ComposerMessage.steps(text: "/compact\njust an example", files: [], agentID: "codex").first == .paste("/compact\njust an example"))
+        check("commands: absolute paths stay pastes", ComposerMessage.steps(text: "/tmp/example.txt", files: [], agentID: "codex") == [.paste("/tmp/example.txt"), .pressReturn])
+        check("commands: multiline arguments retain the literal command", ComposerMessage.steps(text: "/compact\njust an example", files: [], agentID: "codex") == [.command("/compact\njust an example"), .pressReturn])
+        check("commands: multiline prose stays a paste", ComposerMessage.steps(text: "Example:\n/compact", files: [], agentID: "codex") == [.paste("Example:\n/compact"), .pressReturn])
     }
 
     private static func readerCommandMenuProbe() {

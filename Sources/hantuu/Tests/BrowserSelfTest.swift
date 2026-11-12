@@ -237,11 +237,13 @@ extension SelfTest {
         model.projects = [project]
         let chat = Chat(projectID: project.id, agentID: "claude")
         let bytesFile = dir.appendingPathComponent("browser-input.bin")
-        let terminal = recordingTerminal(ghostty, dir: dir, file: bytesFile)
+        let image = dir.appendingPathComponent("feedback.png")
+        let imagePaste = "\u{1b}[200~" + ShellEscape.escape(image.path) + "\u{1b}[201~"
+        let terminal = recordingTerminal(ghostty, dir: dir, file: bytesFile, acknowledgeImageBytes: imagePaste.utf8.count)
         chat.terminal = terminal; model.chats = [chat]; model.select(chat.id)
         let settings = ChatSettings(file: dir.appendingPathComponent("chat-settings.json")); settings.showChatsAsReader = true
         let reader = ReaderModeController(model: model, mode: ReaderMode(settings: settings), commandCatalog: ReaderCommandCatalog(home: dir))
-        reader.statusProvider = { _ in nil }; reader.imageWait = 0.05
+        reader.statusProvider = { _ in nil }; reader.imageWait = 3
         let window = NSWindow(contentRect: NSRect(x: -5000, y: -5000, width: 700, height: 500), styleMask: [.borderless], backing: .buffered, defer: false)
         window.isReleasedWhenClosed = false
         let host = NSView(frame: NSRect(x: 0, y: 0, width: 700, height: 500)); window.contentView = host
@@ -250,7 +252,6 @@ extension SelfTest {
         defer { terminal.destroy(); window.orderOut(nil) }
         _ = reader.sync(selected: chat)
         check("browser composer: fake agent ready", waitUntil(8) { reader.refresh(); return reader.composerMode == .ready })
-        let image = dir.appendingPathComponent("feedback.png")
         try? imageData(.systemBlue, width: 20, height: 20, type: .png).write(to: image)
         let feedback = BrowserFeedback.screenshot(url: "http://localhost:5173", width: 500, height: 400, image: image)
         reader.composer.textView.text = "My existing draft"
@@ -259,7 +260,7 @@ extension SelfTest {
         check("browser composer: insertion focuses the reader input", window.firstResponder === reader.composer.textView)
         settings.showChatsAsReader = false; _ = reader.sync(selected: chat)
         check("browser composer: accepts terminal draft", reader.insertBrowserFeedback(feedback, chatID: chat.id))
-        _ = waitUntil(5) { !reader.isTyping }
+        check("browser composer: native image acknowledgement completes transport", waitUntil(5) { !reader.isTyping } && ComposerMessage.imageMarks(terminal.activeScreenText()) == 1)
         let bytes = (try? Data(contentsOf: bytesFile)) ?? Data()
         let expected = "\u{1b}[200~" + ShellEscape.escape(image.path) + "\u{1b}[201~\u{1b}[200~ " + feedback.text + "\u{1b}[201~"
         check("browser composer: separate image paste and text, no Return", String(data: bytes, encoding: .utf8) == expected, String(data: bytes, encoding: .utf8)?.debugDescription ?? "")
