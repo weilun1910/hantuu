@@ -19,25 +19,41 @@ enum CommandMenuScreen {
     static func input(_ screen: String, agent: String) -> String? {
         let marker = agent == "claude" ? "❯" : "›"
         let lines = screen.components(separatedBy: "\n")
-        for index in lines.indices.suffix(20).reversed() {
+        // This is the visible screen, not scrollback. A tall suggestion list can put the
+        // input above the final twenty rows, so inspect the nearest prompt in the capture.
+        for index in lines.indices.reversed() {
             let line = lines[index].trimmingCharacters(in: .whitespaces)
-            guard line == marker || line.hasPrefix(marker + " ") else { continue }
+            guard line.hasPrefix(marker) else { continue }
+            let remainder = line.dropFirst(marker.count)
+            guard remainder.isEmpty || remainder.first?.isWhitespace == true else { continue }
             guard rows(line).isEmpty else { continue }
+            // Beyond the ordinary footer area, only a continuous menu can explain the
+            // distance. Do not reuse a historical empty prompt above conversation output.
+            if index < lines.count - 20 {
+                let menuTail = lines.dropFirst(index + 1).allSatisfy { raw in
+                    let row = raw.trimmingCharacters(in: .whitespaces)
+                    return row.isEmpty || !rows(row).isEmpty || closesInput(row)
+                }
+                guard menuTail else { return nil }
+            }
             // Reject a continuation line instead of mistaking an empty first line of a
             // multiline draft for an empty composer. A rule or footer closes the box.
             for raw in lines.dropFirst(index + 1) {
                 let next = raw.trimmingCharacters(in: .whitespaces)
                 if next.isEmpty || !rows(next).isEmpty { continue }
-                let lower = next.lowercased()
-                let rule = next.count >= 3 && next.allSatisfy { "─━═│┃║ ".contains($0) }
-                let footer = TerminalScreen.readyMarks.contains(where: lower.contains) ||
-                    lower.hasPrefix("gpt-") || lower.contains("for agents") || lower.contains("/effort")
-                if rule || footer { break }
+                if closesInput(next) { break }
                 return nil
             }
             return String(line.dropFirst(marker.count)).trimmingCharacters(in: .whitespaces)
         }
         return nil
+    }
+
+    private static func closesInput(_ line: String) -> Bool {
+        let lower = line.lowercased()
+        let rule = line.count >= 3 && line.allSatisfy { "─━═│┃║ ".contains($0) }
+        return rule || TerminalScreen.readyMarks.contains(where: lower.contains) ||
+            lower.hasPrefix("gpt-") || lower.contains("for agents") || lower.contains("/effort")
     }
 
     static func emptyInput(_ screen: String, agent: String) -> Bool {
@@ -101,6 +117,10 @@ struct CommandMenuTraversal {
 /// A cancellable, non-submitting traversal. The caller owns the exclusive input lease.
 /// It never writes provider files, launches a process or reads account caches.
 final class CommandMenuProbe {
+    // Codex's automatic traversal has not demonstrated reliable input restoration.
+    // Its disk catalogue and explicit native commands remain available without a probe.
+    static func supportsAutomaticHarvest(agent: String) -> Bool { agent == "claude" }
+
     struct IO {
         var screen: () -> String
         var allowed: () -> Bool
@@ -155,6 +175,23 @@ final class CommandMenuProbe {
         DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in self?.step() }
     }
 
+    private func confirmCleanup(until deadline: Date) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
+            guard let self else { return }
+            let screen = self.io.screen()
+            guard self.io.allowed(), CommandMenuScreen.safe(screen) else {
+                self.completion([], false)
+                return
+            }
+            let cleared = CommandMenuScreen.emptyInput(screen, agent: self.agent) && CommandMenuScreen.rows(screen).isEmpty
+            if cleared || Date() >= deadline {
+                self.completion(self.traversal.commands, self.traversal.finished && cleared)
+            } else {
+                self.confirmCleanup(until: deadline)
+            }
+        }
+    }
+
     private func step() {
         guard active else { return }
         let screen = io.screen()
@@ -175,12 +212,9 @@ final class CommandMenuProbe {
         if traversal.finished || traversal.capped {
             active = false
             clean()
-            // Let Esc and Backspace draw before another operation can submit input.
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
-                guard let self else { return }
-                let cleared = CommandMenuScreen.emptyInput(self.io.screen(), agent: self.agent)
-                self.completion(self.traversal.commands, self.traversal.finished && cleared)
-            }
+            // Keep the caller's input lease until cleanup is visible. A redraw can take
+            // longer than one timer tick; retries observe the screen and send no more keys.
+            confirmCleanup(until: Date().addingTimeInterval(3))
             return
         }
         io.down()

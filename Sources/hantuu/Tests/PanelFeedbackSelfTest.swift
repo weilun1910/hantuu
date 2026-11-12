@@ -23,6 +23,22 @@ extension SelfTest {
         check("panel feedback Claude: malformed and quoted envelopes stay visible",
               ClaudePastedContent.unwrap(mismatched).contains("<pasted_content") &&
               ClaudePastedContent.unwrap("Explain this: " + wrapped).contains("<pasted_content"))
+        for pasteID in ["ec64", "AB09"] {
+            let envelope = wrapped.replacingOccurrences(of: "0141", with: pasteID)
+            var parser = ClaudeTranscriptParser()
+            let entries = parser.parse(line: line(["type": "user", "uuid": "hex-" + pasteID,
+                "version": "2.1.322", "message": ["role": "user", "content": envelope]]))
+            var pending = PendingReaderMessages()
+            pending.enqueue(id: "hex-review", text: text, files: [], agentID: "claude", existing: [])
+            check("panel feedback Claude: hexadecimal paste ID acknowledges once",
+                  entries.first?.text == text && pending.reconcile(entries).first?.replacesPendingID == "hex-review" &&
+                  pending.reconcile(entries).allSatisfy { $0.replacesPendingID == nil })
+            let wrong = envelope.replacingOccurrences(of: "</pasted_content id=\"" + pasteID + "\">",
+                                                      with: "</pasted_content id=\"ff00\">")
+            check("panel feedback Claude: mismatched and quoted hex envelopes cannot acknowledge",
+                  ClaudePastedContent.unwrap(wrong).contains("<pasted_content") &&
+                  ClaudePastedContent.unwrap("Explain this: " + envelope).contains("<pasted_content"))
+        }
         for agent in ["claude", "codex"] {
             var pending = PendingReaderMessages()
             var claude = ClaudeTranscriptParser()

@@ -64,6 +64,13 @@ enum LiveCheckRules {
         return (screenBusy || freshTurn) && !typing && composerWorking
     }
 
+    /// A turn-start event can precede generation. Queue only once the native screen shows
+    /// count output, so an immediately accepted steer cannot replace an unstarted count.
+    static func countOutputStarted(_ screen: String) -> Bool {
+        screen.range(of: #"(?m)^[ \t]*[0-9]+ - this is the next number in the sequence\.[ \t]*$"#,
+                     options: .regularExpression) != nil
+    }
+
     static func featureEnabled(_ name: String, output: String) -> Bool? {
         for line in output.split(whereSeparator: \.isNewline) {
             let words = line.split(whereSeparator: \.isWhitespace).map(String.init)
@@ -145,6 +152,10 @@ extension SelfTest {
         check("live checks: a fresh turn can prove busy without an interrupt hint",
               LiveCheckRules.canQueue(screenBusy: false, turnActive: true, startedAt: sentAt, sentAt: sentAt,
                                       typing: false, composerWorking: true))
+        check("live checks: Send now waits for generated count output",
+              LiveCheckRules.countOutputStarted("Working\n  1 - this is the next number in the sequence.\n") &&
+              !LiveCheckRules.countOutputStarted("Use this line format: <integer> - this is the next number in the sequence.") &&
+              !LiveCheckRules.countOutputStarted("Working\nI will start counting."))
         check("live checks: stale turn state cannot prove a new turn is busy",
               !LiveCheckRules.canQueue(screenBusy: false, turnActive: true, startedAt: sentAt.addingTimeInterval(-1),
                                        sentAt: sentAt, typing: false, composerWorking: true))
@@ -181,8 +192,17 @@ extension SelfTest {
               LiveCheckRules.selection("side", allowed: LiveCheckRules.features) == ["side"])
         let fakeRoot = URL(fileURLWithPath: "/fixture/project")
         check("live checks: nested folders do not falsely qualify as non-git",
-              LiveCheckRules.gitAncestor(fakeRoot.appendingPathComponent("tmp/fresh"), exists: { $0.path == "/fixture/project/.git" }) == fakeRoot
+              LiveCheckRules.gitAncestor(fakeRoot.appendingPathComponent("tmp/fresh"), exists: { $0.path == "/fixture/project/.git" })?.path == fakeRoot.path
               && LiveCheckRules.gitAncestor(fakeRoot, exists: { _ in false }) == nil)
+        let gitFixture = dir.appendingPathComponent("live-git-fixture", isDirectory: true)
+        let nested = gitFixture.appendingPathComponent("tmp/fresh", isDirectory: true)
+        try? FileManager.default.createDirectory(at: nested, withIntermediateDirectories: true)
+        // Worktrees use a .git file, which counts just like a repository's .git directory.
+        try? Data("gitdir: /fixture/metadata\n".utf8).write(to: gitFixture.appendingPathComponent(".git"))
+        check("live checks: a real nested fixture finds its worktree Git ancestor",
+              LiveCheckRules.gitAncestor(nested)?.path == gitFixture.standardizedFileURL.resolvingSymlinksInPath().path)
+        check("live checks: a separate side directory has no synthetic project ancestor",
+              LiveCheckRules.gitAncestor(URL(fileURLWithPath: "/fixture/side"), exists: { $0.path == "/fixture/project/.git" }) == nil)
         check("live checks: child probe uses Sol unless its model is explicitly overridden",
               LiveCheckRules.codexModel(for: "subagents", configured: nil) == "gpt-6.1-sol" &&
               LiveCheckRules.codexModel(for: "queued", configured: nil) == "gpt-6-luna" &&
@@ -228,11 +248,6 @@ extension SelfTest {
             let multiAgent = agent == "codex" && features.contains("subagents")
                 ? LiveCheckRules.featureEnabled("multi_agent_v2", output: LoginShell.run("codex features list", timeout: 15)) : true
             for feature in features {
-                if feature == "side", let repo = LiveCheckRules.gitAncestor(folder) {
-                    check("live \(agent) side: non-git probe folder", false,
-                          "Choose a trusted HANTUU_LIVE folder outside Git repositories for the side check. Ancestor repository: \(repo.path). No model call started.")
-                    continue
-                }
                 if agent == "codex", feature == "subagents", multiAgent == nil {
                     check("live codex subagents: v2 feature gate", false,
                           "codex features list did not expose multi_agent_v2. No prompt sent; this probe requires the v2 spawn_agent API.")
@@ -546,7 +561,11 @@ private final class LiveCheckSession {
             terminal.pressEscape()
             terminal.pressBackspace(times: prefix.count)
             guard wait(3, allowingMenu: true, until: { CommandMenuScreen.emptyInput(self.screen, agent: self.agent) }) else {
-                report("cleared suggestions", false, "input=\(CommandMenuScreen.input(screen, agent: agent) ?? "unrecognized"); \(String(screen.suffix(600)))"); return
+                let capture = dir.appendingPathComponent("live-" + agent + "-slash-cleanup.json")
+                let details: [String: Any] = ["screen": screen, "lines": screen.components(separatedBy: "\n"),
+                                             "input": CommandMenuScreen.input(screen, agent: agent) ?? "unrecognized"]
+                if let data = try? JSONSerialization.data(withJSONObject: details, options: [.prettyPrinted]) { try? data.write(to: capture) }
+                report("cleared suggestions", false, "input=\(CommandMenuScreen.input(screen, agent: agent) ?? "unrecognized"); full capture=\(capture.path); \(String(screen.suffix(600)))"); return
             }
         }
         report("suggestions paged without submitting", !observed.isEmpty && !bounded,
@@ -554,20 +573,30 @@ private final class LiveCheckSession {
         guard !observed.isEmpty, !bounded, failure == nil, let chat, let reader else { return }
         // Exercise production discovery separately. Comparing the static table to a live
         // menu cannot account for account skills or feature gates.
+        let inputBeforeDiscovery = CommandMenuScreen.input(screen, agent: agent)
         reader.commandDiscoveryEnabled = true
         reader.composer.textView.text = "/"
         reader.composer.textView.setSelectedRange(NSRange(location: 1, length: 0))
         reader.composer.textView.updateCommands()
         reader.composer.textView.onCommandQuery?()
-        let discovered = wait(100, allowingMenu: true) { reader.hasObservedCommands && !reader.isDiscoveringCommands }
-        report("reader harvests its idle menu and restores input", discovered && CommandMenuScreen.emptyInput(screen, agent: agent),
-               "identity waiting=\(chat.codexIdentityWaiting), probe active=\(reader.isDiscoveringCommands), composer=\(reader.composerMode); " + String(screen.suffix(450)))
-        guard discovered else { return }
-        let names = Set(reader.composer.textView.commandCatalog.filter { $0.sigil == "/" && $0.aliasOf == nil }.map(\.name))
-        report("TUI commands present in reader", observed.subtracting(names).isEmpty,
-               "Missing in reader: \(observed.subtracting(names).sorted().joined(separator: ",")).")
-        report("reader commands observed in TUI", names.subtracting(observed).isEmpty,
-               "Not observed in TUI: \(names.subtracting(observed).sorted().joined(separator: ",")).")
+        if CommandMenuProbe.supportsAutomaticHarvest(agent: agent) {
+            let discovered = wait(100, allowingMenu: true) { reader.hasObservedCommands && !reader.isDiscoveringCommands }
+            report("reader harvests its idle menu and restores input", discovered && CommandMenuScreen.emptyInput(screen, agent: agent),
+                   "identity waiting=\(chat.codexIdentityWaiting), probe active=\(reader.isDiscoveringCommands), composer=\(reader.composerMode); " + String(screen.suffix(450)))
+            guard discovered else { return }
+            let names = Set(reader.composer.textView.commandCatalog.filter { $0.sigil == "/" && $0.aliasOf == nil }.map(\.name))
+            report("TUI commands present in reader", observed.subtracting(names).isEmpty,
+                   "Missing in reader: \(observed.subtracting(names).sorted().joined(separator: ",")).")
+            report("reader commands observed in TUI", names.subtracting(observed).isEmpty,
+                   "Not observed in TUI: \(names.subtracting(observed).sorted().joined(separator: ",")).")
+        } else {
+            let loaded = wait(10) { !reader.composer.textView.commandCatalog.isEmpty }
+            let settled = pause(1)
+            report("automatic harvest disabled; catalogue leaves terminal input unchanged",
+                   loaded && settled && !reader.isDiscoveringCommands && !reader.hasObservedCommands &&
+                   inputBeforeDiscovery != nil && CommandMenuScreen.input(screen, agent: agent) == inputBeforeDiscovery &&
+                   reader.composer.textView.string == "/")
+        }
         reader.composer.textView.text = ""
 
         let sent = send("/model")
@@ -691,7 +720,9 @@ private final class LiveCheckSession {
                 observedStream = true
             }
         }
-        let temp = folder.appendingPathComponent("tmp/side-" + UUID().uuidString.lowercased())
+        // The parent remains in the trusted probe project. Only the side process changes
+        // directory, reproducing a fork requested from a folder with no Git ancestor.
+        let temp = FileManager.default.temporaryDirectory.appendingPathComponent("hantuu-live-side-" + UUID().uuidString.lowercased(), isDirectory: true)
         defer {
             store.stop(chat.id)
             let stopped = SelfTest.waitUntil(5) { !store.running.contains(chat.id) }
@@ -724,7 +755,9 @@ private final class LiveCheckSession {
         guard awaitAnswer("chat folder") else { return }
         do { try FileManager.default.createDirectory(at: temp, withIntermediateDirectories: true) }
         catch { report("fresh non-git folder created", false, error.localizedDescription); return }
-        report("fresh side folder has no Git ancestor", LiveCheckRules.gitAncestor(temp) == nil)
+        let outsideGit = LiveCheckRules.gitAncestor(temp) == nil
+        report("fresh side folder has no Git ancestor", outsideGit)
+        guard outsideGit else { return }
         observedStream = false
         let asked = store.ask(chat: chat.id, agent: agent, session: session, executable: executable,
                               folder: temp.path, question: "Repeat the token from the parent conversation. Reply only that token. Do not use tools.")
@@ -739,7 +772,7 @@ private final class LiveCheckSession {
     func sendNow() {
         let token = "received" + UUID().uuidString.prefix(8).lowercased()
         let finished = "finished" + UUID().uuidString.prefix(8).lowercased()
-        let first = "Without tools or file access, write every integer from 1 to 400, one per line. After each integer write: this is the next number in the sequence. Do not abbreviate, summarize, or skip any lines. Finish with \(finished)."
+        let first = "Without tools or file access, write every integer from 1 to 2000, one per line. Use exactly this line format: <integer> - this is the next number in the sequence. Do not abbreviate, summarize, or skip any lines. Finish with \(finished)."
         let second = "Stop counting now. Without tools, reply only \(token)."
         guard let chat else { return }
         func completedCount() -> Bool {
@@ -752,7 +785,7 @@ private final class LiveCheckSession {
         let busy = sent && wait(60) {
             let state = self.center?.state(of: chat.id)
             let screenBusy = TerminalScreen.analyze(self.screen).busy
-            guard !completedCount(), LiveCheckRules.canQueue(screenBusy: screenBusy,
+            guard !completedCount(), LiveCheckRules.countOutputStarted(self.screen), LiveCheckRules.canQueue(screenBusy: screenBusy,
                 turnActive: state?.turnActive == true, startedAt: state?.turnStartedAt, sentAt: sentAt,
                 typing: self.reader?.isTyping != false, composerWorking: self.reader?.composerMode.isWorking == true) else { return false }
             busyEvidence = "screen busy=\(screenBusy), turn active=\(state?.turnActive == true); " + String(self.screen.suffix(450))
@@ -762,21 +795,33 @@ private final class LiveCheckSession {
         report("count is running before queueing", busy, busyEvidence.isEmpty ? String(screen.suffix(450)) : busyEvidence)
         guard busy, let reader, let page = reader.reader?.page else { return }
         let id = chat.pendingMessages.entries.first(where: { $0.text == second })?.id
-        let actionable = queued && wait(8) {
-            reader.isTyping == false && !completedCount() &&
-                chat.pendingMessages.entries.contains { $0.id == id && $0.sendNowLabel != nil } &&
-                (SelfTest.js(page, "document.querySelectorAll('.send-now').length") as? Int ?? 0) > 0
-        }
-        report("native pending queue and reader Send now action observed", actionable,
-               "If the steer was accepted or the count finished before the action, this attempt cannot prove Send now. \(String(screen.suffix(450)))")
-        guard actionable, !completedCount(), safe(), let id else { return }
-        // Click the real DOM control. Its bridge validates the selected chat and invokes the
-        // same controller action used by the keyboard shortcut.
+        var nativeQueue = false
+        var labelShown = false
+        var actionable = false
         var accepted = false
         reader.reader?.onSendNow = { [weak reader] chatID, messageID in
             accepted = reader?.sendNow(chatID: chatID, id: messageID) == true
         }
-        _ = SelfTest.js(page, "document.querySelector('.send-now').click(); 0")
+        let observed = queued && wait(8) {
+            guard reader.isTyping == false, !completedCount() else { return false }
+            nativeQueue = nativeQueue || QueuedSendNow.available(agentID: self.agent, screen: self.screen)
+            labelShown = labelShown || chat.pendingMessages.entries.contains { $0.id == id && $0.sendNowLabel != nil }
+            guard nativeQueue, chat.pendingMessages.entries.contains(where: { $0.id == id && $0.sendNowLabel != nil }),
+                  let id, let data = try? JSONEncoder().encode(id), let literal = String(data: data, encoding: .utf8) else { return false }
+            // Click in the same observation that proves the action exists. Separate logging
+            // and another poll can let a fast provider consume the steer before the click.
+            actionable = (SelfTest.js(page, """
+                (() => { const row = Array.from(document.querySelectorAll('.entry.pending')).find(e => e.dataset.id === \(literal));
+                  const button = row && row.querySelector('.send-now'); if (!button) return false; button.click(); return true; })()
+                """) as? Bool) == true
+            return actionable
+        }
+        report("native pending queue observed", nativeQueue,
+               "A naturally accepted steer or an early completed count cannot prove Send now. " + String(screen.suffix(450)))
+        report("pending message exposes Send now label", labelShown,
+               "pending=\(chat.pendingMessages.entries.count), enabled=\(chat.pendingMessages.sendNowEnabled)")
+        report("reader renders and clicks Send now", observed && actionable)
+        guard observed, actionable, let id else { return }
         let requested = wait(3) { accepted }
         report("Send now requests delivery", requested)
         guard requested else { return }

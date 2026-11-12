@@ -17,6 +17,20 @@ extension SelfTest {
         check("send now: Claude requires its native queue hint",
               QueuedSendNow.available(agentID: "claude", screen: "ctrl+enter to send now") &&
               !QueuedSendNow.available(agentID: "claude", screen: "esc to interrupt"))
+        for hint in ["Press up to edit queued messages",
+                     "Press up to select a queued message, then Enter to edit it",
+                     "Press up to edit queued messages, Enter to send them immediately",
+                     "Press up to select a queued message to edit, or Enter to send them now"] {
+            check("send now: Claude native queue placeholder enables the action",
+                  QueuedSendNow.available(agentID: "claude", screen: "────────\n❯ " + hint + "\n────────\nesc to interrupt"))
+            check("send now: quoted queue placeholder cannot enable the action",
+                  !QueuedSendNow.available(agentID: "claude", screen: hint + "\n────────\n❯ \n────────\nesc to interrupt"))
+        }
+        check("send now: Claude editing a selected queue item is not a promotion hint",
+              !QueuedSendNow.available(agentID: "claude", screen: "❯ Press Enter to edit selected message"))
+        check("send now: Codex wrapped promotion hint remains eligible",
+              QueuedSendNow.available(agentID: "codex", screen: "Messages to be submitted after next tool call\n(press esc to interrupt and\nsend immediately)") &&
+              !QueuedSendNow.available(agentID: "codex", screen: "Queued follow-up inputs\nesc to interrupt"))
         for agent in ["claude", "codex", "other"] {
             var pending = PendingReaderMessages()
             pending.sendNowEnabled = true
@@ -67,10 +81,18 @@ extension SelfTest {
         guard waitUntil(10, { page.ready }) else { check("send now: reader loads", false); return }
         _ = js(page, """
             window.hantuu.reset({chatID:'queue',entries:[{id:'done',kind:'user',text:'Done'}],pending:[
-              {id:'supported',kind:'user',text:'Next',pending:true,sendNowLabel:'Send queue now'},
+              {id:'supported',kind:'user',text:'Next',pending:true},
               {id:'unsupported',kind:'user',text:'Other',pending:true}]});
             window.queueBubble = document.querySelector('[data-id=supported]'); 0
             """)
+        check("send now: unconfirmed native queue has no button", js(page, "!document.querySelector('.send-now')") as? Bool == true)
+        _ = js(page, """
+            window.hantuu.append({chatID:'queue',entries:[{id:'work',kind:'tool',text:'Running',operation:{name:'Shell',state:'running'}}],pending:[
+              {id:'supported',kind:'user',text:'Next',pending:true,sendNowLabel:'Send queue now'},
+              {id:'unsupported',kind:'user',text:'Other',pending:true}]}); 0
+            """)
+        check("send now: late native hint survives parity rendering without replacing its bubble",
+              js(page, "document.querySelector('.parity-entry') !== null && document.querySelector('[data-id=supported]') === window.queueBubble && window.queueBubble.querySelector('.send-now') !== null") as? Bool == true)
         check("send now: only supported pending bubbles have a native button",
               js(page, "document.querySelectorAll('button.send-now').length === 1 && document.querySelector('.send-now').tabIndex === 0 && document.querySelector('.send-now').textContent === 'Send queue now'") as? Bool == true)
         check("send now: queue buttons can receive keyboard focus",
@@ -96,7 +118,7 @@ extension SelfTest {
     private static func queuedSendNowTerminal(_ dir: URL, agent: String) {
         guard let ghostty = GhosttyApp.shared ?? GhosttyApp.start() else { check("send now: libghostty", false); return }
         let file = dir.appendingPathComponent("send-now-" + agent + ".bin")
-        let hint = agent == "codex" ? "(press esc to interrupt and send immediately)" : "ctrl+enter to send now"
+        let hint = agent == "codex" ? "(press esc to interrupt and send immediately)" : "❯ Press up to edit queued messages"
         let prompt = "? for shortcuts\nesc to interrupt\n" + hint + "\n"
         let script = "stty raw -echo; printf %s " + ShellEscape.quote(prompt) + "; exec cat -u > " + ShellEscape.quote(file.path)
         let terminal = TerminalView(app: ghostty.app, launch: .init(workingDirectory: dir.path,

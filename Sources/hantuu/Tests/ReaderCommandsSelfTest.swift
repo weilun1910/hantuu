@@ -78,6 +78,10 @@ extension SelfTest {
         check("commands keys: slash and model use their own key identities", GhosttyInput.commandKey("/").code == 44 && GhosttyInput.commandKey("m").code == 46 && GhosttyInput.commandKey("m").unshifted == 109)
         check("commands keys: namespace punctuation preserves shifted base keys", GhosttyInput.commandKey(":").code == 41 && GhosttyInput.commandKey(":").unshifted == 59 && GhosttyInput.commandKey(":").shift && GhosttyInput.commandKey("_").code == 27)
 
+        check("commands probe: automatic harvesting is limited to Claude",
+              CommandMenuProbe.supportsAutomaticHarvest(agent: "claude") &&
+              !CommandMenuProbe.supportsAutomaticHarvest(agent: "codex") &&
+              !CommandMenuProbe.supportsAutomaticHarvest(agent: "other"))
         check("commands probe: an empty first line does not erase a multiline draft", !CommandMenuScreen.emptyInput("❯ \n  unfinished second line\n────────\n? for shortcuts", agent: "claude") && !CommandMenuScreen.emptyInput("› \n  unfinished second line\nGPT-6 low", agent: "codex"))
         for suggestion in ["fix lint errors", "fix typecheck errors", "how does <filepath> work?", "refactor src/main.swift",
                            "how do I log an error?", "edit src/main.swift to...", "write a test for src/main.swift", "create a util logging.py that..."] {
@@ -87,6 +91,14 @@ extension SelfTest {
         check("commands probe: arbitrary Try text and queue hints remain drafts",
               !CommandMenuScreen.emptyInput("❯ Try \"delete everything\"", agent: "claude") &&
               !CommandMenuScreen.emptyInput("❯ Press up to edit queued messages", agent: "claude"))
+        let tallSuggestions = "❯ /\n" + (0..<30).map { "  /command\($0)  Description" }.joined(separator: "\n")
+        check("commands probe: a tall Claude popup retains its input row",
+              CommandMenuScreen.input(tallSuggestions, agent: "claude") == "/")
+        check("commands probe: an old prompt above output is not a tall menu",
+              CommandMenuScreen.input("❯ \n────────\n" + String(repeating: "Response output\n", count: 30), agent: "claude") == nil)
+        check("commands probe: Claude prompt whitespace is recognized without accepting a missing prompt",
+              CommandMenuScreen.emptyInput("────────\n❯\u{00a0}\n────────\n? for shortcuts", agent: "claude") &&
+              !CommandMenuScreen.emptyInput("Claude Code v2.1.322\n/project /rc\n────────", agent: "claude"))
         let aliases = CommandMenuScreen.reconcile(ReaderCommandCatalog.builtins(agent: "codex"), observed: [
             ReaderCommand(name: "side", description: "Side chat"), ReaderCommand(name: "exit", description: "Exit")
         ], complete: true)
@@ -140,6 +152,21 @@ extension SelfTest {
         let running = simulated.start()
         let finished = waitUntil(8) { completed != nil }
         check("commands probe: an asynchronous full scan restores the input before publishing", running && finished && complete && draft.isEmpty && cleanups == 1 && Set(completed?.map(\.name) ?? []) == Set(available))
+        var cleanupAt: Date?
+        var redrawComplete: Bool?
+        var delayedKeys: [String] = []
+        var delayedInput = ""
+        let delayed = CommandMenuProbe(agent: "claude", io: .init(screen: {
+            if let at = cleanupAt, Date().timeIntervalSince(at) >= 0.6 { return "❯ \n────────\n? for shortcuts" }
+            return "❯ " + delayedInput + (delayedInput.isEmpty ? "" : "\n/model  Choose model") + "\n? for shortcuts"
+        }, allowed: { true }, slash: { delayedInput = "/"; delayedKeys.append("/") }, down: {},
+            escape: { delayedKeys.append("Esc") }, backspace: { cleanupAt = Date(); delayedKeys.append("Backspace") })) { _, complete in
+                redrawComplete = complete
+            }
+        let delayedStarted = delayed.start()
+        check("commands probe: delayed cleanup redraw keeps observing without extra keys",
+              delayedStarted && waitUntil(8) { redrawComplete != nil } && redrawComplete == true &&
+              delayedKeys == ["/", "Esc", "Backspace"])
         check("commands probe: trust, update, approval and active turns cannot be scanned", ["Do you trust this folder?", "Update available", "Would you like to run this command?", "esc to interrupt"].allSatisfy { !CommandMenuScreen.safe($0) })
     }
 

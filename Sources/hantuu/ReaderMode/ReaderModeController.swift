@@ -461,7 +461,7 @@ final class ReaderModeController: NSObject {
     }
 
     private func mayProbe(_ chat: Chat, terminal: TerminalView) -> Bool {
-        ["claude", "codex"].contains(chat.agent.id) && commandDiscoveryEnabled && model.selectedChat === chat && chat.id == shownChatID &&
+        CommandMenuProbe.supportsAutomaticHarvest(agent: chat.agent.id) && commandDiscoveryEnabled && model.selectedChat === chat && chat.id == shownChatID &&
             chat.terminal === terminal && mode.showsReader(chat) && isLive(chat) &&
             model.subagentBrowser.selection == nil && composerMode == .ready && !typing && outbox.isEmpty &&
             chat.activity != .working && chat.activity != .background && !chat.activity.isNeeds &&

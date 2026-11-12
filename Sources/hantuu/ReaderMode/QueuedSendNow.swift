@@ -17,7 +17,14 @@ enum QueuedSendNow {
             // steer. Its queue hint is the evidence that Esc promotes rather than just stops.
             return normalized.contains("esc to interrupt and send immediately")
         }
-        return normalized.contains("ctrl+enter to send now") || normalized.contains("ctrl+x ctrl+s to send now")
+        if normalized.contains("ctrl+enter to send now") || normalized.contains("ctrl+x ctrl+s to send now") { return true }
+        // Claude 2.1.322 can show a queue-edit placeholder instead of the shortcut hint.
+        // Require the actual input row so quoted output cannot enable a native action.
+        guard let input = CommandMenuScreen.input(screen, agent: agentID) else { return false }
+        return ["Press up to edit queued messages",
+                "Press up to select a queued message, then Enter to edit it",
+                "Press up to edit queued messages, Enter to send them immediately",
+                "Press up to select a queued message to edit, or Enter to send them now"].contains(input)
     }
 
     static func action(agentID: String) -> Action? {
