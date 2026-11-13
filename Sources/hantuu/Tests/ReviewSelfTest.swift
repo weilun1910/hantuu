@@ -318,13 +318,6 @@ extension SelfTest {
     /// committed on a branch, one clean) and a worktree. Git writes here only touch these
     /// synthetic repositories in the self-test folder.
     static func reviewNestedRepositories(_ dir: URL) {
-        // The fixtures live inside hantuu's own checkout. Stop git at the test folder so a
-        // synthetic parent without .git can't resolve to the real repository.
-        let oldCeiling = ProcessInfo.processInfo.environment["GIT_CEILING_DIRECTORIES"]
-        setenv("GIT_CEILING_DIRECTORIES", dir.resolvingSymlinksInPath().path, 1)
-        defer {
-            if let oldCeiling { setenv("GIT_CEILING_DIRECTORIES", oldCeiling, 1) } else { unsetenv("GIT_CEILING_DIRECTORIES") }
-        }
         let parent = dir.appendingPathComponent("nested-projects")
         Paths.ensure(parent)
         func makeRepo(_ path: String) -> URL {
@@ -401,7 +394,7 @@ extension SelfTest {
         center.configure(model: model)
         center.setActiveTab(.changes)
         defer {
-            // Let queued git work finish while the ceiling still holds.
+            // Drain the queued Git work before leaving the fixture.
             center.setActiveTab(nil)
             var drained = false
             center.refreshGit { drained = true }

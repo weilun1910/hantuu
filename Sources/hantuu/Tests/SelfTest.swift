@@ -43,6 +43,12 @@ enum SelfTest {
         }
         try? FileManager.default.removeItem(at: workdir)
         Paths.ensure(workdir)
+        // Keep synthetic repositories from resolving to the enclosing checkout. Install
+        // the ceiling before libghostty starts: it retains the process environment.
+        let gitCeiling = workdir.resolvingSymlinksInPath().path
+        let existingCeiling = ProcessInfo.processInfo.environment["GIT_CEILING_DIRECTORIES"]
+        let ceilings = [gitCeiling, existingCeiling].compactMap { $0 }.joined(separator: ":")
+        setenv("GIT_CEILING_DIRECTORIES", ceilings, 1)
         print("hantuu self test, workdir \(workdir.path)\n")
 
         autoreleasepool { readerRequests() }
