@@ -21,18 +21,18 @@
 	<key>CFBundleShortVersionString</key>
 	<string>2.3</string>
 	<key>CFBundleVersion</key>
-	<string>6</string>
+	<string>8</string>
 	<key>LSApplicationCategoryType</key>
 	<string>public.app-category.developer-tools</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>26.0</string>
-	<key>NSAppleEventsUsageDescription</key>
-	<string>hantuu asks macOS for administrator rights only when you turn Keep awake on or off.</string>
 	<key>NSAppTransportSecurity</key>
 	<dict>
 		<key>NSAllowsArbitraryLoadsInWebContent</key>
 		<true/>
 	</dict>
+	<key>NSAppleEventsUsageDescription</key>
+	<string>hantuu asks macOS for administrator rights only when you turn Keep awake on or off.</string>
 	<key>NSHighResolutionCapable</key>
 	<true/>
 	<key>NSPrincipalClass</key>
