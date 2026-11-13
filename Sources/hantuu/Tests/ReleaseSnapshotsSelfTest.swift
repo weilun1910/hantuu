@@ -78,6 +78,7 @@ extension SelfTest {
         settings.showChatsAsReader = true
         let mode = ReaderMode(settings: settings)
         let controller = ReaderModeController(model: model, mode: mode, commandCatalog: ReaderCommandCatalog(home: home))
+        controller.commandDiscoveryEnabled = false
         controller.statusProvider = { _ in nil }
 
         let view = FillView(color: Theme.background)
@@ -139,7 +140,7 @@ extension SelfTest {
         }
 
         let text = controller.composer.textView
-        text.insertTyped(agent == "claude" ? "/c" : "/")
+        text.insertTyped(agent == "claude" ? "/ch" : "/")
         check("release snapshots: \(agent) command menu includes fixture skills", waitUntil(5) {
             text.commandCatalog.contains { $0.name == "check-layout" }
                 && text.commandMenuVisible && !controller.commandMenu.isHidden
@@ -147,7 +148,7 @@ extension SelfTest {
         if agent == "claude" {
             check("release snapshots: Claude shows built-ins beside a project skill",
                   text.commandSuggestions.prefix(6).contains { $0.name == "check-layout" && $0.source == "project skill" }
-                  && text.commandSuggestions.prefix(6).contains { $0.source.isEmpty })
+                  && text.commandSuggestions.prefix(6).contains { $0.name == "chrome" && $0.source == "CLI fallback" })
         } else {
             check("release snapshots: Codex slash menu keeps dollar skills separate",
                   text.commandSuggestions.allSatisfy { $0.sigil == "/" }
@@ -157,25 +158,29 @@ extension SelfTest {
         text.text = ""
         text.setSelectedRange(NSRange(location: 0, length: 0))
 
-        // Send through the real composer transport to the recording shell while the fixture
-        // chat is working. Nothing here launches or sends input to an installed agent CLI.
+        // The app retains queued input while the fixture chat is working. Once it becomes
+        // idle, the real composer transport sends the message to the recording shell.
         if agent == "claude" {
             chat.activity = .working
             chat.activityDetail = "Checking the settings layout"
             chat.activitySince = Date()
             controller.refresh()
-            text.text = "Please check the narrow window too."
-            check("release snapshots: a working chat accepts a queued send", controller.send())
-            check("release snapshots: queued text reaches the recording shell", waitUntil(5) {
-                guard let bytes = try? Data(contentsOf: sent) else { return false }
-                return bytes.last == 0x0D
-                    && String(decoding: bytes, as: UTF8.self).contains("Please check the narrow window too.")
-            })
+            let followUp = "Please check the narrow window too."
+            text.text = followUp
+            check("release snapshots: a working chat accepts a queued send", controller.send(intent: .queue))
             check("release snapshots: Queued is visible under a working agent", waitUntil(5) {
                 controller.composerMode.isWorking
                     && (js(page, "(() => { const label = document.querySelector('.queued-label'); return label?.textContent === 'Queued' && getComputedStyle(label).display !== 'none' && document.querySelectorAll('.entry.pending').length === 1; })()") as? Bool) == true
             })
             snapshot("reader-queued")
+            check("release snapshots: a queued message leaves the recording shell untouched while busy",
+                  (try? Data(contentsOf: sent)) == Data())
+            chat.activity = .idle
+            controller.refresh()
+            let expected = Data("\u{1b}[200~\(followUp)\u{1b}[201~\r".utf8)
+            check("release snapshots: the queued message reaches the recording shell after the chat goes idle", waitUntil(6) {
+                (try? Data(contentsOf: sent)) == expected && !controller.isTyping
+            })
         }
     }
 }
