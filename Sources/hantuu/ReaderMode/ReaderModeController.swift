@@ -53,6 +53,7 @@ final class ReaderModeController: NSObject {
     private var observedMenus: [UUID: ObservedMenu] = [:]
     private var commandSentAt: [UUID: Date] = [:]
     private var commandPeekAt: [UUID: Date] = [:]
+    private var inputReviewPeeks = Set<UUID>()
     private var commandMenuHeight: NSLayoutConstraint!
     let status = ReaderModeStatusModel()
     private(set) var statusHost: NSView!
@@ -425,6 +426,7 @@ final class ReaderModeController: NSObject {
         if mode.face(of: chat) != .reader { observedMenus[chat.id] = nil }
         let live = isLive(chat)
         let peeking = mode.isPeeking(chat) && live
+        if !peeking { inputReviewPeeks.remove(chat.id) }
         if mode.isPeeking(chat) && !live { mode.endPeek(chat) }
         if shows { ensureReader() }
         root.isHidden = !shows
@@ -527,6 +529,11 @@ final class ReaderModeController: NSObject {
             let screen = TerminalScreen.analyze(raw)
             observeRestoredInput(chat, terminal: terminal, raw: raw, screen: screen)
             let st = statusProvider(chat)
+            if protectInterruptedInput(chat, raw: raw, screen: screen, status: st) ||
+                initialInputBlocked(chat, raw: raw, screen: screen, status: st) {
+                queueReadySince[chat.id] = nil
+                continue
+            }
             let editing = editingQueueIDs[chat.id] != nil
             let controlWaiting = model.selectedChatID == chat.id && pendingControl != nil
             let ready = ReaderQueueDrain.canStart(screen: screen, activity: chat.activity,
@@ -573,6 +580,31 @@ final class ReaderModeController: NSObject {
             chat.pendingMessages.inputNeedsReview = true
             cancelTransport(chat, reason: "The terminal restored input. Check it before resending.")
         }
+    }
+
+    private func isInterrupted(_ chat: Chat, status: StatusState?) -> Bool {
+        let replayed = status?.idleNote == "Interrupted" ? status?.interruptedAt : nil
+        let interruption = max(stoppedAt[chat.id] ?? .distantPast, replayed ?? .distantPast)
+        return interruption > (submittedAt[chat.id] ?? .distantPast)
+    }
+
+    private func initialInputBlocked(_ chat: Chat, raw: String, screen: TerminalScreen.State, status: StatusState?, command: Bool = false) -> Bool {
+        ReaderSubmissionGuard.initialInputBlocked(screen: raw, state: screen, agent: chat.agentID, command: command,
+                                                  interrupted: isInterrupted(chat, status: status))
+    }
+
+    /// The native input redraw can follow the status change or be replayed after reattach.
+    /// Inspect the current terminal even when the original send has already been acknowledged.
+    @discardableResult
+    private func protectInterruptedInput(_ chat: Chat, raw: String, screen: TerminalScreen.State, status: StatusState?) -> Bool {
+        if chat.pendingMessages.inputNeedsReview { return true }
+        let interrupted = isInterrupted(chat, status: status)
+        guard menuProbeChatID != chat.id, status?.waits.isEmpty != false, !chat.activity.isNeeds,
+              !outbox.contains(where: { $0.chatID == chat.id && $0.typedAny }),
+              ReaderSubmissionGuard.hasInterruptedInput(screen: raw, state: screen, agent: chat.agentID, interrupted: interrupted) else { return false }
+        chat.pendingMessages.inputNeedsReview = true
+        cancelTransport(chat, reason: "The terminal restored input after interruption. Review it before sending again.")
+        return true
     }
 
     // MARK: State
@@ -643,6 +675,9 @@ final class ReaderModeController: NSObject {
             }
         }
         let st = statusProvider(chat)
+        if screenIsStable, live, mode.face(of: chat) == .reader {
+            protectInterruptedInput(chat, raw: rawScreen, screen: screen, status: st)
+        }
         if st?.structured == true { readyChats.insert(chat.id) }
         // Agents hantuu has no signals for are taken as ready.
         let ready = readyChats.contains(chat.id) || chat.agent.transcript == nil
@@ -676,7 +711,9 @@ final class ReaderModeController: NSObject {
         // A peek ends once nothing has waited in the terminal for two checks in a row.
         if screenIsStable, mode.isPeeking(chat) {
             let commandWaiting = commandPeekAt[chat.id].map { Date().timeIntervalSince($0) < 2 || !screen.ready || screen.busy } ?? false
-            if composerMode.isBlocked || !live || commandWaiting {
+            let inputWaiting = inputReviewPeeks.contains(chat.id) &&
+                chat.terminal.map { !CommandMenuScreen.emptyInput($0.activeScreenText(), agent: chat.agentID) } == true
+            if composerMode.isBlocked || !live || commandWaiting || inputWaiting {
                 calmChecks = 0
             } else {
                 calmChecks += 1
@@ -901,6 +938,14 @@ final class ReaderModeController: NSObject {
             NSSound.beep()
             return false
         }
+        if !outbox.contains(where: { $0.chatID == chat.id }), !composerMode.isWorking, t.geometryIsStable {
+            let raw = t.activeScreenText()
+            let command = text.flatMap(ComposerCommandTransport.invocation) != nil
+            if initialInputBlocked(chat, raw: raw, screen: TerminalScreen.analyze(raw), status: statusProvider(chat), command: command) {
+                showTerminalForInputReview(chat)
+                return false
+            }
+        }
         if let editingQueueID, chat.pendingMessages.stage(id: editingQueueID) != .waiting {
             recoveryLabel.stringValue = "This queued message changed. Cancel editing to restore your previous draft."
             return false
@@ -934,8 +979,13 @@ final class ReaderModeController: NSObject {
     func sendPanelFeedback(text: String, chatID: UUID, id: String) -> Bool {
         guard let chat = model.selectedChat, chat.id == chatID,
               let terminal = chat.terminal, isLive(chat), let text = ComposerMessage.prepare(text) else { return false }
-        let screen = TerminalScreen.analyze(terminal.activeScreenText())
+        let raw = terminal.activeScreenText()
+        let screen = TerminalScreen.analyze(raw)
         let status = statusProvider(chat)
+        if terminal.geometryIsStable, !outbox.contains(where: { $0.chatID == chat.id }) {
+            if protectInterruptedInput(chat, raw: raw, screen: screen, status: status) { return false }
+            if initialInputBlocked(chat, raw: raw, screen: screen, status: status) { return false }
+        }
         let input = ComposerMode.Input(agentName: chat.agent.name, ended: chat.status == .ended,
             live: true, activity: chat.activity, detail: chat.activityDetail,
             waiting: status.map { !$0.waits.isEmpty } ?? chat.activity.isNeeds,
@@ -1072,6 +1122,11 @@ final class ReaderModeController: NSObject {
               model.chats.contains(where: { $0 === chat }), !chat.codexIdentityWaiting,
               chat.status != .ended, !terminal.processExited,
               !chat.pendingMessages.inputNeedsReview, !preparing.contains(id), !outbox.contains(where: { $0.id == id }) else { return }
+        if terminal.geometryIsStable, !outbox.contains(where: { $0.chatID == chat.id }) {
+            let raw = terminal.activeScreenText()
+            let command = recovery.text.flatMap(ComposerCommandTransport.invocation) != nil
+            guard !initialInputBlocked(chat, raw: raw, screen: TerminalScreen.analyze(raw), status: statusProvider(chat), command: command) else { return }
+        }
         // A queue from a different conversation is recoverable, but never replayed into it.
         guard recovery.sessionID == chat.sessionID else {
             chat.pendingMessages.update(id: id, stage: .failed, detail: "The conversation changed. Restore this message for review before sending.")
@@ -1165,13 +1220,21 @@ final class ReaderModeController: NSObject {
             recoveryLabel.stringValue = "\(action.label) will open after this turn."
             return
         }
-        guard composerMode == .ready, !isTyping, !chat.pendingMessages.inputNeedsReview else { return }
+        guard composerMode == .ready, !isTyping, !chat.pendingMessages.inputNeedsReview,
+              let terminal = chat.terminal else { return }
         if action == .plan, controlsState?.planNeedsTerminal == true { showTerminal(); return }
+        if terminal.geometryIsStable {
+            let raw = terminal.activeScreenText()
+            if initialInputBlocked(chat, raw: raw, screen: TerminalScreen.analyze(raw), status: statusProvider(chat), command: true) {
+                showTerminalForInputReview(chat)
+                return
+            }
+        }
         let command = action.command(for: provider)
         let id = "control-" + UUID().uuidString
         chat.pendingMessages.enqueue(id: id, text: command, files: [], agentID: chat.agentID, existing: chat.allEntries, stage: .typing, sessionID: chat.sessionID)
         model.save()
-        type([.command(command), .pressReturn], into: chat.terminal!, chatID: chat.id, id: id, queued: true)
+        type([.command(command), .pressReturn], into: terminal, chatID: chat.id, id: id, queued: true)
         // Observe the dialog after it opens. Recognized menus stay in the reader.
         commandSentAt[chat.id] = Date()
     }
@@ -1223,8 +1286,15 @@ final class ReaderModeController: NSObject {
     private func canType(_ id: String) -> Bool {
         guard currentTransport(id), let first = outbox.first, first.terminal.geometryIsStable,
               let chat = model.chats.first(where: { $0.id == first.chatID }), !chat.codexIdentityWaiting else { return false }
-        let waits = chat.activity.isNeeds || (statusProvider(chat).map { !$0.waits.isEmpty } ?? false)
-        return ReaderSubmissionGuard.refusal(screen: first.terminal.activeScreenText(), waiting: waits, command: first.command) == nil &&
+        let status = statusProvider(chat)
+        let waits = chat.activity.isNeeds || status?.waits.isEmpty == false
+        let raw = first.terminal.activeScreenText()
+        if !first.typedAny {
+            let screen = TerminalScreen.analyze(raw)
+            if protectInterruptedInput(chat, raw: raw, screen: screen, status: status) { return false }
+            if initialInputBlocked(chat, raw: raw, screen: screen, status: status, command: first.command != nil) { return false }
+        }
+        return ReaderSubmissionGuard.refusal(screen: raw, waiting: waits, command: first.command) == nil &&
             permitsSubmit(first.terminal) && (!first.tracksPending || chat.pendingMessages.stage(id: id) == .typing)
     }
 
@@ -1660,11 +1730,17 @@ final class ReaderModeController: NSObject {
         return false
     }
 
+    private func showTerminalForInputReview(_ chat: Chat) {
+        inputReviewPeeks.insert(chat.id)
+        showTerminal()
+    }
+
     /// Shows the live terminal so a menu can be answered there.
     func showTerminal() {
         clearMirroredMenu()
         cancelMenuProbe()
         guard let chat = model.selectedChat, isLive(chat) else { return }
+        if chat.pendingMessages.inputNeedsReview { inputReviewPeeks.insert(chat.id) }
         calmChecks = 0
         mode.peek(chat)
         if let t = chat.terminal { model.focusRequest.send(t) }
@@ -1678,6 +1754,7 @@ final class ReaderModeController: NSObject {
     }
 
     private func finishPeek(_ chat: Chat) {
+        inputReviewPeeks.remove(chat.id)
         mode.endPeek(chat)
         if let t = chat.terminal { model.focusRequest.send(t) }
         // The face change schedules layout through Combine. Focus again after that layout,

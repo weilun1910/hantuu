@@ -43,6 +43,8 @@ struct StatusState: Equatable {
     var doneAt: Date?
     /// Shown instead of "Done 2m ago": "Interrupted", "Stopped: API Error: ...".
     var idleNote: String?
+    /// Timestamp of the last interruption for disambiguating a later transport's redraw.
+    var interruptedAt: Date?
     var lastMessage: String?
     /// Claude tool calls between PreToolUse and PostToolUse, by tool_use_id.
     var running: [String: ToolCall] = [:]
@@ -192,7 +194,7 @@ enum StatusReducer {
             st.idleNote = "Stopped: " + ToolCall.oneLine(reason)
 
         case .interrupted:
-            interrupt(&st)
+            interrupt(&st, at: ctx.now)
 
         case .notification(let type, let message):
             let text = ToolCall.oneLine(message)
@@ -241,7 +243,7 @@ enum StatusReducer {
             }
             if st.codexOpen.isEmpty {
                 if reason == "interrupted" {
-                    interrupt(&st)
+                    interrupt(&st, at: ctx.now)
                 } else {
                     endTurn(&st, ctx, last: nil)
                     st.idleNote = "Stopped"
@@ -374,7 +376,7 @@ enum StatusReducer {
         st.unseen = !ctx.focused
     }
 
-    private static func interrupt(_ st: inout StatusState) {
+    private static func interrupt(_ st: inout StatusState, at time: Date) {
         st.turnActive = false
         st.progressActive = false
         st.waits.removeAll()
@@ -383,6 +385,7 @@ enum StatusReducer {
         st.finalQuestion = nil
         st.unseen = false
         st.idleNote = "Interrupted"
+        st.interruptedAt = time
     }
 
     private static func reset(_ st: inout StatusState) {

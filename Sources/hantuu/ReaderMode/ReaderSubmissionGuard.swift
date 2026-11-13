@@ -2,6 +2,17 @@ import Foundation
 
 /// Every delayed transport step checks current evidence, not the state at button-down.
 enum ReaderSubmissionGuard {
+    static func initialInputBlocked(screen: String, state: TerminalScreen.State, agent: String, command: Bool, interrupted: Bool) -> Bool {
+        guard agent == "claude" || agent == "codex", !state.busy, command || interrupted else { return false }
+        let input = CommandMenuScreen.input(screen, agent: agent)
+        return !CommandMenuScreen.emptyInput(screen, agent: agent) && (interrupted || input != nil)
+    }
+
+    static func hasInterruptedInput(screen: String, state: TerminalScreen.State, agent: String, interrupted: Bool) -> Bool {
+        interrupted && state.ready && state.menu == nil && CommandMenuScreen.input(screen, agent: agent) != nil &&
+            initialInputBlocked(screen: screen, state: state, agent: agent, command: false, interrupted: true)
+    }
+
     static func refusal(screen: String, waiting: Bool, command: String?) -> String? {
         if waiting { return "The agent is waiting for an answer in the terminal." }
         let tail = screen.split(whereSeparator: \.isNewline).suffix(16).joined(separator: "\n")

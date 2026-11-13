@@ -35,6 +35,34 @@ extension SelfTest {
               ReaderMenuParser.parse(permissionsRules, agent: "claude") == nil &&
               ReaderCommandLogic.autoPeek(sentAt: Date(), now: Date(), menu: TerminalScreen.analyze(permissionsRules).menu))
 
+        for provider in ["claude", "codex"] {
+            let marker = provider == "claude" ? "❯" : "›"
+            let placeholder = provider == "claude" ? "Try \"fix lint errors\"" : "Ask Codex to do anything"
+            let prompt = "Count to 300 and spell out each number."
+            func native(_ input: String, footer: String = "? for shortcuts") -> String {
+                "\(marker) \(prompt)\n\n────────────────────\n\(marker) \(input)\n────────────────────\n\(footer)"
+            }
+            func protect(_ raw: String, interrupted: Bool = true) -> Bool {
+                ReaderSubmissionGuard.hasInterruptedInput(screen: raw, state: TerminalScreen.analyze(raw), agent: provider, interrupted: interrupted)
+            }
+            let empty = native("")
+            let restored = native(prompt)
+            check("stop input: \(provider) an initially idle redraw does not hide later restored input",
+                  !protect(empty) && protect(restored) && !protect(restored, interrupted: false))
+            check("stop input: \(provider) placeholders, busy screens and menus do not become restored input",
+                  !protect(native(placeholder)) && !protect(native(prompt, footer: "esc to interrupt")) &&
+                  !protect(native(prompt, footer: "Do you trust this folder?")))
+            let multiline = native("first line\nsecond line")
+            let multilineState = TerminalScreen.analyze(multiline)
+            check("stop input: \(provider) an unknown interrupted input holds new text and commands",
+                  !protect(multiline) && [false, true].allSatisfy {
+                      ReaderSubmissionGuard.initialInputBlocked(screen: multiline, state: multilineState, agent: provider, command: $0, interrupted: true)
+                  })
+            check("stop input: \(provider) a normal command cannot join an occupied native prompt",
+                  ReaderSubmissionGuard.initialInputBlocked(screen: restored, state: TerminalScreen.analyze(restored), agent: provider, command: true, interrupted: false) &&
+                  !ReaderSubmissionGuard.initialInputBlocked(screen: empty, state: TerminalScreen.analyze(empty), agent: provider, command: true, interrupted: true))
+        }
+
         let terminalIdentity = NSObject()
         for provider in ["claude", "codex"] {
             for text in ["ordinary prompt", "/model", "/rename fixture-title"] {

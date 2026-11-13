@@ -11,7 +11,8 @@ enum LiveCheckRules {
     /// Process-only overrides for disposable probes, including `exec` side questions.
     /// Never change AgentDefinition or saved Codex configuration to suppress a test menu.
     static let codexProcessConfiguration = ["-c", "check_for_update_on_startup=false"]
-    static let features = ["slash", "queued", "send-now", "relaunch", "subagents", "reader", "review", "sidebar", "side", "composer", "command-arguments", "layout", "menus"]
+    static let features = ["slash", "queued", "send-now", "relaunch", "subagents", "reader", "review", "sidebar", "side", "composer", "command-arguments", "layout", "menus", "composer-relaunch"]
+    static let defaultFeatures = features.filter { $0 != "menus" && $0 != "composer-relaunch" }
 
     /// The only permission the menus probe can approve is its generated printf token.
     static func menuProbeCommandMatches(inputJSON: String, expected: String) -> Bool {
@@ -371,6 +372,9 @@ extension SelfTest {
               LiveCheckRules.replyAfter(newPrompt.text, entries: [newPrompt, oldReply], previousIDs: priorIDs) == nil)
         check("live checks: side feature is selectable for both agents",
               LiveCheckRules.selection("side", allowed: LiveCheckRules.features) == ["side"])
+        check("live checks: focused composer relaunch is opt-in because composer already covers it",
+              LiveCheckRules.selection("composer-relaunch", allowed: LiveCheckRules.features) == ["composer-relaunch"] &&
+              LiveCheckRules.defaultFeatures.contains("composer") && !LiveCheckRules.defaultFeatures.contains("composer-relaunch"))
         let fakeRoot = URL(fileURLWithPath: "/fixture/project")
         var nestedProbes = 0
         let nestedAncestor = LiveCheckRules.gitAncestor(fakeRoot.appendingPathComponent("tmp/fresh"), exists: {
@@ -414,8 +418,8 @@ extension SelfTest {
         let env = ProcessInfo.processInfo.environment
         guard let raw = env["HANTUU_LIVE"], !raw.isEmpty else { return }
         guard let agents = LiveCheckRules.selection(env["HANTUU_LIVE_AGENTS"], allowed: LiveCheckRules.agents),
-              let features = LiveCheckRules.selection(env["HANTUU_LIVE_FEATURES"] ?? LiveCheckRules.features.filter { $0 != "menus" }.joined(separator: ","), allowed: LiveCheckRules.features) else {
-            check("live configuration: selectors", false, "Use claude,codex and slash,queued,send-now,relaunch,subagents,reader,review,sidebar,side,composer,command-arguments,layout,menus.")
+              let features = LiveCheckRules.selection(env["HANTUU_LIVE_FEATURES"] ?? LiveCheckRules.defaultFeatures.joined(separator: ","), allowed: LiveCheckRules.features) else {
+            check("live configuration: selectors", false, "Use claude,codex and slash,queued,send-now,relaunch,subagents,reader,review,sidebar,side,composer,command-arguments,layout,menus,composer-relaunch.")
             return
         }
         let folder = URL(fileURLWithPath: raw).standardizedFileURL.resolvingSymlinksInPath()
@@ -471,6 +475,7 @@ extension SelfTest {
                     case "sidebar": probe.sidebar()
                     case "side": probe.sideQuestions()
                     case "composer": probe.composerParity()
+                    case "composer-relaunch": probe.composerRelaunch()
                     case "command-arguments": probe.commandArguments()
                     case "layout": probe.layoutProbe()
                     case "menus": probe.menus()
@@ -1708,13 +1713,14 @@ private final class LiveCheckSession {
         report("sidebar Home and End stay on visible rows", app.visibleSidebarTargets.contains(app.sidebarCursor ?? .pinned))
     }
 
+    private func descendants(_ view: NSView) -> [NSView] {
+        [view] + view.subviews.flatMap { descendants($0) }
+    }
+
     /// Opt-in only. Exercises the mounted controller against a disposable provider session.
     /// No picker option, trust dialog, permission request or update prompt is accepted.
     func composerParity() {
         guard let reader, let chat, let provider = chat.agent.transcript, safe() else { report("mounted composer", false); return }
-        func descendants(_ view: NSView) -> [NSView] {
-            [view] + view.subviews.flatMap { descendants($0) }
-        }
         guard let controls = descendants(reader.root).compactMap({ $0 as? ComposerAgentControlsView }).first else {
             report("native controls mounted", false); return
         }
@@ -1849,6 +1855,14 @@ private final class LiveCheckSession {
                reader.composer.textView.selectedRange() == recallSelection && !reader.isTyping &&
                chat.allEntries.filter { $0.kind == .user }.count == usersBeforeRecall)
 
+        composerRelaunch()
+    }
+
+    /// Can run by itself to recheck Stop, input recovery and Plan with a single model turn.
+    func composerRelaunch() {
+        guard let reader, let chat, safe() else { report("mounted composer", false); return }
+        let draft = "Unsent composer draft " + UUID().uuidString
+        let selection = NSRange(location: 7, length: 8)
         let busyPrompt = "Without tools, count slowly from 1 to 300, one number per line, spelling out each number and its square."
         let queuedPrompt = "Without tools, reply only held" + UUID().uuidString.prefix(8).lowercased() + "."
         let busySent = send(busyPrompt)
@@ -1903,8 +1917,56 @@ private final class LiveCheckSession {
         let planButton = newControls.flatMap { controls in
             descendants(controls).compactMap({ $0 as? NSButton }).first(where: { $0.tag == ComposerAgentControlAction.plan.rawValue })
         }
-        let planAvailable = planReady && safe() && planButton?.isEnabled == true
         let state = center?.state(of: restoredChat.id)
+        let interrupted = planReady && restoredChat.activity == .idle && state?.turnActive == false
+        report("relaunch replays the interrupted turn as Idle", interrupted)
+        guard interrupted else { return }
+        let restoredInput = CommandMenuScreen.input(screen, agent: agent)
+        if restoredInput == busyPrompt && !restoredChat.pendingMessages.inputNeedsReview {
+            report("the restored prompt requires input review", false)
+            return
+        }
+        if restoredChat.pendingMessages.inputNeedsReview {
+            guard let terminal = restoredChat.terminal, terminal === self.terminal,
+                  let reviewed = descendants(activeReader.root).compactMap({ $0 as? NSButton }).first(where: { $0.title == "Input reviewed" }),
+                  !reviewed.isHiddenOrHasHiddenAncestor, reviewed.isEnabled, planButton?.isEnabled == false else {
+                report("restored input blocks Plan and offers Input reviewed", false)
+                return
+            }
+            report("restored input blocks Plan and offers Input reviewed", true)
+            let native = TerminalScreen.analyze(screen)
+            let ownDraft = safe() && native.ready && !native.busy && native.menu == nil && restoredInput == busyPrompt
+            report("only the known probe prompt is eligible for clearing", ownDraft,
+                   "native input=\(String(describing: restoredInput))")
+            guard ownDraft else { return }
+            let receipts = countUser(busyPrompt)
+            activeReader.showTerminal()
+            let stayedOpen = pause(1.5) && mode?.isPeeking(restoredChat) == true && activeReader.root.isHidden
+            report("terminal stays visible while the restored prompt needs review", stayedOpen)
+            guard stayedOpen, safe(), CommandMenuScreen.input(screen, agent: agent) == busyPrompt else {
+                report("owned terminal still shows the probe prompt before deletion", false)
+                return
+            }
+            terminal.pressBackspace(times: busyPrompt.count)
+            let cleared = wait(10) { CommandMenuScreen.emptyInput(self.screen, agent: self.agent) }
+            report("Backspace clears the restored prompt without submitting it", cleared)
+            guard cleared, safe() else { return }
+            let visible = wait(10) {
+                self.mode?.isPeeking(restoredChat) == false && !reviewed.isHiddenOrHasHiddenAncestor && reviewed.isEnabled
+            }
+            report("the reader returns with Input reviewed after clearing the terminal", visible)
+            guard visible else { return }
+            reviewed.performClick(nil)
+            let recovered = wait(10) {
+                !restoredChat.pendingMessages.inputNeedsReview && planButton?.isEnabled == true &&
+                    activeReader.composer.textView.string == draft && activeReader.composer.textView.selectedRange() == selection &&
+                    restoredChat.pendingMessages.queuePaused && restoredChat.pendingMessages.stage(id: queuedID) == .waiting &&
+                    receipts >= 0 && self.countUser(busyPrompt) == receipts && self.countUser(queuedPrompt) == 0
+            }
+            report("Input reviewed enables Plan without sending the paused queue or changing the draft", recovered)
+            guard recovered else { return }
+        }
+        let planAvailable = planReady && safe() && planButton?.isEnabled == true
         report("Plan control available after relaunch", planAvailable,
                "ready=\(planReady), mode=\(String(describing: activeReader.composerMode)), typing=\(activeReader.isTyping), activity=\(restoredChat.activity.rawValue), detail=\(restoredChat.activityDetail.debugDescription), turn active=\(state?.turnActive == true), waits=\(state?.waits.count ?? 0), input review=\(restoredChat.pendingMessages.inputNeedsReview), controls found=\(newControls != nil), button found=\(planButton != nil), enabled=\(planButton?.isEnabled == true), session=\(restoredChat.sessionID ?? "missing"), TUI=\(String(screen.suffix(1800)).debugDescription)")
         guard planAvailable, let newControls, let planButton else { return }

@@ -521,7 +521,7 @@ extension SelfTest {
 
     /// A "chat" whose program shows an idle prompt line, turns on bracketed paste and records
     /// every byte it gets.
-    static func recordingTerminal(_ g: GhosttyApp, dir: URL, file: URL, acknowledgeImageBytes: Int? = nil) -> TerminalView {
+    static func recordingTerminal(_ g: GhosttyApp, dir: URL, file: URL, acknowledgeImageBytes: Int? = nil, prompt: String = "") -> TerminalView {
         try? FileManager.default.removeItem(at: file)
         let recording: String
         if let count = acknowledgeImageBytes {
@@ -529,7 +529,8 @@ extension SelfTest {
         } else {
             recording = "exec cat -u > \(ShellEscape.quote(file.path))"
         }
-        let script = "stty -icanon -icrnl -echo min 1 time 0; printf '\\033[?2004h'; printf '  ? for shortcuts\\n'; " + recording
+        let promptText = ShellEscape.quote(prompt + "\n  ? for shortcuts\n")
+        let script = "stty -icanon -icrnl -echo min 1 time 0; printf '\\033[?2004h'; printf %s " + promptText + "; " + recording
         return TerminalView(app: g.app, launch: .init(workingDirectory: dir.path, command: "/bin/sh -c \(ShellEscape.quote(script))"), handlesChildExit: true)
     }
 
@@ -648,7 +649,7 @@ extension SelfTest {
         model.projects = [project]
         let chat = Chat(projectID: project.id, agentID: "claude")
         let sent = dir.appendingPathComponent("sent.bin")
-        let tv = recordingTerminal(g, dir: dir, file: sent)
+        let tv = recordingTerminal(g, dir: dir, file: sent, prompt: "❯ ")
         chat.terminal = tv
         model.chats = [chat]
         model.selectedChatID = chat.id

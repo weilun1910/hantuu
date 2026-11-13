@@ -479,12 +479,17 @@ extension SelfTest {
         let replayNotices = NoticeRecorder()
         replayCenter.notifier = replayNotices
         replayCenter.start(model: reloaded, live: false)
+        let replayedStop = replayCenter.state(of: reattached.id)
         check("engine: relaunch preserves a stopped turn without a native Stop hook",
-              reattached.activity == .idle && replayCenter.state(of: reattached.id)?.turnActive == false && replayNotices.posted.isEmpty)
+              reattached.activity == .idle && replayedStop?.turnActive == false && replayNotices.posted.isEmpty)
+        check("engine: the replayed interruption still identifies its original time",
+              replayedStop?.idleNote == "Interrupted" && replayedStop?.interruptedAt != nil &&
+              abs(replayedStop?.interruptedAt?.timeIntervalSinceNow ?? 60) < 10)
         append(stopFile, [startRecord])
         replayCenter.poll()
         check("engine: a later native prompt supersedes the reader Stop checkpoint",
-              reattached.activity == .working && replayCenter.state(of: reattached.id)?.turnActive == true)
+              reattached.activity == .working && replayCenter.state(of: reattached.id)?.turnActive == true &&
+              replayCenter.state(of: reattached.id)?.idleNote == nil)
     }
 
     // MARK: Snapshots
