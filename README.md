@@ -4,6 +4,8 @@
 
 # hantuu
 
+**Proof of concept.** I use it myself, but it isn't fully developed yet.
+
 hantuu is a native Mac app for running coding agents like Claude Code and Codex. Every chat is a real terminal powered by Ghostty. Press Shift-Cmd-R and the same chat turns into a reader that's easy on the eyes, with images, PDFs and LaTeX rendered properly and a message box to keep talking.
 
 The name comes from "hantu", the Malay word for ghost, made a little cuter the same way Ghostty did with "ghost".
